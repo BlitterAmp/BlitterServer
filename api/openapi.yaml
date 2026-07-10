@@ -11,9 +11,20 @@ info:
     transcoding, acquisition (Lidarr), last.fm, and cross-device taste/follow
     state.
 
-    **Auth realms:** device endpoints use a bearer token minted via PIN pairing;
-    `/admin/api/*` uses an admin cookie session. The WebSocket event channel is
-    documented in `docs/architecture.md` (envelope + event catalog).
+    **Auth realms:** device endpoints use bearer tokens; `/admin/api/*` uses an
+    admin cookie session. The WebSocket event channel is documented in
+    `docs/architecture.md` (envelope + event catalog).
+
+    **Users are household profiles** (Netflix-style, passwordless, optional
+    PIN; created by the admin in the web admin UI). PIN pairing mints a
+    **device token** whose only powers are listing profiles and exchanging for
+    **profile tokens** (`POST /v1/profile-tokens`). Everything else requires a
+    profile token and is implicitly scoped to that profile: playlists,
+    ratings, taste, follows, play history, home rails, last.fm connection.
+    Shared across profiles: the library, the artifact cache, and acquisition
+    (new-release watching is the union of everyone's artist follows).
+    Profile switching in-app = using a different cached profile token; no
+    admin involvement after the one-time device pairing approval.
 
     **Conventions:** JSON everywhere; opaque string ids; list endpoints paginate
     with `offset`/`limit` and return `total`; errors are a Problem object.
@@ -26,6 +37,7 @@ servers:
 tags:
   - name: system
   - name: pairing
+  - name: profiles
   - name: library
   - name: search
   - name: discovery
@@ -86,13 +98,13 @@ paths:
   /v1/me:
     get:
       tags: [system]
-      summary: The calling device's identity
+      summary: The calling token's identity (device + profile when profile-scoped)
       responses:
         "200":
-          description: Device
+          description: Identity
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/Device" }
+              schema: { $ref: "#/components/schemas/Me" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
   # ───────────────────────────── pairing ─────────────────────────────
@@ -146,9 +158,97 @@ paths:
                 required: [status]
                 properties:
                   status: { type: string, enum: [pending, approved, denied, expired] }
-                  token: { type: string, nullable: true, description: "Present once, when status=approved" }
+                  token: { type: string, nullable: true, description: "DEVICE token, present once when status=approved — exchange it for a profile token via /v1/profile-tokens" }
                   deviceId: { type: string, nullable: true }
         "404": { $ref: "#/components/responses/NotFound" }
+
+  # ───────────────────────────── profiles ─────────────────────────────
+  /v1/profiles:
+    get:
+      tags: [profiles]
+      summary: Household profiles (for the in-app profile switcher)
+      description: Accepts device OR profile tokens. Profiles are created by the admin in the web admin UI.
+      responses:
+        "200":
+          description: Profiles
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Profile" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/profile-tokens:
+    post:
+      tags: [profiles]
+      summary: Exchange into a profile (mints a profile-scoped bearer token)
+      description: |
+        Accepts device OR profile tokens (switching does not require going back
+        through the device token). `pin` required only when the target profile
+        has one. Apps cache one token per profile; switching profiles = using a
+        different cached token, so queued offline requests keep the attribution
+        of the profile they were made under.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [profileId]
+              properties:
+                profileId: { type: string }
+                pin: { type: string, nullable: true }
+      responses:
+        "201":
+          description: Profile token
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token, profile]
+                properties:
+                  token: { type: string }
+                  profile: { $ref: "#/components/schemas/Profile" }
+        "403": { description: PIN required or wrong, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/me/lastfm:
+    get:
+      tags: [profiles]
+      summary: Calling profile's last.fm connection state
+      responses:
+        "200":
+          description: State
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [available, connected]
+                properties:
+                  available: { type: boolean, description: Instance has last.fm API credentials (admin-configured) }
+                  connected: { type: boolean }
+                  username: { type: string, nullable: true }
+    delete:
+      tags: [profiles]
+      summary: Disconnect the calling profile's last.fm
+      responses:
+        "204": { description: Disconnected }
+
+  /v1/me/lastfm/connect:
+    post:
+      tags: [profiles]
+      summary: Start last.fm auth for the calling profile (open the returned URL; completes via callback)
+      responses:
+        "201":
+          description: Auth URL
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [url]
+                properties:
+                  url: { type: string }
+        "409": { description: Instance has no last.fm API credentials, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
 
   # ───────────────────────────── library ─────────────────────────────
   /v1/library:
@@ -366,7 +466,11 @@ paths:
   /v1/playlists:
     get:
       tags: [library]
-      summary: List playlists
+      summary: List playlists — the calling profile's own plus read-only source playlists
+      description: |
+        Playlists are Blittarr-native and per-profile (`origin: blittarr`).
+        Playlists that exist in the source (Plex) surface read-only to every
+        profile as `origin: source`; mutations on them return 403.
       responses:
         "200":
           description: Playlists
@@ -377,7 +481,7 @@ paths:
                 items: { $ref: "#/components/schemas/Playlist" }
     post:
       tags: [library]
-      summary: Create playlist
+      summary: Create a playlist (Blittarr-native, owned by the calling profile)
       requestBody:
         required: true
         content:
@@ -493,7 +597,7 @@ paths:
   /v1/ratings:
     put:
       tags: [library]
-      summary: Rate an item (track or artist), source-backed
+      summary: Rate an item (track or artist) — Blittarr-native, per profile
       requestBody:
         required: true
         content:
@@ -533,7 +637,7 @@ paths:
   /v1/home:
     get:
       tags: [discovery]
-      summary: Server-composed home rails
+      summary: Server-composed home rails (personalized to the calling profile)
       responses:
         "200":
           description: Rails
@@ -617,10 +721,12 @@ paths:
   /v1/playback/events:
     post:
       tags: [playback]
-      summary: Report playback events (batched; feeds taste, scrobbles, recently-played)
+      summary: Report playback events (batched; feeds the calling profile's taste, scrobbles, recently-played)
       description: |
         Apps queue events offline and flush in order. Idempotency: events carry a
-        client-generated `eventId`; duplicates are ignored.
+        client-generated `eventId`; duplicates are ignored. Attribution follows
+        the token — events queued under one profile stay that profile's even if
+        the device has since switched.
       requestBody:
         required: true
         content:
@@ -639,7 +745,7 @@ paths:
   /v1/taste/snapshot:
     get:
       tags: [playback]
-      summary: Taste profile snapshot (per-item stats for UI badges/panels)
+      summary: The calling profile's taste snapshot (per-item stats for UI badges/panels)
       responses:
         "200":
           description: Snapshot
@@ -771,7 +877,7 @@ paths:
   /v1/follows:
     get:
       tags: [follows]
-      summary: List follows
+      summary: The calling profile's follows
       responses:
         "200":
           description: Follows
@@ -782,7 +888,11 @@ paths:
                 items: { $ref: "#/components/schemas/FollowRecord" }
     put:
       tags: [follows]
-      summary: Follow (idempotent). Artist follow triggers acquisition + new-release watching server-side.
+      summary: Follow (idempotent, per profile). Artist follow triggers acquisition + new-release watching server-side.
+      description: |
+        Acquisition/watching is instance-level — Blittarr watches an artist while
+        ANY profile follows them; unfollow stops watching only when the last
+        following profile lets go. Media acquired is never removed by unfollow.
       requestBody:
         required: true
         content:
@@ -828,8 +938,11 @@ paths:
       tags: [events]
       summary: WebSocket upgrade — typed event stream
       description: |
-        Standard WS upgrade authenticated with the device bearer token.
-        Envelope `{type, at, data}`; event catalog in docs/architecture.md.
+        Standard WS upgrade authenticated with a profile token. Envelope
+        `{type, at, data}`; event catalog in docs/architecture.md. Instance
+        events (library.changed, artifact.updated, acquisition.updated) go to
+        every connection; profile-scoped events (playlist.changed,
+        follow.updated, taste.updated) only to that profile's connections.
         Clients MUST ignore unknown event types.
       responses:
         "101": { description: Switching protocols }
@@ -1038,21 +1151,72 @@ paths:
       responses:
         "204": { description: Removed }
 
-  /admin/api/integrations/lastfm/connect:
-    post:
+  /admin/api/profiles:
+    get:
       tags: [admin]
-      summary: Start last.fm user auth (returns URL to open; completes via callback)
+      summary: List household profiles
       security: [{ adminSession: [] }]
       responses:
-        "201":
-          description: Auth URL
+        "200":
+          description: Profiles
           content:
             application/json:
               schema:
-                type: object
-                required: [url]
-                properties:
-                  url: { type: string }
+                type: array
+                items: { $ref: "#/components/schemas/Profile" }
+    post:
+      tags: [admin]
+      summary: Create a profile
+      security: [{ adminSession: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                pin: { type: string, nullable: true, description: Optional 4-8 digit PIN }
+                avatarColor: { type: string, nullable: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Profile" }
+
+  /admin/api/profiles/{profileId}:
+    patch:
+      tags: [admin]
+      summary: Update a profile (rename, set/clear PIN, color)
+      security: [{ adminSession: [] }]
+      parameters: [{ name: profileId, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                pin: { type: string, nullable: true, description: New PIN; explicit null clears it }
+                avatarColor: { type: string, nullable: true }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Profile" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [admin]
+      summary: Delete a profile (its playlists/taste/follows/history go with it; paired devices fall back to the profile picker)
+      security: [{ adminSession: [] }]
+      parameters: [{ name: profileId, in: path, required: true, schema: { type: string } }]
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /admin/api/pairings:
     get:
@@ -1224,7 +1388,7 @@ components:
       required: [acquisition, lastfm, transcodeFormats]
       properties:
         acquisition: { type: boolean, description: Follow(artist) will acquire; Activity view available }
-        lastfm: { type: boolean }
+        lastfm: { type: boolean, description: Instance credentials present — profiles can connect via /v1/me/lastfm }
         transcodeFormats:
           type: array
           items: { type: string, enum: [original, aac] }
@@ -1240,6 +1404,24 @@ components:
         type: { type: string, enum: [ios, desktop, web, other] }
         pairedAt: { type: string, format: date-time }
         lastSeenAt: { type: string, format: date-time, nullable: true }
+
+    Profile:
+      type: object
+      required: [profileId, name, hasPin]
+      properties:
+        profileId: { type: string }
+        name: { type: string }
+        hasPin: { type: boolean }
+        avatarColor: { type: string, nullable: true, description: Hex color for the profile chip }
+
+    Me:
+      type: object
+      required: [device]
+      properties:
+        device: { $ref: "#/components/schemas/Device" }
+        profile:
+          allOf: [{ $ref: "#/components/schemas/Profile" }]
+          description: Absent when called with a device token
 
     PairingRequest:
       type: object
@@ -1330,7 +1512,7 @@ components:
         albumTitle: { type: string }
         durationMs: { type: integer }
         artId: { type: string, nullable: true }
-        userRating10: { type: integer, nullable: true }
+        userRating10: { type: integer, nullable: true, description: The calling profile's rating }
         genres:
           type: array
           items: { type: string }
@@ -1355,14 +1537,18 @@ components:
 
     Playlist:
       type: object
-      required: [playlistId, title, trackCount]
+      required: [playlistId, title, trackCount, origin]
       properties:
         playlistId: { type: string }
         title: { type: string }
         trackCount: { type: integer }
         durationMs: { type: integer, nullable: true }
         artId: { type: string, nullable: true }
-        smart: { type: boolean, default: false, description: Source-defined smart playlist (read-only) }
+        origin:
+          type: string
+          enum: [blittarr, source]
+          description: blittarr = the calling profile's own (mutable); source = surfaced from Plex, read-only, visible to all profiles
+        smart: { type: boolean, default: false, description: Source-defined smart playlist }
         updatedAt: { type: integer, format: int64, nullable: true }
 
     PlaylistTrack:
@@ -1567,7 +1753,7 @@ components:
 
     AdminState:
       type: object
-      required: [setupComplete, source, integrations, pendingPairings, deviceCount]
+      required: [setupComplete, source, integrations, pendingPairings, deviceCount, profileCount]
       properties:
         setupComplete: { type: boolean }
         source:
@@ -1584,6 +1770,7 @@ components:
             lastfm: { type: string, enum: [absent, configured, connected, error] }
         pendingPairings: { type: integer }
         deviceCount: { type: integer }
+        profileCount: { type: integer }
 
     LidarrConfig:
       type: object
@@ -1596,11 +1783,10 @@ components:
 
     LastfmConfig:
       type: object
-      required: [configured, connected]
+      required: [configured]
       properties:
-        configured: { type: boolean, description: API credentials present }
-        connected: { type: boolean, description: User session established }
-        username: { type: string, nullable: true }
+        configured: { type: boolean, description: Instance API credentials present }
+        connectedProfiles: { type: integer, description: "How many profiles have connected their last.fm account (connections are per profile, via /v1/me/lastfm)" }
 
     IntegrationTestResult:
       type: object
