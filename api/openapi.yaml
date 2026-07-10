@@ -707,6 +707,10 @@ paths:
         Idempotent per (trackId, format, bitrateKbps): re-requesting returns the
         existing artifact. `format: original` artifacts are immediately `ready`.
         Progress and readiness arrive via WS `artifact.updated`.
+
+        Each artifact carries `albumId` + `artId` so sync flows can prefetch
+        album art (one fetch per distinct albumId) and downloaded content
+        renders with art offline.
       requestBody:
         required: true
         content:
@@ -1504,6 +1508,8 @@ components:
       properties:
         artifactId: { type: string }
         trackId: { type: string }
+        albumId: { type: string, nullable: true, description: "Grouping key for offline art (one art fetch per album, not per track)" }
+        artId: { type: string, nullable: true, description: "Album art for the track — sync flows prefetch /v1/art/{artId} alongside the file so downloaded content has art offline" }
         format: { type: string, enum: [original, aac] }
         bitrateKbps: { type: integer, nullable: true }
         status: { type: string, enum: [queued, processing, ready, failed] }
