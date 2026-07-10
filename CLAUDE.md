@@ -1,25 +1,23 @@
 # Blittarr — Project Instructions
 
-The self-hosted backend service for **BlitterAmp** (the player app at `BlitterAmp/BlitterAmp`; both grew out of `matjam/musex` — its CLAUDE.md holds the accumulated platform history). Blittarr is a **middleman**: the apps talk ONLY to Blittarr; Blittarr owns the music source (Plex first, Jellyfin/Navidrome later), server-side transcoding, Lidarr acquisition, last.fm, and cross-device taste/follow/playback state.
+The self-hosted backend service for **BlitterAmp** (the player app at `BlitterAmp/BlitterAmp`; both grew out of `matjam/musex` — its CLAUDE.md holds the accumulated platform history). Blittarr is a **middleman**: the apps talk ONLY to Blittarr; Blittarr owns the music source (Plex first, Jellyfin/Navidrome later), server-side transcoding, Lidarr acquisition, last.fm, and cross-device taste/love/playback/social state.
+
+## Where the design lives (POLICY — decided 2026-07-10)
+
+**This repo carries only the current, accurate implementation and API documentation.** All architecture design, specs, plans, decision history, and session notes live in the AgentOS vault: `~/Documents/Vaults/AgentOS/Apps/BlitterAmp/` (`Blittarr Architecture.md`, `Blittarr v1 Session-2 Design.md`, `Decisions.md`). Read the vault before proposing changes; write design/decision updates THERE, not here. Do not add design docs, specs, or plans to this repo.
+
+**Current drift warning:** `api/openapi.yaml` predates the 2026-07-10 session-2 reconciliation — it still says WebSocket `/v1/ws`, `follows`, and offset/limit pagination. The vault's session-2 work list (SSE `/v1/events`, Love/Not-for-me tri-state, cursor pagination, social resources, QR pairing) is the authoritative direction; the spec-iteration arc brings the YAML current.
 
 ## Non-negotiables
 
 - **Contract-first.** `api/openapi.yaml` is the source of truth. Iterate the spec BEFORE writing handlers; server stubs and the apps' TS client are generated from it. A behavior change that isn't in the spec is a bug.
-- **Go**, single static binary, embedded web admin assets. Single-tenant self-host (hosted/multi-tenant mode is explicitly shelved — don't build for it, don't preclude it: keep auth a real layer).
-- **Hexagonal.** The music source is a port (`MusicSource`); Plex is an adapter. Same for acquisition (Lidarr) and scrobbling (last.fm). Domain logic never imports an adapter.
+- **TDD, no exceptions (user directive 2026-07-10).** Tests first for every endpoint and feature, then implementation: contract tests (generated client → running server), Go table tests against fake ports (`MusicSource`/Lidarr/last.fm) written before handlers, real-ffmpeg fixture tests (generated sine fixtures), env-gated live-Plex smoke (`BLITTARR_PLEX_E2E`).
+- **Go**, single static binary, embedded web admin assets (Svelte + DaisyUI SPA, node-built, `go:embed`). Single-tenant self-host (hosted/multi-tenant mode is explicitly shelved — don't build for it, don't preclude it: keep auth a real layer).
+- **Hexagonal.** The music source is a port (`MusicSource`); Plex is an adapter. Same for acquisition (Lidarr), scrobbling/discovery (last.fm), transcoding (ffmpeg). Domain logic never imports an adapter.
 - **Deploy targets:** manual from source (`go build`), prebuilt tarballs, Docker. ffmpeg is invoked as an external binary (system dep on bare metal, bundled in the Docker image) — never assume a GUI host.
 - No silently swallowed errors. 401s from Plex surface as source-disconnected, never retry-loops.
 
 ## Git workflow
 
-- Remote: `git@github.com:BlitterAmp/Blittarr.git`. Feature branches + PRs once main has history; conventional-commit PR titles (squash-merge, same regime as musex).
+- Remote: `git@github.com:BlitterAmp/Blittarr.git`. Feature branches + PRs; conventional-commit PR titles (squash-merge, same regime as musex).
 - `git add -A` always; push after every commit; full test/lint bar locally before push.
-
-## Key decisions (2026-07-10, brainstormed in musex session)
-
-- **Auth:** PIN pairing → long-lived per-device bearer tokens; per-device revocation. Admin realm is separate (cookie session, password set at first run).
-- **Users = household profiles (2026-07-10):** Netflix-style, passwordless, optional PIN, created ONLY by the admin in the web admin. Device token (from pairing) can only list profiles + mint profile tokens; everything else takes a profile token and is implicitly profile-scoped (playlists, ratings, taste, follows, history, last.fm session). Per-profile data is **Blittarr-native SQLite** — NOT written to Plex (source playlists surface read-only, `origin: source`). Shared across profiles: library, artifact cache, acquisition (watching = union of profiles' artist follows; last unfollow stops watching). In-app profile switching = swapping cached profile tokens; attribution of queued offline requests follows the token they were made under.
-- **Admin:** embedded web UI (setup wizard, Plex PIN link, integrations, device/pairing management).
-- **Events:** WebSocket (`GET /v1/ws`), typed JSON envelope — protocol catalog in `docs/architecture.md`.
-- **Downloads are artifacts:** clients never transcode. `POST /v1/artifacts` requests a (track, format, bitrate) artifact; Blittarr transcodes/caches; client downloads a complete file with exact `Content-Length` (feeds BlitterAmp iOS's native background engine + size-verify). Rationale: the on-device AAC pipeline failed in the field (1000 songs = 90GB) and Plex's transcode-session reaping made device-driven HLS stitching unworkable in background.
-- **Follow verb:** follow(artist) = Lidarr ensure + monitor new releases + back-catalog search; unfollow stops watching, keeps media. iOS ships Follow-only UI (App Store 5.2.3 posture — no acquisition surface on the phone).
