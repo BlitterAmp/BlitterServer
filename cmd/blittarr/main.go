@@ -37,14 +37,7 @@ func run() error {
 	cfgPath = *cp
 
 	// Strip --config from args before handing to config.Load.
-	filtered := make([]string, 0, len(args))
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--config" || args[i] == "-config" {
-			i++
-			continue
-		}
-		filtered = append(filtered, args[i])
-	}
+	filtered := stripConfigArgs(args)
 
 	cfg, err := config.Load(cfgPath, filtered, os.Getenv)
 	if err != nil {
