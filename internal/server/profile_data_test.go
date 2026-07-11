@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/BlitterAmp/BlitterServer/internal/api"
+	"github.com/BlitterAmp/BlitterServer/internal/artifacts"
 	"github.com/BlitterAmp/BlitterServer/internal/auth"
 	"github.com/BlitterAmp/BlitterServer/internal/events"
 	"github.com/BlitterAmp/BlitterServer/internal/library"
@@ -18,7 +19,8 @@ func dataSrv(t *testing.T) (*Server, *store.Store, *events.Bus, context.Context,
 	st := testStore(t)
 	seedLibrary(t, st) // 3 tracks: One/Two (Alpha/AA), Three (Beta/BB)
 	bus := events.NewBus(st)
-	s := NewFull(st, library.NewManager(st, t.TempDir()), bus, "test")
+	lib := library.NewManager(st, t.TempDir())
+	s := NewFull(st, lib, bus, artifacts.NewManager(st, lib, bus, t.TempDir()), "test")
 	ctx := context.Background()
 	dev, _ := st.CreateDevice(ctx, "d", "ios")
 	p1, _ := st.CreateProfileRecord(ctx, "Nathan", "", "")

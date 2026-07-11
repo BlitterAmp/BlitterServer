@@ -6,6 +6,7 @@ import (
 	"context"
 
 	"github.com/BlitterAmp/BlitterServer/internal/api"
+	"github.com/BlitterAmp/BlitterServer/internal/artifacts"
 	"github.com/BlitterAmp/BlitterServer/internal/events"
 	"github.com/BlitterAmp/BlitterServer/internal/library"
 	"github.com/BlitterAmp/BlitterServer/internal/store"
@@ -17,6 +18,7 @@ type Server struct {
 	st      *store.Store
 	lib     *library.Manager
 	bus     *events.Bus
+	art     *artifacts.Manager
 	version string
 }
 
@@ -28,13 +30,14 @@ func New(st *store.Store, version string) *Server {
 }
 
 func NewWithLibrary(st *store.Store, lib *library.Manager, version string) *Server {
-	return NewFull(st, lib, events.NewBus(st), version)
+	bus := events.NewBus(st)
+	return NewFull(st, lib, bus, artifacts.NewManager(st, lib, bus, ""), version)
 }
 
 // NewFull wires every dependency explicitly (the HTTP layer shares the bus
-// with the SSE handler).
-func NewFull(st *store.Store, lib *library.Manager, bus *events.Bus, version string) *Server {
-	return &Server{st: st, lib: lib, bus: bus, version: version}
+// with the SSE handler and owns the artifact worker's lifecycle).
+func NewFull(st *store.Store, lib *library.Manager, bus *events.Bus, art *artifacts.Manager, version string) *Server {
+	return &Server{st: st, lib: lib, bus: bus, art: art, version: version}
 }
 
 func (s *Server) GetPing(ctx context.Context, _ api.GetPingRequestObject) (api.GetPingResponseObject, error) {

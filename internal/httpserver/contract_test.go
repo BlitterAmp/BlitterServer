@@ -148,7 +148,9 @@ func TestEveryUnimplementedOperationAnswersHonestly(t *testing.T) {
 		"setRating": true, "setLove": true, "listLoves": true,
 		"reportPlaybackEvents": true, "getTasteSnapshot": true, "getPresence": true,
 		"createRecommendation": true, "listRecommendations": true, "markRecommendationSeen": true,
-		"streamEvents": true,
+		"streamEvents":     true,
+		"requestArtifacts": true, "getArtifact": true, "releaseArtifact": true,
+		"downloadArtifact": true,
 	}
 	client := ts.Client()
 
