@@ -8,7 +8,7 @@ info:
   description: |
     The BlitterAmp middleman service. Apps (BlitterAmp iOS/desktop) talk only to
     this API; Blittarr owns the music source (Plex in v1), server-side
-    transcoding, acquisition (Lidarr), last.fm, and cross-device taste/follow
+    transcoding, acquisition (Lidarr), last.fm, and cross-device taste/love
     state.
 
     **Auth realms:** device endpoints use bearer tokens; `/admin/api/*` uses an
@@ -20,9 +20,9 @@ info:
     **device token** whose only powers are listing profiles and exchanging for
     **profile tokens** (`POST /v1/profile-tokens`). Everything else requires a
     profile token and is implicitly scoped to that profile: playlists,
-    ratings, taste, follows, play history, home rails, last.fm connection.
+    ratings, taste, loves, play history, home rails, last.fm connection.
     Shared across profiles: the library, the artifact cache, and acquisition
-    (new-release watching is the union of everyone's artist follows).
+    (new-release watching is the union of everyone's artist loves).
     Profile switching in-app = using a different cached profile token; no
     admin involvement after the one-time device pairing approval.
 
@@ -53,7 +53,7 @@ tags:
   - { name: playback, description: Playback event ingestion and taste snapshot }
   - { name: streaming, description: "Direct-play streaming, stream grants, artwork" }
   - { name: artifacts, description: Pre-transcoded download artifacts }
-  - { name: follows, description: Follow/unfollow and acquisition activity }
+  - { name: loves, description: Love / Not-for-me tri-state and acquisition activity }
   - { name: events, description: Server-push event stream }
   - { name: admin, description: Admin web UI API (cookie session realm) }
 
@@ -785,9 +785,9 @@ paths:
       summary: Report playback events (batched; feeds the calling profile's taste, scrobbles, recently-played)
       description: |
         Apps queue events offline and flush in order. Idempotency: events carry a
-        client-generated `eventId`; duplicates are ignored. Attribution follows
-        the token — events queued under one profile stay that profile's even if
-        the device has since switched.
+        client-generated `eventId`; duplicates are ignored. Attribution is
+        keyed to the token — events queued under one profile stay that
+        profile's even if the device has since switched.
       requestBody:
         required: true
         content:
@@ -947,63 +947,76 @@ paths:
         "409": { description: Not ready yet, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
 
-  # ───────────────────────────── follows ─────────────────────────────
-  /v1/follows:
+  # ───────────────────────────── loves ─────────────────────────────
+  /v1/loves:
     get:
-      operationId: listFollows
-      tags: [follows]
-      summary: The calling profile's follows
+      operationId: listLoves
+      tags: [loves]
+      summary: The calling profile's non-neutral love records (paged)
+      parameters:
+        - $ref: "#/components/parameters/cursor"
+        - $ref: "#/components/parameters/limit"
+        - { name: kind, in: query, required: false, schema: { type: string, enum: [artist, album, track] } }
+        - { name: state, in: query, required: false, schema: { type: string, enum: [loved, not_for_me] } }
       responses:
         "200":
-          description: Follows
+          description: Love records
           content:
             application/json:
               schema:
-                type: array
-                items: { $ref: "#/components/schemas/FollowRecord" }
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    required: [items]
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/LoveRecord" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/loves/{ref}:
     put:
-      operationId: follow
-      tags: [follows]
-      summary: Follow (idempotent, per profile). Artist follow triggers acquisition + new-release watching server-side.
+      operationId: setLove
+      tags: [loves]
+      summary: Set the tri-state love for an item (idempotent, per profile)
       description: |
-        Acquisition/watching is instance-level — Blittarr watches an artist while
-        ANY profile follows them; unfollow stops watching only when the last
-        following profile lets go. Media acquired is never removed by unfollow.
+        `ref` is a canonical id (`art_`/`alb_`/`trk_` — the kind derives from
+        the prefix). External artists surfaced by search/similar/discover carry
+        canonical ids too, so they are lovable before they are owned.
+
+        `loved` on an artist → Lidarr ensure + monitor + back-catalog search;
+        on a track → auto "Loved Tracks" playlist + `track.love` relay to the
+        profile's connected last.fm. `not_for_me` = never surface in any
+        generated playlist/mix/radio/discovery **for this profile only**.
+        `neutral` clears either state.
+
+        Instance-level: Blittarr watches/acquires an artist while ≥1 profile
+        loves it (union); removing the last love stops watching but never
+        removes media.
+      parameters:
+        - { name: ref, in: path, required: true, schema: { type: string, example: art_9f3kq2 } }
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [kind, name]
+              required: [state]
               properties:
-                kind: { type: string, enum: [artist, album, track] }
-                name: { type: string, description: Artist name (or album/track title) }
-                itemId: { type: string, nullable: true, description: Library id when owned }
-                artistName: { type: string, nullable: true, description: For album/track follows }
+                state: { $ref: "#/components/schemas/LoveState" }
       responses:
         "200":
-          description: Follow record (existing or created)
+          description: Resulting love record
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/FollowRecord" }
+              schema: { $ref: "#/components/schemas/LoveRecord" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-
-  /v1/follows/{followId}:
-    delete:
-      operationId: unfollow
-      tags: [follows]
-      summary: Unfollow (stops new-release watching; keeps acquired media)
-      parameters: [{ name: followId, in: path, required: true, schema: { type: string } }]
-      responses:
-        "204": { description: Unfollowed }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/acquisition/activity:
     get:
       operationId: getAcquisitionActivity
-      tags: [follows]
+      tags: [loves]
       summary: Acquisition activity (desktop Activity view; empty when no acquirer configured)
       responses:
         "200":
@@ -1024,7 +1037,7 @@ paths:
         `{type, at, data}`; event catalog in docs/architecture.md. Instance
         events (library.changed, artifact.updated, acquisition.updated) go to
         every connection; profile-scoped events (playlist.changed,
-        follow.updated, taste.updated) only to that profile's connections.
+        love.updated, taste.updated) only to that profile's connections.
         Clients MUST ignore unknown event types.
       responses:
         "101": { description: Switching protocols }
@@ -1327,7 +1340,7 @@ paths:
     delete:
       operationId: adminDeleteProfile
       tags: [admin]
-      summary: Delete a profile (its playlists/taste/follows/history go with it; paired devices fall back to the profile picker)
+      summary: Delete a profile (its playlists/taste/loves/history go with it; paired devices fall back to the profile picker)
       security: [{ adminSession: [] }]
       parameters: [{ name: profileId, in: path, required: true, schema: { type: string } }]
       responses:
@@ -1518,7 +1531,7 @@ components:
       type: object
       required: [acquisition, lastfm, transcodeFormats]
       properties:
-        acquisition: { type: boolean, description: Follow(artist) will acquire; Activity view available }
+        acquisition: { type: boolean, description: Love(artist) will acquire; Activity view available }
         lastfm: { type: boolean, description: Instance credentials present — profiles can connect via /v1/me/lastfm }
         transcodeFormats:
           type: array
@@ -1594,6 +1607,7 @@ components:
           items: { type: string }
         albumCount: { type: integer, nullable: true }
         userRating10: { type: integer, nullable: true }
+        loveState: { $ref: "#/components/schemas/LoveState", description: "The calling profile's tri-state; absent = neutral" }
 
     ArtistDetail:
       allOf:
@@ -1602,7 +1616,7 @@ components:
           properties:
             bio: { type: string, nullable: true, description: "HTML-stripped, from last.fm when available" }
             trackCount: { type: integer, nullable: true }
-            followed: { type: boolean }
+            loveState: { $ref: "#/components/schemas/LoveState" }
             stats:
               type: object
               nullable: true
@@ -1628,6 +1642,7 @@ components:
           items: { type: string }
         trackCount: { type: integer, nullable: true }
         updatedAt: { type: integer, format: int64, nullable: true, description: For client cache validators }
+        loveState: { $ref: "#/components/schemas/LoveState" }
 
     Track:
       type: object
@@ -1648,6 +1663,7 @@ components:
           type: array
           items: { type: string }
         media: { $ref: "#/components/schemas/MediaInfo" }
+        loveState: { $ref: "#/components/schemas/LoveState" }
 
     MediaInfo:
       type: object
@@ -1692,14 +1708,14 @@ components:
 
     SimilarArtist:
       type: object
-      required: [name, owned]
+      required: [name, owned, artistId]
       properties:
         name: { type: string }
         owned: { type: boolean }
-        artistId: { type: string, nullable: true, description: Set when owned }
+        artistId: { type: string, description: Canonical id (always set; external artists get ids minted on first surface) }
         artId: { type: string, nullable: true, example: img_4c5d6e }
         match: { type: number, nullable: true, minimum: 0, maximum: 1 }
-        followed: { type: boolean }
+        loveState: { $ref: "#/components/schemas/LoveState" }
 
     SearchResults:
       type: object
@@ -1763,14 +1779,14 @@ components:
 
     ExternalArtist:
       type: object
-      required: [name, owned]
+      required: [name, owned, artistId]
       properties:
         name: { type: string }
         owned: { type: boolean }
-        artistId: { type: string, nullable: true }
+        artistId: { type: string, description: Canonical id (always set; external artists get ids minted on first surface) }
         bio: { type: string, nullable: true }
         artId: { type: string, nullable: true, example: img_4c5d6e }
-        followed: { type: boolean }
+        loveState: { $ref: "#/components/schemas/LoveState" }
         similar:
           type: array
           items: { $ref: "#/components/schemas/SimilarArtist" }
@@ -1833,21 +1849,31 @@ components:
         bytes: { type: integer, format: int64, nullable: true, description: Exact size once ready }
         error: { type: string, nullable: true }
 
-    FollowRecord:
+    LoveState:
+      type: string
+      enum: [loved, neutral, not_for_me]
+      description: Per-profile tri-state; neutral records are not persisted/listed
+
+    LoveRecord:
       type: object
-      required: [followId, kind, name, followedAt, state]
+      required: [loveId, ref, kind, state, name, updatedAt]
       properties:
-        followId: { type: string }
+        loveId: { type: string, example: lov_6r5e4w }
+        ref: { type: string, example: art_9f3kq2, description: Canonical id of the loved item }
         kind: { type: string, enum: [artist, album, track] }
+        state: { $ref: "#/components/schemas/LoveState" }
         name: { type: string }
-        artistName: { type: string, nullable: true }
-        itemId: { type: string, nullable: true }
-        followedAt: { type: string, format: date-time }
-        state:
-          type: string
-          enum: [local, watching, acquiring, error]
-          description: local = favorite only (no acquirer / album / track); watching = Lidarr monitoring; acquiring = back-catalog search in flight
-        error: { type: string, nullable: true }
+        artistName: { type: string, nullable: true, description: For album/track loves }
+        owned: { type: boolean, description: Item is in the library (false = external artist being acquired) }
+        updatedAt: { type: string, format: date-time }
+        acquisition:
+          type: object
+          nullable: true
+          description: Artist loves only; absent when no acquirer configured
+          required: [state]
+          properties:
+            state: { type: string, enum: [watching, acquiring, error] }
+            error: { type: string, nullable: true }
 
     AcquisitionActivity:
       type: object
