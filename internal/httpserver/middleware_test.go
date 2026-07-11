@@ -1,12 +1,15 @@
 package httpserver
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/BlitterAmp/Blittarr/internal/logging"
 	"github.com/BlitterAmp/Blittarr/internal/store"
 )
 
@@ -80,14 +83,25 @@ func TestRecoverTurnsPanicInto500Problem(t *testing.T) {
 }
 
 func TestRequestLoggerInstallsContextLogger(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(prev)
+
 	var sawRequestID bool
 	h := RequestLogger(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// logging.From must return a logger; we can't introspect attrs
-		// directly, so assert the request id header contract instead.
 		sawRequestID = w.Header().Get("X-Request-Id") != ""
+		logging.From(r.Context()).Info("probe")
 	}))
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/v1/ping", nil))
 	if !sawRequestID {
 		t.Fatal("request id must be set before handler runs")
+	}
+	out := buf.String()
+	if !strings.Contains(out, "request_id=") {
+		t.Fatalf("context logger missing request_id attr: %q", out)
+	}
+	if !strings.Contains(out, "probe") {
+		t.Fatalf("handler's context logger did not reach the buffer: %q", out)
 	}
 }

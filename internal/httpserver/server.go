@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io/fs"
 	"net/http"
+	"time"
 
 	blittarr "github.com/BlitterAmp/Blittarr"
 	"github.com/BlitterAmp/Blittarr/internal/api"
@@ -16,7 +17,11 @@ import (
 
 // New returns the Blittarr HTTP server bound to addr.
 func New(addr string, st *store.Store, version string) *http.Server {
-	return &http.Server{Addr: addr, Handler: Handler(st, version)}
+	return &http.Server{
+		Addr:              addr,
+		Handler:           Handler(st, version),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
 }
 
 // Handler builds the full stack; split from New so tests can drive it with

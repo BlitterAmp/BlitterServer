@@ -34,15 +34,16 @@ func (s *Server) GetStatus(ctx context.Context, _ api.GetStatusRequestObject) (a
 		return nil, err
 	}
 	resp := api.GetStatus200JSONResponse{Version: s.version, SetupComplete: done}
-	resp.Source.Kind = api.ServerStatusSourceKind("plex")
+	// Literal until source config lands in the store (spec 2) — then this must come from settings.
+	resp.Source.Kind = api.Plex
 	resp.Source.Connected = false
 	return resp, nil
 }
 
 func (s *Server) GetCapabilities(ctx context.Context, _ api.GetCapabilitiesRequestObject) (api.GetCapabilitiesResponseObject, error) {
-	formats := []api.CapabilitiesTranscodeFormats{"original"}
+	formats := []api.CapabilitiesTranscodeFormats{api.CapabilitiesTranscodeFormatsOriginal}
 	if transcode.FFmpegAvailable() {
-		formats = append(formats, "aac")
+		formats = append(formats, api.CapabilitiesTranscodeFormatsAac)
 	}
 	return api.GetCapabilities200JSONResponse{
 		Acquisition: false, Lastfm: false,

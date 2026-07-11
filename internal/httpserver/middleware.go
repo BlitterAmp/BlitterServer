@@ -81,6 +81,10 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
+// Unwrap lets http.ResponseController reach the underlying writer
+// (Flusher etc. — required before the SSE arc).
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
 // RequestLogger creates the request-scoped context logger and emits one
 // summary line per request.
 func RequestLogger(next http.Handler) http.Handler {

@@ -5,7 +5,11 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/BlitterAmp/Blittarr/internal/config"
 	"github.com/BlitterAmp/Blittarr/internal/httpserver"
@@ -25,10 +29,12 @@ func main() {
 
 func run() error {
 	// Pre-scan only for --config; config.Load owns the rest of the flags.
+	// The pre-scan set must mirror every flag config.Load defines — flag.Parse
+	// stops at the first unknown flag, which would hide a later --config.
 	cfgPath := os.Getenv("BLITTARR_CONFIG")
 	args := os.Args[1:]
 	pre := flag.NewFlagSet("pre", flag.ContinueOnError)
-	pre.SetOutput(nil)
+	pre.SetOutput(io.Discard)
 	pre.String("listen", "", "")
 	pre.String("data-dir", "", "")
 	pre.String("log-level", "", "")
@@ -60,5 +66,20 @@ func run() error {
 	log.Info("blittarr listening",
 		"addr", cfg.Listen, "version", version, "data_dir", cfg.DataDir,
 		"docs", "http://"+cfg.Listen+"/docs/")
-	return srv.ListenAndServe()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.ListenAndServe() }()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		log.Info("shutting down")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return srv.Shutdown(shutdownCtx)
+	}
 }

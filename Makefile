@@ -20,7 +20,7 @@ lint-api:
 
 gen-check:
 	npx --yes openapi-typescript@7.13.0 api/openapi.yaml --output /dev/null
-	go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@latest -generate types,client -package apiclient -o /dev/null api/openapi.yaml
+	go tool oapi-codegen -generate types,client -package apiclient -o /dev/null api/openapi.yaml
 
 generate:
 	go generate ./...
