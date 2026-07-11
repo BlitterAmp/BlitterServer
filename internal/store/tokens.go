@@ -2,12 +2,13 @@ package store
 
 import (
 	"context"
-
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"fmt"
+
 	"github.com/BlitterAmp/BlitterServer/internal/auth"
 )
 
@@ -80,6 +81,8 @@ func (s *Store) ResolveToken(ctx context.Context, raw string) (auth.Identity, bo
 }
 
 func (s *Store) DeleteDevice(ctx context.Context, deviceID string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM devices WHERE device_id = ?`, deviceID)
-	return err
+	if _, err := s.exec1(ctx, `DELETE FROM devices WHERE device_id = ?`, deviceID); err != nil {
+		return fmt.Errorf("device %s: %w", deviceID, err)
+	}
+	return nil
 }

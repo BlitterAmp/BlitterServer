@@ -143,3 +143,11 @@ func TestDevicesAndCounts(t *testing.T) {
 		t.Fatalf("counts: %v %d %d %d", err, profiles, devicesN, pairings)
 	}
 }
+
+func TestDeleteDeviceNotFound(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	if err := s.DeleteDevice(ctx, "dev_nope"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleting unknown device must be ErrNotFound, got %v", err)
+	}
+}
