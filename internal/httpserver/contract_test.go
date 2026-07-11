@@ -142,6 +142,13 @@ func TestEveryUnimplementedOperationAnswersHonestly(t *testing.T) {
 		"search": true, "streamTrack": true, "createStreamGrant": true, "getArt": true,
 		"adminGetFilesystemSource": true, "adminSetFilesystemSource": true,
 		"adminDeleteFilesystemSource": true, "adminScanFilesystemSource": true,
+		"listPlaylists": true, "createPlaylist": true, "getPlaylist": true,
+		"updatePlaylist": true, "deletePlaylist": true, "listPlaylistTracks": true,
+		"appendPlaylistTracks": true, "removePlaylistTrack": true,
+		"setRating": true, "setLove": true, "listLoves": true,
+		"reportPlaybackEvents": true, "getTasteSnapshot": true, "getPresence": true,
+		"createRecommendation": true, "listRecommendations": true, "markRecommendationSeen": true,
+		"streamEvents": true,
 	}
 	client := ts.Client()
 

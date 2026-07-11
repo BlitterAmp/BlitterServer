@@ -6,6 +6,7 @@ import (
 	"context"
 
 	"github.com/BlitterAmp/BlitterServer/internal/api"
+	"github.com/BlitterAmp/BlitterServer/internal/events"
 	"github.com/BlitterAmp/BlitterServer/internal/library"
 	"github.com/BlitterAmp/BlitterServer/internal/store"
 	"github.com/BlitterAmp/BlitterServer/internal/transcode"
@@ -15,6 +16,7 @@ type Server struct {
 	api.Unimplemented
 	st      *store.Store
 	lib     *library.Manager
+	bus     *events.Bus
 	version string
 }
 
@@ -26,7 +28,13 @@ func New(st *store.Store, version string) *Server {
 }
 
 func NewWithLibrary(st *store.Store, lib *library.Manager, version string) *Server {
-	return &Server{st: st, lib: lib, version: version}
+	return NewFull(st, lib, events.NewBus(st), version)
+}
+
+// NewFull wires every dependency explicitly (the HTTP layer shares the bus
+// with the SSE handler).
+func NewFull(st *store.Store, lib *library.Manager, bus *events.Bus, version string) *Server {
+	return &Server{st: st, lib: lib, bus: bus, version: version}
 }
 
 func (s *Server) GetPing(ctx context.Context, _ api.GetPingRequestObject) (api.GetPingResponseObject, error) {
