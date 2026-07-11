@@ -6,27 +6,29 @@ import (
 	"errors"
 	"io/fs"
 	"net/http"
+	"strings"
 	"time"
 
 	blitterserver "github.com/BlitterAmp/BlitterServer"
 	"github.com/BlitterAmp/BlitterServer/internal/api"
+	"github.com/BlitterAmp/BlitterServer/internal/library"
 	"github.com/BlitterAmp/BlitterServer/internal/logging"
 	"github.com/BlitterAmp/BlitterServer/internal/server"
 	"github.com/BlitterAmp/BlitterServer/internal/store"
 )
 
 // New returns the BlitterServer HTTP server bound to addr.
-func New(addr string, st *store.Store, version string) *http.Server {
+func New(addr string, st *store.Store, mgr *library.Manager, dataDir, version string) *http.Server {
 	return &http.Server{
 		Addr:              addr,
-		Handler:           Handler(st, version),
+		Handler:           Handler(st, mgr, dataDir, version),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 }
 
 // Handler builds the full stack; split from New so tests can drive it with
 // httptest without binding a socket.
-func Handler(st *store.Store, version string) http.Handler {
+func Handler(st *store.Store, mgr *library.Manager, dataDir, version string) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/openapi.yaml", func(w http.ResponseWriter, r *http.Request) {
@@ -42,7 +44,7 @@ func Handler(st *store.Store, version string) http.Handler {
 		http.Redirect(w, r, "/docs/", http.StatusTemporaryRedirect)
 	})
 
-	strict := api.NewStrictHandlerWithOptions(server.New(st, version), nil, api.StrictHTTPServerOptions{
+	strict := api.NewStrictHandlerWithOptions(server.NewWithLibrary(st, mgr, version), nil, api.StrictHTTPServerOptions{
 		RequestErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, err error) {
 			WriteProblem(w, http.StatusBadRequest, "Bad Request", "bad_request")
 		},
@@ -65,22 +67,29 @@ func Handler(st *store.Store, version string) http.Handler {
 	})
 	api.HandlerWithOptions(strict, api.StdHTTPServerOptions{BaseRouter: mux})
 
-	// Session endpoints bypass the strict handler: they set/clear the admin
-	// cookie, which strict response objects cannot carry.
+	// Overlay: endpoints that can't ride the strict handler — cookie-setting
+	// session ops, raw byte streams with Range, and grant URLs built from
+	// request context.
 	login := handleAdminLogin(st)
 	logout := handleAdminLogout(st)
+	stream := handleStreamTrack(st, mgr)
+	art := handleGetArt(st, dataDir)
+	grants := handleCreateStreamGrant(st)
 	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/admin/api/session" {
-			switch r.Method {
-			case http.MethodPost:
-				login(w, r)
-				return
-			case http.MethodDelete:
-				logout(w, r)
-				return
-			}
+		switch {
+		case r.URL.Path == "/admin/api/session" && r.Method == http.MethodPost:
+			login(w, r)
+		case r.URL.Path == "/admin/api/session" && r.Method == http.MethodDelete:
+			logout(w, r)
+		case strings.HasPrefix(r.URL.Path, "/v1/stream/") && r.Method == http.MethodGet:
+			stream(w, r)
+		case strings.HasPrefix(r.URL.Path, "/v1/art/") && r.Method == http.MethodGet:
+			art(w, r)
+		case r.URL.Path == "/v1/stream-grants" && r.Method == http.MethodPost:
+			grants(w, r)
+		default:
+			mux.ServeHTTP(w, r)
 		}
-		mux.ServeHTTP(w, r)
 	})
 
 	limited := RateLimit(30, "POST /v1/pair", "POST /v1/pair/claim")(root)
