@@ -1,4 +1,4 @@
-.PHONY: build run check fmt vet lint-api
+.PHONY: build run check fmt vet lint-api gen-check
 
 build:
 	go build -o dist/blittarr ./cmd/blittarr
@@ -16,4 +16,8 @@ vet:
 	go vet ./...
 
 lint-api:
-	npx --yes @redocly/cli@latest lint api/openapi.yaml
+	npx --yes @redocly/cli@latest lint api/openapi.yaml --config .redocly.yaml
+
+gen-check:
+	npx --yes openapi-typescript@latest api/openapi.yaml --output /dev/null
+	go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@latest -generate types,client -package apiclient -o /dev/null api/openapi.yaml
