@@ -21,4 +21,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with: { go-version-file: go.mod }
+      # Audio fixture tests generate sines with ffmpeg (they skip when absent;
+      # CI must not skip them).
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
       - run: make check
