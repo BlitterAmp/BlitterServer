@@ -115,22 +115,35 @@ func (s *Server) UpdateMySettings(ctx context.Context, req api.UpdateMySettingsR
 	return api.UpdateMySettings200JSONResponse{ShareListening: p.ShareListening}, nil
 }
 
-// last.fm state is honestly absent until the integration arc ships an
-// adapter: no instance credentials, so nothing is available or connected.
+// Per-profile last.fm connections need the callback flow (adapter arc);
+// availability honestly reflects whether instance credentials exist.
 
 func (s *Server) GetMyLastfm(ctx context.Context, _ api.GetMyLastfmRequestObject) (api.GetMyLastfmResponseObject, error) {
 	if _, err := profileID(ctx); err != nil {
 		return nil, err
 	}
-	return api.GetMyLastfm200JSONResponse{Available: false, Connected: false}, nil
+	available, err := s.lastfmConfigured(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return api.GetMyLastfm200JSONResponse{Available: available, Connected: false}, nil
 }
 
 func (s *Server) ConnectMyLastfm(ctx context.Context, _ api.ConnectMyLastfmRequestObject) (api.ConnectMyLastfmResponseObject, error) {
 	if _, err := profileID(ctx); err != nil {
 		return nil, err
 	}
-	return api.ConnectMyLastfm409ApplicationProblemPlusJSONResponse(
-		problem(409, "Conflict", "lastfm_not_configured")), nil
+	key, _, err := s.st.GetSetting(ctx, settingLastfmAPIKey)
+	if err != nil {
+		return nil, err
+	}
+	if key == "" {
+		return api.ConnectMyLastfm409ApplicationProblemPlusJSONResponse(
+			problem(409, "Conflict", "lastfm_not_configured")), nil
+	}
+	return api.ConnectMyLastfm201JSONResponse{
+		Url: "https://www.last.fm/api/auth/?api_key=" + key,
+	}, nil
 }
 
 func (s *Server) DisconnectMyLastfm(ctx context.Context, _ api.DisconnectMyLastfmRequestObject) (api.DisconnectMyLastfmResponseObject, error) {
