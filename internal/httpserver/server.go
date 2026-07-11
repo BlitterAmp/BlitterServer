@@ -1,41 +1,61 @@
-// Package httpserver assembles Blittarr's HTTP surface. During the API
-// design phase it serves only the contract and its documentation viewer;
-// /v1 handlers arrive with the skeleton arc, generated from the contract.
+// Package httpserver assembles BlitterServer's HTTP surface: middleware, the
+// generated contract handler, and the docs viewer.
 package httpserver
 
 import (
+	"errors"
 	"io/fs"
 	"net/http"
+	"time"
 
-	blittarr "github.com/BlitterAmp/Blittarr"
+	blitterserver "github.com/BlitterAmp/BlitterServer"
+	"github.com/BlitterAmp/BlitterServer/internal/api"
+	"github.com/BlitterAmp/BlitterServer/internal/logging"
+	"github.com/BlitterAmp/BlitterServer/internal/server"
+	"github.com/BlitterAmp/BlitterServer/internal/store"
 )
 
-// New returns the Blittarr HTTP server bound to addr.
-func New(addr string) *http.Server {
-	return &http.Server{Addr: addr, Handler: Handler()}
+// New returns the BlitterServer HTTP server bound to addr.
+func New(addr string, st *store.Store, version string) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           Handler(st, version),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
 }
 
-// Handler builds the root mux. Split from New so tests can drive it with
+// Handler builds the full stack; split from New so tests can drive it with
 // httptest without binding a socket.
-func Handler() http.Handler {
+func Handler(st *store.Store, version string) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/openapi.yaml", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/yaml")
-		_, _ = w.Write(blittarr.OpenAPISpec)
+		_, _ = w.Write(blitterserver.OpenAPISpec)
 	})
-
-	docs, err := fs.Sub(blittarr.DocsAssets, "web/docs")
+	docs, err := fs.Sub(blitterserver.DocsAssets, "web/docs")
 	if err != nil {
-		// Embedded path is fixed at compile time; failure here is a build
-		// defect, not a runtime condition.
-		panic(err)
+		panic(err) // embedded path is fixed at compile time
 	}
 	mux.Handle("GET /docs/", http.StripPrefix("/docs/", http.FileServerFS(docs)))
-
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/docs/", http.StatusTemporaryRedirect)
 	})
 
-	return mux
+	strict := api.NewStrictHandlerWithOptions(server.New(st, version), nil, api.StrictHTTPServerOptions{
+		RequestErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, err error) {
+			WriteProblem(w, http.StatusBadRequest, "Bad Request", "bad_request")
+		},
+		ResponseErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, err error) {
+			if errors.Is(err, api.ErrNotImplemented) {
+				WriteProblem(w, http.StatusNotImplemented, "Not Implemented", "not_implemented")
+				return
+			}
+			logging.From(r.Context()).Error("handler error", "err", err)
+			WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "internal")
+		},
+	})
+	api.HandlerWithOptions(strict, api.StdHTTPServerOptions{BaseRouter: mux})
+
+	return RequestLogger(Recover(Auth(st)(mux)))
 }

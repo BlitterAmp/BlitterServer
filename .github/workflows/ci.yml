@@ -14,6 +14,7 @@ jobs:
         with: { go-version-file: go.mod }
       - run: make lint-api
       - run: make gen-check
+      - run: make generate && git diff --exit-code
   go:
     runs-on: ubuntu-latest
     steps:

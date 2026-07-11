@@ -1,5 +1,5 @@
-// Package blittarr embeds repo-level assets served by the daemon.
-package blittarr
+// Package blitterserver embeds repo-level assets served by the daemon.
+package blitterserver
 
 import "embed"
 
