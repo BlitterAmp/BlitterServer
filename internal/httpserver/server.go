@@ -1,4 +1,4 @@
-// Package httpserver assembles Blittarr's HTTP surface: middleware, the
+// Package httpserver assembles BlitterServer's HTTP surface: middleware, the
 // generated contract handler, and the docs viewer.
 package httpserver
 
@@ -8,14 +8,14 @@ import (
 	"net/http"
 	"time"
 
-	blittarr "github.com/BlitterAmp/Blittarr"
-	"github.com/BlitterAmp/Blittarr/internal/api"
-	"github.com/BlitterAmp/Blittarr/internal/logging"
-	"github.com/BlitterAmp/Blittarr/internal/server"
-	"github.com/BlitterAmp/Blittarr/internal/store"
+	blitterserver "github.com/BlitterAmp/BlitterServer"
+	"github.com/BlitterAmp/BlitterServer/internal/api"
+	"github.com/BlitterAmp/BlitterServer/internal/logging"
+	"github.com/BlitterAmp/BlitterServer/internal/server"
+	"github.com/BlitterAmp/BlitterServer/internal/store"
 )
 
-// New returns the Blittarr HTTP server bound to addr.
+// New returns the BlitterServer HTTP server bound to addr.
 func New(addr string, st *store.Store, version string) *http.Server {
 	return &http.Server{
 		Addr:              addr,
@@ -31,9 +31,9 @@ func Handler(st *store.Store, version string) http.Handler {
 
 	mux.HandleFunc("GET /api/openapi.yaml", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/yaml")
-		_, _ = w.Write(blittarr.OpenAPISpec)
+		_, _ = w.Write(blitterserver.OpenAPISpec)
 	})
-	docs, err := fs.Sub(blittarr.DocsAssets, "web/docs")
+	docs, err := fs.Sub(blitterserver.DocsAssets, "web/docs")
 	if err != nil {
 		panic(err) // embedded path is fixed at compile time
 	}

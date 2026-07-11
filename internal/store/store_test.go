@@ -25,7 +25,7 @@ func TestOpenMigratesAndCreatesFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if _, err := os.Stat(filepath.Join(dir, "blittarr.db")); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, "blitterserver.db")); err != nil {
 		t.Fatal("db file missing")
 	}
 }

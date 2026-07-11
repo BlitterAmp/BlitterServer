@@ -351,14 +351,14 @@ func (e PlaybackEventType) Valid() bool {
 
 // Defines values for PlaylistOrigin.
 const (
-	Blittarr PlaylistOrigin = "blittarr"
-	Source   PlaylistOrigin = "source"
+	Blitterserver PlaylistOrigin = "blitterserver"
+	Source        PlaylistOrigin = "source"
 )
 
 // Valid indicates whether the value is a known member of the PlaylistOrigin enum.
 func (e PlaylistOrigin) Valid() bool {
 	switch e {
-	case Blittarr:
+	case Blitterserver:
 		return true
 	case Source:
 		return true
@@ -1275,7 +1275,7 @@ type Playlist struct {
 	ArtId      *string `json:"artId,omitempty"`
 	DurationMs *int    `json:"durationMs,omitempty"`
 
-	// Origin blittarr = the calling profile's own (mutable); source = surfaced from Plex, read-only, visible to all profiles
+	// Origin blitterserver = the calling profile's own (mutable); source = surfaced from Plex, read-only, visible to all profiles
 	Origin PlaylistOrigin `json:"origin"`
 
 	// OwnerName Display name for "Shared by" chrome
@@ -1295,7 +1295,7 @@ type Playlist struct {
 	Visibility PlaylistVisibility `json:"visibility"`
 }
 
-// PlaylistOrigin blittarr = the calling profile's own (mutable); source = surfaced from Plex, read-only, visible to all profiles
+// PlaylistOrigin blitterserver = the calling profile's own (mutable); source = surfaced from Plex, read-only, visible to all profiles
 type PlaylistOrigin string
 
 // PlaylistVisibility shared = household can see/play; collaborative = household can also add/remove tracks. Owner manages metadata/deletion. Always private-equivalent read-only for origin: source.
@@ -16025,7 +16025,7 @@ type ServerInterface interface {
 	// List playlists — own, household-shared, and read-only source playlists
 	// (GET /v1/playlists)
 	ListPlaylists(w http.ResponseWriter, r *http.Request)
-	// Create a playlist (Blittarr-native, owned by the calling profile)
+	// Create a playlist (BlitterServer-native, owned by the calling profile)
 	// (POST /v1/playlists)
 	CreatePlaylist(w http.ResponseWriter, r *http.Request)
 	// Delete playlist
@@ -16058,7 +16058,7 @@ type ServerInterface interface {
 	// Next batch of radio tracks for the given seeds
 	// (POST /v1/radio/next)
 	GetRadioNext(w http.ResponseWriter, r *http.Request)
-	// Rate an item (track or artist) — Blittarr-native, per profile
+	// Rate an item (track or artist) — BlitterServer-native, per profile
 	// (PUT /v1/ratings)
 	SetRating(w http.ResponseWriter, r *http.Request)
 	// Recommendations inbox (received by the calling profile, newest first)
@@ -23952,7 +23952,7 @@ type StrictServerInterface interface {
 	// List playlists — own, household-shared, and read-only source playlists
 	// (GET /v1/playlists)
 	ListPlaylists(ctx context.Context, request ListPlaylistsRequestObject) (ListPlaylistsResponseObject, error)
-	// Create a playlist (Blittarr-native, owned by the calling profile)
+	// Create a playlist (BlitterServer-native, owned by the calling profile)
 	// (POST /v1/playlists)
 	CreatePlaylist(ctx context.Context, request CreatePlaylistRequestObject) (CreatePlaylistResponseObject, error)
 	// Delete playlist
@@ -23985,7 +23985,7 @@ type StrictServerInterface interface {
 	// Next batch of radio tracks for the given seeds
 	// (POST /v1/radio/next)
 	GetRadioNext(ctx context.Context, request GetRadioNextRequestObject) (GetRadioNextResponseObject, error)
-	// Rate an item (track or artist) — Blittarr-native, per profile
+	// Rate an item (track or artist) — BlitterServer-native, per profile
 	// (PUT /v1/ratings)
 	SetRating(ctx context.Context, request SetRatingRequestObject) (SetRatingResponseObject, error)
 	// Recommendations inbox (received by the calling profile, newest first)

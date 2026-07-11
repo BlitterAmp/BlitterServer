@@ -27,7 +27,7 @@ func TestWithFromRoundTrip(t *testing.T) {
 }
 
 func TestSetupWritesFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "logs", "blittarr.log")
+	path := filepath.Join(t.TempDir(), "logs", "blitterserver.log")
 	l, err := Setup(Options{Level: "info", Format: "text", FileEnabled: true, FilePath: path, MaxSizeMB: 1, MaxBackups: 1, MaxAgeDays: 1})
 	if err != nil {
 		t.Fatal(err)

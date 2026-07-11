@@ -1,6 +1,6 @@
-// Package config loads Blittarr's bootstrap configuration. Runtime settings
-// live in SQLite behind the admin API; this is only what the process needs
-// before the store exists.
+// Package config loads BlitterServer's bootstrap configuration. Runtime
+// settings live in SQLite behind the admin API; this is only what the
+// process needs before the store exists.
 package config
 
 import (
@@ -12,7 +12,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/BlitterAmp/Blittarr/internal/logging"
+	"github.com/BlitterAmp/BlitterServer/internal/logging"
 	"gopkg.in/yaml.v3"
 )
 
@@ -67,20 +67,20 @@ func Load(path string, args []string, getenv func(string) string) (Config, error
 		apply(&c, fc)
 	}
 
-	if v := getenv("BLITTARR_LISTEN"); v != "" {
+	if v := getenv("BLITTER_LISTEN"); v != "" {
 		c.Listen = v
 	}
-	if v := getenv("BLITTARR_DATA_DIR"); v != "" {
+	if v := getenv("BLITTER_DATA_DIR"); v != "" {
 		c.DataDir = v
 	}
-	if v := getenv("BLITTARR_LOG_LEVEL"); v != "" {
+	if v := getenv("BLITTER_LOG_LEVEL"); v != "" {
 		c.Log.Level = v
 	}
-	if v := getenv("BLITTARR_LOG_FORMAT"); v != "" {
+	if v := getenv("BLITTER_LOG_FORMAT"); v != "" {
 		c.Log.Format = v
 	}
 
-	fs := flag.NewFlagSet("blittarr", flag.ContinueOnError)
+	fs := flag.NewFlagSet("blitterserver", flag.ContinueOnError)
 	listen := fs.String("listen", c.Listen, "address to listen on")
 	dataDir := fs.String("data-dir", c.DataDir, "state directory (sqlite, caches, logs)")
 	logLevel := fs.String("log-level", c.Log.Level, "debug|info|warn|error")
@@ -96,18 +96,18 @@ func (c Config) LogFilePathOrDefault() string {
 	if c.Log.FilePath != "" {
 		return c.Log.FilePath
 	}
-	return filepath.Join(c.DataDir, "logs", "blittarr.log")
+	return filepath.Join(c.DataDir, "logs", "blitterserver.log")
 }
 
 func defaultDataDir(getenv func(string) string) string {
 	if x := getenv("XDG_DATA_HOME"); x != "" {
-		return filepath.Join(x, "blittarr")
+		return filepath.Join(x, "blitterserver")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "blittarr-data"
+		return "blitterserver-data"
 	}
-	return filepath.Join(home, ".local", "share", "blittarr")
+	return filepath.Join(home, ".local", "share", "blitterserver")
 }
 
 func apply(c *Config, fc fileConfig) {

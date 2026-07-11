@@ -23,10 +23,10 @@ func TestDefaults(t *testing.T) {
 
 func TestPrecedenceFlagsBeatEnvBeatFile(t *testing.T) {
 	dir := t.TempDir()
-	file := filepath.Join(dir, "blittarr.yaml")
+	file := filepath.Join(dir, "blitterserver.yaml")
 	os.WriteFile(file, []byte("listen: \"file:1\"\nlog:\n  level: warn\n"), 0o644)
 	env := func(k string) string {
-		if k == "BLITTARR_LISTEN" {
+		if k == "BLITTER_LISTEN" {
 			return "env:2"
 		}
 		return ""
@@ -51,13 +51,13 @@ func TestXDGDataDir(t *testing.T) {
 		return ""
 	}
 	c, _ := Load("", nil, env)
-	if c.DataDir != "/tmp/xdg/blittarr" {
-		t.Fatalf("want XDG_DATA_HOME/blittarr, got %q", c.DataDir)
+	if c.DataDir != "/tmp/xdg/blitterserver" {
+		t.Fatalf("want XDG_DATA_HOME/blitterserver, got %q", c.DataDir)
 	}
 }
 
 func TestMalformedFileIsError(t *testing.T) {
-	file := filepath.Join(t.TempDir(), "blittarr.yaml")
+	file := filepath.Join(t.TempDir(), "blitterserver.yaml")
 	os.WriteFile(file, []byte(":\t not yaml"), 0o644)
 	if _, err := Load(file, nil, noEnv); err == nil {
 		t.Fatal("want error for malformed file")
@@ -66,7 +66,7 @@ func TestMalformedFileIsError(t *testing.T) {
 
 func TestLogFilePathDefaultsUnderDataDir(t *testing.T) {
 	c, _ := Load("", nil, noEnv)
-	want := filepath.Join(c.DataDir, "logs", "blittarr.log")
+	want := filepath.Join(c.DataDir, "logs", "blitterserver.log")
 	if c.LogFilePathOrDefault() != want {
 		t.Fatalf("want %q got %q", want, c.LogFilePathOrDefault())
 	}

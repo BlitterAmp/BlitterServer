@@ -1,4 +1,4 @@
-module github.com/BlitterAmp/Blittarr
+module github.com/BlitterAmp/BlitterServer
 
 go 1.26.4
 

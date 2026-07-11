@@ -1,13 +1,13 @@
 openapi: 3.0.3
 info:
-  title: Blittarr API
+  title: BlitterServer API
   version: 1.0.0-draft.2
   license:
     name: MIT
     url: https://opensource.org/license/mit
   description: |
     The BlitterAmp middleman service. Apps (BlitterAmp iOS/desktop) talk only to
-    this API; Blittarr owns the music source (Plex in v1), server-side
+    this API; BlitterServer owns the music source (Plex in v1), server-side
     transcoding, acquisition (Lidarr), last.fm, and cross-device taste/love
     state.
 
@@ -78,7 +78,7 @@ paths:
                 type: object
                 required: [name, version]
                 properties:
-                  name: { type: string, example: Blittarr }
+                  name: { type: string, example: BlitterServer }
                   version: { type: string, example: 1.0.0 }
                   setupComplete: { type: boolean }
 
@@ -607,7 +607,7 @@ paths:
     post:
       operationId: createPlaylist
       tags: [library]
-      summary: Create a playlist (Blittarr-native, owned by the calling profile)
+      summary: Create a playlist (BlitterServer-native, owned by the calling profile)
       requestBody:
         required: true
         content:
@@ -742,7 +742,7 @@ paths:
     put:
       operationId: setRating
       tags: [library]
-      summary: Rate an item (track or artist) — Blittarr-native, per profile
+      summary: Rate an item (track or artist) — BlitterServer-native, per profile
       requestBody:
         required: true
         content:
@@ -1112,7 +1112,7 @@ paths:
         generated playlist/mix/radio/discovery **for this profile only**.
         `neutral` clears either state.
 
-        Instance-level: Blittarr watches/acquires an artist while ≥1 profile
+        Instance-level: BlitterServer watches/acquires an artist while ≥1 profile
         loves it (union); removing the last love stops watching but never
         removes media.
 
@@ -1929,7 +1929,7 @@ components:
     adminSession:
       type: apiKey
       in: cookie
-      name: blittarr_admin
+      name: blitter_admin
 
   parameters:
     cursor:
@@ -2181,8 +2181,8 @@ components:
         artId: { type: string, nullable: true, example: img_4c5d6e }
         origin:
           type: string
-          enum: [blittarr, source]
-          description: blittarr = the calling profile's own (mutable); source = surfaced from Plex, read-only, visible to all profiles
+          enum: [blitterserver, source]
+          description: blitterserver = the calling profile's own (mutable); source = surfaced from Plex, read-only, visible to all profiles
         smart: { type: boolean, default: false, description: Source-defined smart playlist }
         updatedAt: { type: integer, format: int64, nullable: true }
         visibility:

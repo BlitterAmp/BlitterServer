@@ -1,5 +1,5 @@
-// Package store owns Blittarr's SQLite persistence: schema, migrations, and
-// typed accessors. No SQL leaks out of this package.
+// Package store owns BlitterServer's SQLite persistence: schema, migrations,
+// and typed accessors. No SQL leaks out of this package.
 package store
 
 import (
@@ -28,7 +28,7 @@ func Open(ctx context.Context, dataDir string) (*Store, error) {
 		return nil, fmt.Errorf("data dir: %w", err)
 	}
 	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)",
-		filepath.Join(dataDir, "blittarr.db"))
+		filepath.Join(dataDir, "blitterserver.db"))
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)

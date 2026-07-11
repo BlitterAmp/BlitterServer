@@ -5,9 +5,9 @@ package server
 import (
 	"context"
 
-	"github.com/BlitterAmp/Blittarr/internal/api"
-	"github.com/BlitterAmp/Blittarr/internal/store"
-	"github.com/BlitterAmp/Blittarr/internal/transcode"
+	"github.com/BlitterAmp/BlitterServer/internal/api"
+	"github.com/BlitterAmp/BlitterServer/internal/store"
+	"github.com/BlitterAmp/BlitterServer/internal/transcode"
 )
 
 type Server struct {
@@ -25,7 +25,7 @@ func (s *Server) GetPing(ctx context.Context, _ api.GetPingRequestObject) (api.G
 	if err != nil {
 		return nil, err
 	}
-	return api.GetPing200JSONResponse{Name: "Blittarr", Version: s.version, SetupComplete: &done}, nil
+	return api.GetPing200JSONResponse{Name: "BlitterServer", Version: s.version, SetupComplete: &done}, nil
 }
 
 func (s *Server) GetStatus(ctx context.Context, _ api.GetStatusRequestObject) (api.GetStatusResponseObject, error) {

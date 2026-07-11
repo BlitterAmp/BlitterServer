@@ -1,4 +1,4 @@
-// Command blittarr is the BlitterAmp backend service.
+// Command blitterserver is the BlitterAmp backend service.
 package main
 
 import (
@@ -11,10 +11,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/BlitterAmp/Blittarr/internal/config"
-	"github.com/BlitterAmp/Blittarr/internal/httpserver"
-	"github.com/BlitterAmp/Blittarr/internal/logging"
-	"github.com/BlitterAmp/Blittarr/internal/store"
+	"github.com/BlitterAmp/BlitterServer/internal/config"
+	"github.com/BlitterAmp/BlitterServer/internal/httpserver"
+	"github.com/BlitterAmp/BlitterServer/internal/logging"
+	"github.com/BlitterAmp/BlitterServer/internal/store"
 )
 
 // version is injected at build time via -ldflags "-X main.version=...".
@@ -22,7 +22,7 @@ var version = "dev"
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "blittarr:", err)
+		fmt.Fprintln(os.Stderr, "blitterserver:", err)
 		os.Exit(1)
 	}
 }
@@ -31,14 +31,14 @@ func run() error {
 	// Pre-scan only for --config; config.Load owns the rest of the flags.
 	// The pre-scan set must mirror every flag config.Load defines — flag.Parse
 	// stops at the first unknown flag, which would hide a later --config.
-	cfgPath := os.Getenv("BLITTARR_CONFIG")
+	cfgPath := os.Getenv("BLITTER_CONFIG")
 	args := os.Args[1:]
 	pre := flag.NewFlagSet("pre", flag.ContinueOnError)
 	pre.SetOutput(io.Discard)
 	pre.String("listen", "", "")
 	pre.String("data-dir", "", "")
 	pre.String("log-level", "", "")
-	cp := pre.String("config", cfgPath, "path to blittarr.yaml")
+	cp := pre.String("config", cfgPath, "path to blitterserver.yaml")
 	_ = pre.Parse(args)
 	cfgPath = *cp
 
@@ -63,7 +63,7 @@ func run() error {
 	defer st.Close()
 
 	srv := httpserver.New(cfg.Listen, st, version)
-	log.Info("blittarr listening",
+	log.Info("blitterserver listening",
 		"addr", cfg.Listen, "version", version, "data_dir", cfg.DataDir,
 		"docs", "http://"+cfg.Listen+"/docs/")
 

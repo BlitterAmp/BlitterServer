@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/BlitterAmp/Blittarr/internal/api"
-	"github.com/BlitterAmp/Blittarr/internal/store"
+	"github.com/BlitterAmp/BlitterServer/internal/api"
+	"github.com/BlitterAmp/BlitterServer/internal/store"
 )
 
 func testStore(t *testing.T) *store.Store {
@@ -28,7 +28,7 @@ func TestGetPingReportsVersionAndSetup(t *testing.T) {
 	if !ok {
 		t.Fatalf("want 200 response, got %T", resp)
 	}
-	if r.Name != "Blittarr" || r.Version != "1.2.3-test" {
+	if r.Name != "BlitterServer" || r.Version != "1.2.3-test" {
 		t.Fatalf("bad identity: %+v", r)
 	}
 	if r.SetupComplete == nil || *r.SetupComplete {

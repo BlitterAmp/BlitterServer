@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	blittarr "github.com/BlitterAmp/Blittarr"
-	"github.com/BlitterAmp/Blittarr/internal/api"
-	"github.com/BlitterAmp/Blittarr/internal/httpserver"
-	"github.com/BlitterAmp/Blittarr/internal/store"
+	blitterserver "github.com/BlitterAmp/BlitterServer"
+	"github.com/BlitterAmp/BlitterServer/internal/api"
+	"github.com/BlitterAmp/BlitterServer/internal/httpserver"
+	"github.com/BlitterAmp/BlitterServer/internal/store"
 	"gopkg.in/yaml.v3"
 )
 
@@ -43,7 +43,7 @@ func TestContractPing(t *testing.T) {
 	if err != nil || resp.JSON200 == nil {
 		t.Fatalf("ping: %v %s", err, resp.Status())
 	}
-	if resp.JSON200.Name != "Blittarr" {
+	if resp.JSON200.Name != "BlitterServer" {
 		t.Fatalf("bad name %q", resp.JSON200.Name)
 	}
 }
@@ -93,7 +93,7 @@ func TestEveryUnimplementedOperationAnswersHonestly(t *testing.T) {
 			Security    []map[string][]string `yaml:"security"`
 		} `yaml:"paths"`
 	}
-	if err := yaml.Unmarshal(blittarr.OpenAPISpec, &doc); err != nil {
+	if err := yaml.Unmarshal(blitterserver.OpenAPISpec, &doc); err != nil {
 		t.Fatal(err)
 	}
 

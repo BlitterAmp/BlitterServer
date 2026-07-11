@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/BlitterAmp/Blittarr/internal/logging"
-	"github.com/BlitterAmp/Blittarr/internal/store"
+	"github.com/BlitterAmp/BlitterServer/internal/logging"
+	"github.com/BlitterAmp/BlitterServer/internal/store"
 )
 
 func testStore(t *testing.T) *store.Store {
