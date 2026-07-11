@@ -35,7 +35,7 @@ func (s *Server) GetStatus(ctx context.Context, _ api.GetStatusRequestObject) (a
 	}
 	resp := api.GetStatus200JSONResponse{Version: s.version, SetupComplete: done}
 	// Literal until source config lands in the store (spec 2) — then this must come from settings.
-	resp.Source.Kind = api.Plex
+	resp.Source.Kind = api.ServerStatusSourceKindNone
 	resp.Source.Connected = false
 	return resp, nil
 }
