@@ -47,15 +47,42 @@ func Handler(st *store.Store, version string) http.Handler {
 			WriteProblem(w, http.StatusBadRequest, "Bad Request", "bad_request")
 		},
 		ResponseErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, err error) {
-			if errors.Is(err, api.ErrNotImplemented) {
+			var se *api.StatusError
+			switch {
+			case errors.Is(err, api.ErrNotImplemented):
 				WriteProblem(w, http.StatusNotImplemented, "Not Implemented", "not_implemented")
-				return
+			case errors.As(err, &se):
+				WriteProblem(w, se.Status, se.Title, se.Code)
+			case errors.Is(err, store.ErrNotFound):
+				WriteProblem(w, http.StatusNotFound, "Not Found", "not_found")
+			case errors.Is(err, store.ErrGone):
+				WriteProblem(w, http.StatusGone, "Gone", "expired_or_used")
+			default:
+				logging.From(r.Context()).Error("handler error", "err", err)
+				WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "internal")
 			}
-			logging.From(r.Context()).Error("handler error", "err", err)
-			WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "internal")
 		},
 	})
 	api.HandlerWithOptions(strict, api.StdHTTPServerOptions{BaseRouter: mux})
 
-	return RequestLogger(Recover(Auth(st)(mux)))
+	// Session endpoints bypass the strict handler: they set/clear the admin
+	// cookie, which strict response objects cannot carry.
+	login := handleAdminLogin(st)
+	logout := handleAdminLogout(st)
+	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/admin/api/session" {
+			switch r.Method {
+			case http.MethodPost:
+				login(w, r)
+				return
+			case http.MethodDelete:
+				logout(w, r)
+				return
+			}
+		}
+		mux.ServeHTTP(w, r)
+	})
+
+	limited := RateLimit(30, "POST /v1/pair", "POST /v1/pair/claim")(root)
+	return RequestLogger(Recover(AdminAuth(st)(Auth(st)(limited))))
 }

@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/oapi-codegen/nullable"
 	"github.com/oapi-codegen/runtime"
 )
 
@@ -1554,7 +1555,7 @@ type AdminUpdateProfileJSONBody struct {
 	Name        *string `json:"name,omitempty"`
 
 	// Pin New PIN; explicit null clears it
-	Pin *string `json:"pin,omitempty"`
+	Pin nullable.Nullable[string] `json:"pin,omitempty"`
 }
 
 // AdminLoginJSONBody defines parameters for AdminLogin.

@@ -1750,7 +1750,15 @@ paths:
               type: object
               properties:
                 name: { type: string }
-                pin: { type: string, nullable: true, description: New PIN; explicit null clears it }
+                pin:
+                  type: string
+                  nullable: true
+                  description: New PIN; explicit null clears it
+                  # Codegen-only mapping so Go can distinguish absent (keep)
+                  # from null (clear); no wire-format change.
+                  x-go-type: nullable.Nullable[string]
+                  x-go-type-import: { path: github.com/oapi-codegen/nullable }
+                  x-go-type-skip-optional-pointer: true
                 avatarColor: { type: string, nullable: true }
       responses:
         "200":

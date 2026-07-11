@@ -6,14 +6,11 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
-)
+	"errors"
+	"fmt"
 
-// Identity is a resolved bearer token. Empty ProfileID means a device token
-// (whose only contract powers are listing profiles and minting profile tokens).
-type Identity struct {
-	DeviceID  string
-	ProfileID string
-}
+	"github.com/BlitterAmp/BlitterServer/internal/auth"
+)
 
 // HashToken maps a raw bearer value to its storage form. Raw tokens are
 // never persisted.
@@ -60,30 +57,32 @@ func (s *Store) CreateProfileToken(ctx context.Context, deviceID, profileID stri
 }
 
 // ResolveToken looks a raw bearer value up in both token tables.
-func (s *Store) ResolveToken(ctx context.Context, raw string) (Identity, bool, error) {
+func (s *Store) ResolveToken(ctx context.Context, raw string) (auth.Identity, bool, error) {
 	h := HashToken(raw)
-	var id Identity
+	var id auth.Identity
 	err := s.db.QueryRowContext(ctx,
 		`SELECT device_id, profile_id FROM profile_tokens WHERE token_hash = ?`, h).
 		Scan(&id.DeviceID, &id.ProfileID)
 	if err == nil {
 		return id, true, nil
 	}
-	if err != sql.ErrNoRows {
-		return Identity{}, false, err
+	if !errors.Is(err, sql.ErrNoRows) {
+		return auth.Identity{}, false, err
 	}
 	err = s.db.QueryRowContext(ctx,
 		`SELECT device_id FROM device_tokens WHERE token_hash = ?`, h).Scan(&id.DeviceID)
-	if err == sql.ErrNoRows {
-		return Identity{}, false, nil
+	if errors.Is(err, sql.ErrNoRows) {
+		return auth.Identity{}, false, nil
 	}
 	if err != nil {
-		return Identity{}, false, err
+		return auth.Identity{}, false, err
 	}
 	return id, true, nil
 }
 
 func (s *Store) DeleteDevice(ctx context.Context, deviceID string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM devices WHERE device_id = ?`, deviceID)
-	return err
+	if _, err := s.exec1(ctx, `DELETE FROM devices WHERE device_id = ?`, deviceID); err != nil {
+		return fmt.Errorf("device %s: %w", deviceID, err)
+	}
+	return nil
 }
