@@ -311,6 +311,38 @@ paths:
                   url: { type: string }
         "409": { description: Instance has no last.fm API credentials, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
 
+  /v1/me/settings:
+    get:
+      operationId: getMySettings
+      tags: [profiles]
+      summary: The calling profile's settings
+      responses:
+        "200":
+          description: Settings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProfileSettings" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    patch:
+      operationId: updateMySettings
+      tags: [profiles]
+      summary: Update the calling profile's settings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                shareListening: { type: boolean }
+      responses:
+        "200":
+          description: Updated settings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProfileSettings" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
   # ───────────────────────────── library ─────────────────────────────
   /v1/library:
     get:
@@ -1132,6 +1164,25 @@ paths:
         "204": { description: Marked }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/presence:
+    get:
+      operationId: getPresence
+      tags: [social]
+      summary: Household presence — what each profile is playing now
+      description: |
+        Derived from playback events. Profiles with `shareListening: false`,
+        and profiles not currently playing, simply do not appear. Poll path
+        for the `presence.updated` event.
+      responses:
+        "200":
+          description: Presence
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/PresenceEntry" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   # ───────────────────────────── events ─────────────────────────────
   /v1/ws:
@@ -2059,6 +2110,22 @@ components:
         note: { type: string, nullable: true }
         seen: { type: boolean }
         createdAt: { type: string, format: date-time }
+
+    ProfileSettings:
+      type: object
+      required: [shareListening]
+      properties:
+        shareListening: { type: boolean, default: true, description: "Appear in household presence (default ON; honored everywhere presence surfaces)" }
+
+    PresenceEntry:
+      type: object
+      required: [profileId, profileName, track, at]
+      properties:
+        profileId: { type: string, example: prf_1a2b3c }
+        profileName: { type: string }
+        avatarColor: { type: string, nullable: true }
+        track: { $ref: "#/components/schemas/Track" }
+        at: { type: string, format: date-time, description: "When this now-playing state was last observed" }
 
     AcquisitionActivity:
       type: object
