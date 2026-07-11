@@ -411,3 +411,43 @@ func withClient(hc *http.Client) api.RequestEditorFn {
 		return nil
 	}
 }
+
+// The admin SPA shell is public (it renders the login screen); the API
+// realm behind it stays cookie-gated.
+func TestContractAdminSPAServed(t *testing.T) {
+	ts, _, _ := setup(t)
+
+	resp, err := http.Get(ts.URL + "/admin/")
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("spa shell: %v %d", err, resp.StatusCode)
+	}
+	body := make([]byte, 4096)
+	n, _ := resp.Body.Read(body)
+	resp.Body.Close()
+	page := string(body[:n])
+	if !strings.Contains(page, "BlitterServer Admin") {
+		t.Fatalf("spa shell content: %q", page)
+	}
+	// The shell references hashed assets that must resolve.
+	start := strings.Index(page, "/admin/assets/")
+	if start < 0 {
+		t.Fatalf("no asset reference in shell: %q", page)
+	}
+	end := start
+	for end < len(page) && page[end] != '"' {
+		end++
+	}
+	asset, err := http.Get(ts.URL + page[start:end])
+	if err != nil || asset.StatusCode != 200 {
+		t.Fatalf("asset %s: %v %d", page[start:end], err, asset.StatusCode)
+	}
+	asset.Body.Close()
+
+	// Root now lands on the admin console.
+	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	root, err := noRedirect.Get(ts.URL + "/")
+	if err != nil || root.StatusCode != http.StatusTemporaryRedirect || root.Header.Get("Location") != "/admin/" {
+		t.Fatalf("root redirect: %v %d %q", err, root.StatusCode, root.Header.Get("Location"))
+	}
+	root.Body.Close()
+}

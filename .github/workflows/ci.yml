@@ -15,6 +15,13 @@ jobs:
       - run: make lint-api
       - run: make gen-check
       - run: make generate && git diff --exit-code
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: cd web/admin && npm ci && npm test && npm run build
   go:
     runs-on: ubuntu-latest
     steps:

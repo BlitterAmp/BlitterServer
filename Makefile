@@ -1,4 +1,4 @@
-.PHONY: build run check fmt vet lint-api gen-check generate
+.PHONY: build run check fmt vet lint-api gen-check generate web
 
 build:
 	go build -ldflags "-X main.version=$$(git describe --tags --always --dirty)" -o dist/blitterserver ./cmd/blitterserver
@@ -24,3 +24,6 @@ gen-check:
 
 generate:
 	go generate ./...
+
+web:
+	cd web/admin && npm ci && npm run build
