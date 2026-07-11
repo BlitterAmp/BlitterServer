@@ -177,6 +177,44 @@ paths:
                   deviceId: { type: string, nullable: true }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /v1/pair/claim:
+    post:
+      operationId: claimPairCode
+      tags: [pairing]
+      summary: Claim a QR pairing code (one scan = discovery + auth)
+      description: |
+        The QR shown in the web admin encodes the server's canonical URL plus a
+        short-lived (≤15 min) single-use code. Claiming mints a **device
+        token** immediately — no admin approval step (showing the QR was the
+        approval). The app then lists profiles and mints profile tokens as
+        usual.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, deviceName, deviceType]
+              properties:
+                code: { type: string, example: "7GK4PC" }
+                deviceName: { type: string, example: "Nathan's iPhone" }
+                deviceType: { type: string, enum: [ios, desktop, web, other] }
+                appVersion: { type: string }
+      responses:
+        "201":
+          description: Device paired
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token, deviceId]
+                properties:
+                  token: { type: string, description: Device token — exchange via /v1/profile-tokens }
+                  deviceId: { type: string, example: dev_8f2k1q }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "410": { description: Code expired or already used, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+
   # ───────────────────────────── profiles ─────────────────────────────
   /v1/profiles:
     get:
@@ -1385,6 +1423,33 @@ paths:
         "204": { description: Denied }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /admin/api/pair-codes:
+    post:
+      operationId: adminCreatePairCode
+      tags: [admin]
+      summary: Mint a single-use QR pairing code
+      description: |
+        Backs the web admin's "Link a device" QR. `qrPayload` is the exact
+        string to encode: `blitteramp://pair?server=<canonicalUrl>&code=<code>`.
+        Requires the canonical URL server setting; the QR must never embed a
+        raw request-derived LAN address.
+      security: [{ adminSession: [] }]
+      responses:
+        "201":
+          description: Pair code
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [code, expiresAt, canonicalUrl, qrPayload]
+                properties:
+                  code: { type: string, example: "7GK4PC" }
+                  expiresAt: { type: string, format: date-time }
+                  canonicalUrl: { type: string, example: "https://music.example.net" }
+                  qrPayload: { type: string, example: "blitteramp://pair?server=https%3A%2F%2Fmusic.example.net&code=7GK4PC" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { description: Canonical URL not configured, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+
   /admin/api/devices:
     get:
       operationId: adminListDevices
@@ -1411,6 +1476,33 @@ paths:
       responses:
         "204": { description: Revoked }
         "404": { $ref: "#/components/responses/NotFound" }
+
+  /admin/api/settings/server:
+    get:
+      operationId: adminGetServerSettings
+      tags: [admin]
+      summary: Server settings (canonical URL)
+      security: [{ adminSession: [] }]
+      responses:
+        "200":
+          description: Settings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ServerSettings" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    put:
+      operationId: adminSetServerSettings
+      tags: [admin]
+      summary: Update server settings
+      security: [{ adminSession: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ServerSettings" }
+      responses:
+        "204": { description: Saved }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /admin/api/settings/transcode:
     get:
@@ -1928,6 +2020,7 @@ components:
         pendingPairings: { type: integer }
         deviceCount: { type: integer }
         profileCount: { type: integer }
+        canonicalUrlSet: { type: boolean }
 
     LidarrConfig:
       type: object
@@ -1952,6 +2045,17 @@ components:
         ok: { type: boolean }
         version: { type: string, nullable: true }
         error: { type: string, nullable: true }
+
+    ServerSettings:
+      type: object
+      required: [canonicalUrl]
+      properties:
+        canonicalUrl:
+          type: string
+          nullable: true
+          format: uri
+          example: "https://music.example.net"
+          description: Public base URL embedded in pairing QRs — set during first-run setup; never a raw LAN IP unless devices genuinely reach it there
 
     TranscodeSettings:
       type: object
