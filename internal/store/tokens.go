@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 )
 
 // Identity is a resolved bearer token. Empty ProfileID means a device token
@@ -69,12 +70,12 @@ func (s *Store) ResolveToken(ctx context.Context, raw string) (Identity, bool, e
 	if err == nil {
 		return id, true, nil
 	}
-	if err != sql.ErrNoRows {
+	if !errors.Is(err, sql.ErrNoRows) {
 		return Identity{}, false, err
 	}
 	err = s.db.QueryRowContext(ctx,
 		`SELECT device_id FROM device_tokens WHERE token_hash = ?`, h).Scan(&id.DeviceID)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return Identity{}, false, nil
 	}
 	if err != nil {
