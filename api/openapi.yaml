@@ -1184,6 +1184,198 @@ paths:
                 items: { $ref: "#/components/schemas/PresenceEntry" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
+  /v1/parties:
+    get:
+      operationId: listParties
+      tags: [social]
+      summary: Parties visible to the calling profile (joined + open invites)
+      responses:
+        "200":
+          description: Parties
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Party" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      operationId: createParty
+      tags: [social]
+      summary: Start a listen party (caller becomes host)
+      description: Parties are ephemeral and in-memory — they do not survive a server restart.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, nullable: true, example: "Friday kitchen disco" }
+      responses:
+        "201":
+          description: Party
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Party" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/parties/{partyId}:
+    get:
+      operationId: getParty
+      tags: [social]
+      summary: Party snapshot (poll/resync path for party.updated)
+      parameters:
+        - $ref: "#/components/parameters/partyId"
+      responses:
+        "200":
+          description: Party
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Party" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      operationId: endParty
+      tags: [social]
+      summary: End the party (host only)
+      parameters:
+        - $ref: "#/components/parameters/partyId"
+      responses:
+        "204": { description: Ended }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/parties/{partyId}/invites:
+    post:
+      operationId: inviteToParty
+      tags: [social]
+      summary: Invite profiles (fires party.invited to each)
+      parameters:
+        - $ref: "#/components/parameters/partyId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [profileIds]
+              properties:
+                profileIds:
+                  type: array
+                  minItems: 1
+                  items: { type: string, example: prf_9z8y7x }
+      responses:
+        "204": { description: Invited }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/parties/{partyId}/join:
+    post:
+      operationId: joinParty
+      tags: [social]
+      summary: Join a party
+      parameters:
+        - $ref: "#/components/parameters/partyId"
+      responses:
+        "200":
+          description: Party after joining
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Party" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/parties/{partyId}/leave:
+    post:
+      operationId: leaveParty
+      tags: [social]
+      summary: Leave a party (host leaving ends it)
+      parameters:
+        - $ref: "#/components/parameters/partyId"
+      responses:
+        "204": { description: Left }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/parties/{partyId}/queue:
+    post:
+      operationId: appendPartyQueue
+      tags: [social]
+      summary: Append tracks to the party queue (any member)
+      parameters:
+        - $ref: "#/components/parameters/partyId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [trackIds]
+              properties:
+                trackIds:
+                  type: array
+                  minItems: 1
+                  items: { type: string, example: trk_2vq8na }
+      responses:
+        "204": { description: Queued }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/parties/{partyId}/transport:
+    post:
+      operationId: partyTransport
+      tags: [social]
+      summary: Transport control (host only)
+      description: |
+        `seek` requires `positionMs`. `skip` advances to the next queue item.
+        Each device streams its own audio via the normal stream path and
+        slaves position to the returned/broadcast timeline — best-effort
+        (sub-second-ish) sync, explicitly NOT sample-accurate.
+      parameters:
+        - $ref: "#/components/parameters/partyId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action: { type: string, enum: [play, pause, skip, seek] }
+                positionMs: { type: integer, nullable: true, description: Required for seek }
+      responses:
+        "200":
+          description: Resulting timeline
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PartyState" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/parties/{partyId}/kick:
+    post:
+      operationId: kickFromParty
+      tags: [social]
+      summary: Remove a member (host only)
+      parameters:
+        - $ref: "#/components/parameters/partyId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [profileId]
+              properties:
+                profileId: { type: string, example: prf_9z8y7x }
+      responses:
+        "204": { description: Removed }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   # ───────────────────────────── events ─────────────────────────────
   /v1/ws:
     get:
@@ -1679,6 +1871,11 @@ components:
       name: sort
       in: query
       schema: { type: string, enum: [title, artist, recentlyAdded, year], default: title }
+    partyId:
+      name: partyId
+      in: path
+      required: true
+      schema: { type: string, example: pty_5g4h3j }
 
   responses:
     Unauthorized:
@@ -2126,6 +2323,60 @@ components:
         avatarColor: { type: string, nullable: true }
         track: { $ref: "#/components/schemas/Track" }
         at: { type: string, format: date-time, description: "When this now-playing state was last observed" }
+
+    Party:
+      type: object
+      required: [partyId, hostProfileId, members, queue, state, createdAt]
+      properties:
+        partyId: { type: string, example: pty_5g4h3j }
+        name: { type: string, nullable: true }
+        hostProfileId: { type: string, example: prf_1a2b3c }
+        members:
+          type: array
+          items:
+            type: object
+            required: [profileId, name]
+            properties:
+              profileId: { type: string, example: prf_1a2b3c }
+              name: { type: string }
+        queue:
+          type: array
+          items: { $ref: "#/components/schemas/PartyQueueItem" }
+        state: { $ref: "#/components/schemas/PartyState" }
+        createdAt: { type: string, format: date-time }
+
+    PartyQueueItem:
+      allOf:
+        - $ref: "#/components/schemas/Track"
+        - type: object
+          required: [itemId, addedByProfileId]
+          properties:
+            itemId: { type: string, example: pqi_2w3e4r, description: Queue item id }
+            addedByProfileId: { type: string, example: prf_9z8y7x }
+
+    PartyState:
+      type: object
+      required: [trackId, paused, positionMs, asOf]
+      description: |
+        Server-owned timeline. `positionMs` is the playback position at `asOf`
+        (server time); while playing, clients extrapolate
+        position = positionMs + (now - asOf) using their clock offset. When
+        paused, `positionMs` is frozen.
+      properties:
+        trackId: { type: string, nullable: true, example: trk_2vq8na, description: Null before the first track starts }
+        paused: { type: boolean }
+        positionMs: { type: integer }
+        asOf: { type: string, format: date-time }
+
+    PartyInvite:
+      type: object
+      required: [partyId, fromProfileId, fromProfileName, at]
+      properties:
+        partyId: { type: string, example: pty_5g4h3j }
+        partyName: { type: string, nullable: true }
+        fromProfileId: { type: string, example: prf_1a2b3c }
+        fromProfileName: { type: string }
+        at: { type: string, format: date-time }
 
     AcquisitionActivity:
       type: object
