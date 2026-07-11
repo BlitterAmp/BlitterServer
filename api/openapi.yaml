@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: BlitterServer API
-  version: 1.0.0-draft.2
+  version: 1.0.0-draft.3
   license:
     name: MIT
     url: https://opensource.org/license/mit
@@ -1526,6 +1526,57 @@ paths:
               schema: { $ref: "#/components/schemas/AdminState" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
+  /admin/api/source/filesystem:
+    get:
+      operationId: adminGetFilesystemSource
+      tags: [admin]
+      summary: Filesystem source config + scan state
+      security: [{ adminSession: [] }]
+      responses:
+        "200":
+          description: Config
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FilesystemSourceConfig" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    put:
+      operationId: adminSetFilesystemSource
+      tags: [admin]
+      summary: Point BlitterServer at a music directory (queues the initial scan)
+      security: [{ adminSession: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [path]
+              properties:
+                path: { type: string, example: /srv/music }
+      responses:
+        "204": { description: Saved; initial scan queued }
+        "400": { description: Path does not exist or is not a directory, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    delete:
+      operationId: adminDeleteFilesystemSource
+      tags: [admin]
+      summary: Unlink the filesystem source (library entries are marked missing, never deleted)
+      security: [{ adminSession: [] }]
+      responses:
+        "204": { description: Unlinked }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /admin/api/source/filesystem/scan:
+    post:
+      operationId: adminScanFilesystemSource
+      tags: [admin]
+      summary: Queue a library rescan
+      security: [{ adminSession: [] }]
+      responses:
+        "202": { description: Scan queued }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { description: No filesystem source configured, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+
   /admin/api/source/plex/pin:
     post:
       operationId: adminStartPlexPin
@@ -2012,7 +2063,7 @@ components:
           type: object
           required: [kind, connected]
           properties:
-            kind: { type: string, enum: [plex] }
+            kind: { type: string, enum: [none, filesystem, plex] }
             connected: { type: boolean }
             libraryName: { type: string, nullable: true }
         integrations:
@@ -2522,6 +2573,16 @@ components:
         owned: { type: boolean }
         sourceTitle: { type: string, nullable: true, description: Owner name for shared servers }
 
+    FilesystemSourceConfig:
+      type: object
+      required: [configured, scanning]
+      properties:
+        configured: { type: boolean }
+        path: { type: string, nullable: true }
+        scanning: { type: boolean }
+        lastScanAt: { type: string, format: date-time, nullable: true }
+        lastScanError: { type: string, nullable: true }
+
     AdminState:
       type: object
       required: [setupComplete, source, integrations, pendingPairings, deviceCount, profileCount]
@@ -2530,6 +2591,7 @@ components:
         source:
           type: object
           properties:
+            kind: { type: string, enum: [none, filesystem, plex] }
             linked: { type: boolean }
             librarySelected: { type: boolean }
             connected: { type: boolean }

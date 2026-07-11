@@ -43,7 +43,7 @@ func TestGetStatusHonestZeros(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := resp.(api.GetStatus200JSONResponse)
-	if r.Source.Connected || r.Source.Kind != "plex" || r.SetupComplete {
+	if r.Source.Connected || r.Source.Kind != "none" || r.SetupComplete {
 		t.Fatalf("dishonest status: %+v", r)
 	}
 }

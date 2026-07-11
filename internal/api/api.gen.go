@@ -71,6 +71,27 @@ func (e AdminStateIntegrationsLidarr) Valid() bool {
 	}
 }
 
+// Defines values for AdminStateSourceKind.
+const (
+	AdminStateSourceKindFilesystem AdminStateSourceKind = "filesystem"
+	AdminStateSourceKindNone       AdminStateSourceKind = "none"
+	AdminStateSourceKindPlex       AdminStateSourceKind = "plex"
+)
+
+// Valid indicates whether the value is a known member of the AdminStateSourceKind enum.
+func (e AdminStateSourceKind) Valid() bool {
+	switch e {
+	case AdminStateSourceKindFilesystem:
+		return true
+	case AdminStateSourceKindNone:
+		return true
+	case AdminStateSourceKindPlex:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ArtifactFormat.
 const (
 	ArtifactFormatAac      ArtifactFormat = "aac"
@@ -457,13 +478,19 @@ func (e ServerStatusIntegrationsLidarr) Valid() bool {
 
 // Defines values for ServerStatusSourceKind.
 const (
-	Plex ServerStatusSourceKind = "plex"
+	ServerStatusSourceKindFilesystem ServerStatusSourceKind = "filesystem"
+	ServerStatusSourceKindNone       ServerStatusSourceKind = "none"
+	ServerStatusSourceKindPlex       ServerStatusSourceKind = "plex"
 )
 
 // Valid indicates whether the value is a known member of the ServerStatusSourceKind enum.
 func (e ServerStatusSourceKind) Valid() bool {
 	switch e {
-	case Plex:
+	case ServerStatusSourceKindFilesystem:
+		return true
+	case ServerStatusSourceKindNone:
+		return true
+	case ServerStatusSourceKindPlex:
 		return true
 	default:
 		return false
@@ -891,10 +918,11 @@ type AdminState struct {
 	ProfileCount    int  `json:"profileCount"`
 	SetupComplete   bool `json:"setupComplete"`
 	Source          struct {
-		Connected       *bool   `json:"connected,omitempty"`
-		LibraryName     *string `json:"libraryName,omitempty"`
-		LibrarySelected *bool   `json:"librarySelected,omitempty"`
-		Linked          *bool   `json:"linked,omitempty"`
+		Connected       *bool                 `json:"connected,omitempty"`
+		Kind            *AdminStateSourceKind `json:"kind,omitempty"`
+		LibraryName     *string               `json:"libraryName,omitempty"`
+		LibrarySelected *bool                 `json:"librarySelected,omitempty"`
+		Linked          *bool                 `json:"linked,omitempty"`
 	} `json:"source"`
 }
 
@@ -903,6 +931,9 @@ type AdminStateIntegrationsLastfm string
 
 // AdminStateIntegrationsLidarr defines model for AdminState.Integrations.Lidarr.
 type AdminStateIntegrationsLidarr string
+
+// AdminStateSourceKind defines model for AdminState.Source.Kind.
+type AdminStateSourceKind string
 
 // Album defines model for Album.
 type Album struct {
@@ -1055,6 +1086,15 @@ type ExternalArtist struct {
 
 // ExternalArtistDiscographyState defines model for ExternalArtist.Discography.State.
 type ExternalArtistDiscographyState string
+
+// FilesystemSourceConfig defines model for FilesystemSourceConfig.
+type FilesystemSourceConfig struct {
+	Configured    bool       `json:"configured"`
+	LastScanAt    *time.Time `json:"lastScanAt,omitempty"`
+	LastScanError *string    `json:"lastScanError,omitempty"`
+	Path          *string    `json:"path,omitempty"`
+	Scanning      bool       `json:"scanning"`
+}
 
 // Genre defines model for Genre.
 type Genre struct {
@@ -1568,6 +1608,11 @@ type AdminSetupJSONBody struct {
 	Password string `json:"password"`
 }
 
+// AdminSetFilesystemSourceJSONBody defines parameters for AdminSetFilesystemSource.
+type AdminSetFilesystemSourceJSONBody struct {
+	Path string `json:"path"`
+}
+
 // AdminSelectPlexLibraryJSONBody defines parameters for AdminSelectPlexLibrary.
 type AdminSelectPlexLibraryJSONBody struct {
 	LibraryId string `json:"libraryId"`
@@ -1859,6 +1904,9 @@ type AdminSetTranscodeSettingsJSONRequestBody = TranscodeSettings
 // AdminSetupJSONRequestBody defines body for AdminSetup for application/json ContentType.
 type AdminSetupJSONRequestBody AdminSetupJSONBody
 
+// AdminSetFilesystemSourceJSONRequestBody defines body for AdminSetFilesystemSource for application/json ContentType.
+type AdminSetFilesystemSourceJSONRequestBody AdminSetFilesystemSourceJSONBody
+
 // AdminSelectPlexLibraryJSONRequestBody defines body for AdminSelectPlexLibrary for application/json ContentType.
 type AdminSelectPlexLibraryJSONRequestBody AdminSelectPlexLibraryJSONBody
 
@@ -2079,6 +2127,20 @@ type ClientInterface interface {
 	AdminSetupWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	AdminSetup(ctx context.Context, body AdminSetupJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// AdminDeleteFilesystemSource request
+	AdminDeleteFilesystemSource(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// AdminGetFilesystemSource request
+	AdminGetFilesystemSource(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// AdminSetFilesystemSourceWithBody request with any body
+	AdminSetFilesystemSourceWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	AdminSetFilesystemSource(ctx context.Context, body AdminSetFilesystemSourceJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// AdminScanFilesystemSource request
+	AdminScanFilesystemSource(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// AdminListPlexLibraries request
 	AdminListPlexLibraries(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -2720,6 +2782,66 @@ func (c *Client) AdminSetupWithBody(ctx context.Context, contentType string, bod
 
 func (c *Client) AdminSetup(ctx context.Context, body AdminSetupJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewAdminSetupRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AdminDeleteFilesystemSource(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminDeleteFilesystemSourceRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AdminGetFilesystemSource(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminGetFilesystemSourceRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AdminSetFilesystemSourceWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminSetFilesystemSourceRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AdminSetFilesystemSource(ctx context.Context, body AdminSetFilesystemSourceJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminSetFilesystemSourceRequest(c.Server, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AdminScanFilesystemSource(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminScanFilesystemSourceRequest(c.Server)
 	if err != nil {
 		return nil, err
 	}
@@ -4653,6 +4775,127 @@ func NewAdminSetupRequestWithBody(server string, contentType string, body io.Rea
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewAdminDeleteFilesystemSourceRequest generates requests for AdminDeleteFilesystemSource
+func NewAdminDeleteFilesystemSourceRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/api/source/filesystem")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodDelete, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewAdminGetFilesystemSourceRequest generates requests for AdminGetFilesystemSource
+func NewAdminGetFilesystemSourceRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/api/source/filesystem")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewAdminSetFilesystemSourceRequest calls the generic AdminSetFilesystemSource builder with application/json body
+func NewAdminSetFilesystemSourceRequest(server string, body AdminSetFilesystemSourceJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewAdminSetFilesystemSourceRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewAdminSetFilesystemSourceRequestWithBody generates requests for AdminSetFilesystemSource with any type of body
+func NewAdminSetFilesystemSourceRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/api/source/filesystem")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPut, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewAdminScanFilesystemSourceRequest generates requests for AdminScanFilesystemSource
+func NewAdminScanFilesystemSourceRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/api/source/filesystem/scan")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	return req, nil
 }
@@ -7736,6 +7979,20 @@ type ClientWithResponsesInterface interface {
 
 	AdminSetupWithResponse(ctx context.Context, body AdminSetupJSONRequestBody, reqEditors ...RequestEditorFn) (*AdminSetupResponse, error)
 
+	// AdminDeleteFilesystemSourceWithResponse request
+	AdminDeleteFilesystemSourceWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AdminDeleteFilesystemSourceResponse, error)
+
+	// AdminGetFilesystemSourceWithResponse request
+	AdminGetFilesystemSourceWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AdminGetFilesystemSourceResponse, error)
+
+	// AdminSetFilesystemSourceWithBodyWithResponse request with any body
+	AdminSetFilesystemSourceWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AdminSetFilesystemSourceResponse, error)
+
+	AdminSetFilesystemSourceWithResponse(ctx context.Context, body AdminSetFilesystemSourceJSONRequestBody, reqEditors ...RequestEditorFn) (*AdminSetFilesystemSourceResponse, error)
+
+	// AdminScanFilesystemSourceWithResponse request
+	AdminScanFilesystemSourceWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AdminScanFilesystemSourceResponse, error)
+
 	// AdminListPlexLibrariesWithResponse request
 	AdminListPlexLibrariesWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AdminListPlexLibrariesResponse, error)
 
@@ -8738,6 +8995,129 @@ func (r AdminSetupResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r AdminSetupResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type AdminDeleteFilesystemSourceResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	ApplicationproblemJSON401 *Unauthorized
+}
+
+// Status returns HTTPResponse.Status
+func (r AdminDeleteFilesystemSourceResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r AdminDeleteFilesystemSourceResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r AdminDeleteFilesystemSourceResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type AdminGetFilesystemSourceResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *FilesystemSourceConfig
+	ApplicationproblemJSON401 *Unauthorized
+}
+
+// Status returns HTTPResponse.Status
+func (r AdminGetFilesystemSourceResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r AdminGetFilesystemSourceResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r AdminGetFilesystemSourceResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type AdminSetFilesystemSourceResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	ApplicationproblemJSON400 *Problem
+	ApplicationproblemJSON401 *Unauthorized
+}
+
+// Status returns HTTPResponse.Status
+func (r AdminSetFilesystemSourceResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r AdminSetFilesystemSourceResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r AdminSetFilesystemSourceResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type AdminScanFilesystemSourceResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	ApplicationproblemJSON401 *Unauthorized
+	ApplicationproblemJSON409 *Problem
+}
+
+// Status returns HTTPResponse.Status
+func (r AdminScanFilesystemSourceResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r AdminScanFilesystemSourceResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r AdminScanFilesystemSourceResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -11452,6 +11832,50 @@ func (c *ClientWithResponses) AdminSetupWithResponse(ctx context.Context, body A
 	return ParseAdminSetupResponse(rsp)
 }
 
+// AdminDeleteFilesystemSourceWithResponse request returning *AdminDeleteFilesystemSourceResponse
+func (c *ClientWithResponses) AdminDeleteFilesystemSourceWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AdminDeleteFilesystemSourceResponse, error) {
+	rsp, err := c.AdminDeleteFilesystemSource(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAdminDeleteFilesystemSourceResponse(rsp)
+}
+
+// AdminGetFilesystemSourceWithResponse request returning *AdminGetFilesystemSourceResponse
+func (c *ClientWithResponses) AdminGetFilesystemSourceWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AdminGetFilesystemSourceResponse, error) {
+	rsp, err := c.AdminGetFilesystemSource(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAdminGetFilesystemSourceResponse(rsp)
+}
+
+// AdminSetFilesystemSourceWithBodyWithResponse request with arbitrary body returning *AdminSetFilesystemSourceResponse
+func (c *ClientWithResponses) AdminSetFilesystemSourceWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AdminSetFilesystemSourceResponse, error) {
+	rsp, err := c.AdminSetFilesystemSourceWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAdminSetFilesystemSourceResponse(rsp)
+}
+
+func (c *ClientWithResponses) AdminSetFilesystemSourceWithResponse(ctx context.Context, body AdminSetFilesystemSourceJSONRequestBody, reqEditors ...RequestEditorFn) (*AdminSetFilesystemSourceResponse, error) {
+	rsp, err := c.AdminSetFilesystemSource(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAdminSetFilesystemSourceResponse(rsp)
+}
+
+// AdminScanFilesystemSourceWithResponse request returning *AdminScanFilesystemSourceResponse
+func (c *ClientWithResponses) AdminScanFilesystemSourceWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AdminScanFilesystemSourceResponse, error) {
+	rsp, err := c.AdminScanFilesystemSource(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAdminScanFilesystemSourceResponse(rsp)
+}
+
 // AdminListPlexLibrariesWithResponse request returning *AdminListPlexLibrariesResponse
 func (c *ClientWithResponses) AdminListPlexLibrariesWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AdminListPlexLibrariesResponse, error) {
 	rsp, err := c.AdminListPlexLibraries(ctx, reqEditors...)
@@ -13023,6 +13447,131 @@ func ParseAdminSetupResponse(rsp *http.Response) (*AdminSetupResponse, error) {
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest Problem
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseAdminDeleteFilesystemSourceResponse parses an HTTP response from a AdminDeleteFilesystemSourceWithResponse call
+func ParseAdminDeleteFilesystemSourceResponse(rsp *http.Response) (*AdminDeleteFilesystemSourceResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AdminDeleteFilesystemSourceResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest Unauthorized
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseAdminGetFilesystemSourceResponse parses an HTTP response from a AdminGetFilesystemSourceWithResponse call
+func ParseAdminGetFilesystemSourceResponse(rsp *http.Response) (*AdminGetFilesystemSourceResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AdminGetFilesystemSourceResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest FilesystemSourceConfig
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest Unauthorized
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseAdminSetFilesystemSourceResponse parses an HTTP response from a AdminSetFilesystemSourceWithResponse call
+func ParseAdminSetFilesystemSourceResponse(rsp *http.Response) (*AdminSetFilesystemSourceResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AdminSetFilesystemSourceResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest Problem
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest Unauthorized
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseAdminScanFilesystemSourceResponse parses an HTTP response from a AdminScanFilesystemSourceWithResponse call
+func ParseAdminScanFilesystemSourceResponse(rsp *http.Response) (*AdminScanFilesystemSourceResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AdminScanFilesystemSourceResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest Unauthorized
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
 		var dest Problem
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
@@ -15867,6 +16416,18 @@ type ServerInterface interface {
 	// First-run — set the admin password (only while setupComplete=false)
 	// (POST /admin/api/setup)
 	AdminSetup(w http.ResponseWriter, r *http.Request)
+	// Unlink the filesystem source (library entries are marked missing, never deleted)
+	// (DELETE /admin/api/source/filesystem)
+	AdminDeleteFilesystemSource(w http.ResponseWriter, r *http.Request)
+	// Filesystem source config + scan state
+	// (GET /admin/api/source/filesystem)
+	AdminGetFilesystemSource(w http.ResponseWriter, r *http.Request)
+	// Point BlitterServer at a music directory (queues the initial scan)
+	// (PUT /admin/api/source/filesystem)
+	AdminSetFilesystemSource(w http.ResponseWriter, r *http.Request)
+	// Queue a library rescan
+	// (POST /admin/api/source/filesystem/scan)
+	AdminScanFilesystemSource(w http.ResponseWriter, r *http.Request)
 	// Discoverable music libraries across linked servers
 	// (GET /admin/api/source/plex/libraries)
 	AdminListPlexLibraries(w http.ResponseWriter, r *http.Request)
@@ -16622,6 +17183,86 @@ func (siw *ServerInterfaceWrapper) AdminSetup(w http.ResponseWriter, r *http.Req
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.AdminSetup(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// AdminDeleteFilesystemSource operation middleware
+func (siw *ServerInterfaceWrapper) AdminDeleteFilesystemSource(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, AdminSessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AdminDeleteFilesystemSource(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// AdminGetFilesystemSource operation middleware
+func (siw *ServerInterfaceWrapper) AdminGetFilesystemSource(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, AdminSessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AdminGetFilesystemSource(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// AdminSetFilesystemSource operation middleware
+func (siw *ServerInterfaceWrapper) AdminSetFilesystemSource(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, AdminSessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AdminSetFilesystemSource(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// AdminScanFilesystemSource operation middleware
+func (siw *ServerInterfaceWrapper) AdminScanFilesystemSource(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, AdminSessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AdminScanFilesystemSource(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -19059,6 +19700,10 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/api/settings/transcode", wrapper.AdminGetTranscodeSettings)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/admin/api/settings/transcode", wrapper.AdminSetTranscodeSettings)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/api/setup", wrapper.AdminSetup)
+	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/admin/api/source/filesystem", wrapper.AdminDeleteFilesystemSource)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/api/source/filesystem", wrapper.AdminGetFilesystemSource)
+	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/admin/api/source/filesystem", wrapper.AdminSetFilesystemSource)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/api/source/filesystem/scan", wrapper.AdminScanFilesystemSource)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/api/source/plex/libraries", wrapper.AdminListPlexLibraries)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/admin/api/source/plex/library", wrapper.AdminSelectPlexLibrary)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/api/source/plex/pin", wrapper.AdminStartPlexPin)
@@ -20055,6 +20700,165 @@ func (response AdminSetup204Response) VisitAdminSetupResponse(w http.ResponseWri
 type AdminSetup409ApplicationProblemPlusJSONResponse Problem
 
 func (response AdminSetup409ApplicationProblemPlusJSONResponse) VisitAdminSetupResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminDeleteFilesystemSourceRequestObject struct {
+}
+
+type AdminDeleteFilesystemSourceResponseObject interface {
+	VisitAdminDeleteFilesystemSourceResponse(w http.ResponseWriter) error
+}
+
+type AdminDeleteFilesystemSource204Response struct {
+}
+
+func (response AdminDeleteFilesystemSource204Response) VisitAdminDeleteFilesystemSourceResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type AdminDeleteFilesystemSource401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response AdminDeleteFilesystemSource401ApplicationProblemPlusJSONResponse) VisitAdminDeleteFilesystemSourceResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminGetFilesystemSourceRequestObject struct {
+}
+
+type AdminGetFilesystemSourceResponseObject interface {
+	VisitAdminGetFilesystemSourceResponse(w http.ResponseWriter) error
+}
+
+type AdminGetFilesystemSource200JSONResponse FilesystemSourceConfig
+
+func (response AdminGetFilesystemSource200JSONResponse) VisitAdminGetFilesystemSourceResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminGetFilesystemSource401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response AdminGetFilesystemSource401ApplicationProblemPlusJSONResponse) VisitAdminGetFilesystemSourceResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminSetFilesystemSourceRequestObject struct {
+	Body *AdminSetFilesystemSourceJSONRequestBody
+}
+
+type AdminSetFilesystemSourceResponseObject interface {
+	VisitAdminSetFilesystemSourceResponse(w http.ResponseWriter) error
+}
+
+type AdminSetFilesystemSource204Response struct {
+}
+
+func (response AdminSetFilesystemSource204Response) VisitAdminSetFilesystemSourceResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type AdminSetFilesystemSource400ApplicationProblemPlusJSONResponse Problem
+
+func (response AdminSetFilesystemSource400ApplicationProblemPlusJSONResponse) VisitAdminSetFilesystemSourceResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminSetFilesystemSource401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response AdminSetFilesystemSource401ApplicationProblemPlusJSONResponse) VisitAdminSetFilesystemSourceResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminScanFilesystemSourceRequestObject struct {
+}
+
+type AdminScanFilesystemSourceResponseObject interface {
+	VisitAdminScanFilesystemSourceResponse(w http.ResponseWriter) error
+}
+
+type AdminScanFilesystemSource202Response struct {
+}
+
+func (response AdminScanFilesystemSource202Response) VisitAdminScanFilesystemSourceResponse(w http.ResponseWriter) error {
+	w.WriteHeader(202)
+	return nil
+}
+
+type AdminScanFilesystemSource401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response AdminScanFilesystemSource401ApplicationProblemPlusJSONResponse) VisitAdminScanFilesystemSourceResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminScanFilesystemSource409ApplicationProblemPlusJSONResponse Problem
+
+func (response AdminScanFilesystemSource409ApplicationProblemPlusJSONResponse) VisitAdminScanFilesystemSourceResponse(w http.ResponseWriter) error {
 
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(response); err != nil {
@@ -23794,6 +24598,18 @@ type StrictServerInterface interface {
 	// First-run — set the admin password (only while setupComplete=false)
 	// (POST /admin/api/setup)
 	AdminSetup(ctx context.Context, request AdminSetupRequestObject) (AdminSetupResponseObject, error)
+	// Unlink the filesystem source (library entries are marked missing, never deleted)
+	// (DELETE /admin/api/source/filesystem)
+	AdminDeleteFilesystemSource(ctx context.Context, request AdminDeleteFilesystemSourceRequestObject) (AdminDeleteFilesystemSourceResponseObject, error)
+	// Filesystem source config + scan state
+	// (GET /admin/api/source/filesystem)
+	AdminGetFilesystemSource(ctx context.Context, request AdminGetFilesystemSourceRequestObject) (AdminGetFilesystemSourceResponseObject, error)
+	// Point BlitterServer at a music directory (queues the initial scan)
+	// (PUT /admin/api/source/filesystem)
+	AdminSetFilesystemSource(ctx context.Context, request AdminSetFilesystemSourceRequestObject) (AdminSetFilesystemSourceResponseObject, error)
+	// Queue a library rescan
+	// (POST /admin/api/source/filesystem/scan)
+	AdminScanFilesystemSource(ctx context.Context, request AdminScanFilesystemSourceRequestObject) (AdminScanFilesystemSourceResponseObject, error)
 	// Discoverable music libraries across linked servers
 	// (GET /admin/api/source/plex/libraries)
 	AdminListPlexLibraries(ctx context.Context, request AdminListPlexLibrariesRequestObject) (AdminListPlexLibrariesResponseObject, error)
@@ -24685,6 +25501,109 @@ func (sh *strictHandler) AdminSetup(w http.ResponseWriter, r *http.Request) {
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(AdminSetupResponseObject); ok {
 		if err := validResponse.VisitAdminSetupResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AdminDeleteFilesystemSource operation middleware
+func (sh *strictHandler) AdminDeleteFilesystemSource(w http.ResponseWriter, r *http.Request) {
+	var request AdminDeleteFilesystemSourceRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.AdminDeleteFilesystemSource(ctx, request.(AdminDeleteFilesystemSourceRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AdminDeleteFilesystemSource")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(AdminDeleteFilesystemSourceResponseObject); ok {
+		if err := validResponse.VisitAdminDeleteFilesystemSourceResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AdminGetFilesystemSource operation middleware
+func (sh *strictHandler) AdminGetFilesystemSource(w http.ResponseWriter, r *http.Request) {
+	var request AdminGetFilesystemSourceRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.AdminGetFilesystemSource(ctx, request.(AdminGetFilesystemSourceRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AdminGetFilesystemSource")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(AdminGetFilesystemSourceResponseObject); ok {
+		if err := validResponse.VisitAdminGetFilesystemSourceResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AdminSetFilesystemSource operation middleware
+func (sh *strictHandler) AdminSetFilesystemSource(w http.ResponseWriter, r *http.Request) {
+	var request AdminSetFilesystemSourceRequestObject
+
+	var body AdminSetFilesystemSourceJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.AdminSetFilesystemSource(ctx, request.(AdminSetFilesystemSourceRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AdminSetFilesystemSource")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(AdminSetFilesystemSourceResponseObject); ok {
+		if err := validResponse.VisitAdminSetFilesystemSourceResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AdminScanFilesystemSource operation middleware
+func (sh *strictHandler) AdminScanFilesystemSource(w http.ResponseWriter, r *http.Request) {
+	var request AdminScanFilesystemSourceRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.AdminScanFilesystemSource(ctx, request.(AdminScanFilesystemSourceRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AdminScanFilesystemSource")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(AdminScanFilesystemSourceResponseObject); ok {
+		if err := validResponse.VisitAdminScanFilesystemSourceResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

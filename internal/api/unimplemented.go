@@ -411,3 +411,19 @@ func (Unimplemented) ListTracks(ctx context.Context, request ListTracksRequestOb
 func (Unimplemented) GetTrack(ctx context.Context, request GetTrackRequestObject) (GetTrackResponseObject, error) {
 	return nil, ErrNotImplemented
 }
+
+func (Unimplemented) AdminDeleteFilesystemSource(ctx context.Context, request AdminDeleteFilesystemSourceRequestObject) (AdminDeleteFilesystemSourceResponseObject, error) {
+	return nil, ErrNotImplemented
+}
+
+func (Unimplemented) AdminGetFilesystemSource(ctx context.Context, request AdminGetFilesystemSourceRequestObject) (AdminGetFilesystemSourceResponseObject, error) {
+	return nil, ErrNotImplemented
+}
+
+func (Unimplemented) AdminSetFilesystemSource(ctx context.Context, request AdminSetFilesystemSourceRequestObject) (AdminSetFilesystemSourceResponseObject, error) {
+	return nil, ErrNotImplemented
+}
+
+func (Unimplemented) AdminScanFilesystemSource(ctx context.Context, request AdminScanFilesystemSourceRequestObject) (AdminScanFilesystemSourceResponseObject, error) {
+	return nil, ErrNotImplemented
+}
