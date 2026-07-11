@@ -215,6 +215,7 @@ paths:
                   deviceId: { type: string, example: dev_8f2k1q }
         "404": { $ref: "#/components/responses/NotFound" }
         "410": { description: Code expired or already used, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+        "429": { $ref: "#/components/responses/Problem" }
 
   # ───────────────────────────── profiles ─────────────────────────────
   /v1/profiles:
@@ -265,6 +266,7 @@ paths:
                 properties:
                   token: { type: string }
                   profile: { $ref: "#/components/schemas/Profile" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { description: PIN required or wrong, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
 
@@ -309,6 +311,7 @@ paths:
                 required: [url]
                 properties:
                   url: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "409": { description: Instance has no last.fm API credentials, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
 
   /v1/me/settings:
@@ -396,6 +399,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ArtistDetail" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/artists/{artistId}/albums:
@@ -412,6 +416,7 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Album" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/artists/{artistId}/tracks:
@@ -428,6 +433,7 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Track" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/artists/{artistId}/similar:
@@ -444,6 +450,7 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/SimilarArtist" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/albums:
@@ -484,6 +491,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Album" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/albums/{albumId}/tracks:
@@ -500,6 +508,7 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Track" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/tracks:
@@ -540,6 +549,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Track" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/genres:
@@ -571,6 +581,7 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Track" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/playlists:
@@ -630,6 +641,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Playlist" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
     patch:
       operationId: updatePlaylist
@@ -651,6 +663,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Playlist" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/NotFound" }
     delete:
@@ -660,6 +673,7 @@ paths:
       parameters: [{ name: playlistId, in: path, required: true, schema: { type: string } }]
       responses:
         "204": { description: Deleted }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/NotFound" }
 
@@ -686,6 +700,7 @@ paths:
                       items:
                         type: array
                         items: { $ref: "#/components/schemas/PlaylistTrack" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
     post:
       operationId: appendPlaylistTracks
@@ -705,6 +720,7 @@ paths:
                   items: { type: string }
       responses:
         "204": { description: Appended }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/NotFound" }
 
@@ -718,6 +734,7 @@ paths:
         - { name: itemId, in: path, required: true, schema: { type: string } }
       responses:
         "204": { description: Removed }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/NotFound" }
 
@@ -744,6 +761,7 @@ paths:
                   description: Source scale 0–10 (stars×2); null clears
       responses:
         "204": { description: Rated }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   # ───────────────────────────── search ─────────────────────────────
@@ -806,6 +824,7 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Track" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/radio/next:
@@ -853,6 +872,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExternalArtist" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/me/discover:
@@ -968,6 +988,7 @@ paths:
         - { name: h, in: query, required: false, schema: { type: integer, maximum: 2048 } }
       responses:
         "200": { description: Image, content: { image/jpeg: { schema: { type: string, format: binary } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   # ───────────────────────────── artifacts ─────────────────────────────
@@ -1022,6 +1043,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Artifact" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
     delete:
       operationId: releaseArtifact
@@ -1043,6 +1065,7 @@ paths:
       responses:
         "200": { description: Full content, content: { audio/*: { schema: { type: string, format: binary } } } }
         "206": { description: Partial content }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "409": { description: Not ready yet, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
 
@@ -1092,6 +1115,9 @@ paths:
         Instance-level: Blittarr watches/acquires an artist while ≥1 profile
         loves it (union); removing the last love stops watching but never
         removes media.
+
+        Setting `neutral` returns the resulting record with `state: neutral`;
+        neutral records are not persisted and never appear in `GET /v1/loves`.
       parameters:
         - { name: ref, in: path, required: true, schema: { type: string, example: art_9f3kq2 } }
       requestBody:
@@ -1425,6 +1451,10 @@ paths:
         There is no client→server channel — control actions are ordinary
         POSTs. Every event-producing resource keeps a plain pollable GET as
         the resync path (mandatory after iOS backgrounding kills the stream).
+
+        There is no presence-removal event — a profile stopping playback or
+        disabling share-listening simply stops appearing in `GET /v1/presence`;
+        clients converge via that poll path.
       parameters:
         - { name: Last-Event-ID, in: header, required: false, schema: { type: string }, description: Sequence number of the last event received }
       responses:
@@ -1728,6 +1758,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Profile" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
     delete:
       operationId: adminDeleteProfile
@@ -1737,6 +1768,7 @@ paths:
       parameters: [{ name: profileId, in: path, required: true, schema: { type: string } }]
       responses:
         "204": { description: Deleted }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /admin/api/pairings:
@@ -1764,6 +1796,7 @@ paths:
       parameters: [{ name: pairingId, in: path, required: true, schema: { type: string } }]
       responses:
         "204": { description: Approved }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /admin/api/pairings/{pairingId}/deny:
@@ -1775,6 +1808,7 @@ paths:
       parameters: [{ name: pairingId, in: path, required: true, schema: { type: string } }]
       responses:
         "204": { description: Denied }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /admin/api/pair-codes:
@@ -1829,6 +1863,7 @@ paths:
       parameters: [{ name: deviceId, in: path, required: true, schema: { type: string } }]
       responses:
         "204": { description: Revoked }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /admin/api/settings/server:
@@ -2059,7 +2094,9 @@ components:
           items: { type: string }
         albumCount: { type: integer, nullable: true }
         userRating10: { type: integer, nullable: true }
-        loveState: { $ref: "#/components/schemas/LoveState", description: "The calling profile's tri-state; absent = neutral" }
+        loveState:
+          allOf: [{ $ref: "#/components/schemas/LoveState" }]
+          description: The calling profile's tri-state; absent = neutral
 
     ArtistDetail:
       allOf:
@@ -2068,7 +2105,6 @@ components:
           properties:
             bio: { type: string, nullable: true, description: "HTML-stripped, from last.fm when available" }
             trackCount: { type: integer, nullable: true }
-            loveState: { $ref: "#/components/schemas/LoveState" }
             stats:
               type: object
               nullable: true
@@ -2315,7 +2351,7 @@ components:
 
     LoveRecord:
       type: object
-      required: [loveId, ref, kind, state, name, updatedAt]
+      required: [loveId, ref, kind, state, name, updatedAt, owned]
       properties:
         loveId: { type: string, example: lov_6r5e4w }
         ref: { type: string, example: art_9f3kq2, description: Canonical id of the loved item }
@@ -2410,6 +2446,7 @@ components:
         paused: { type: boolean }
         positionMs: { type: integer }
         asOf: { type: string, format: date-time }
+        partyId: { type: string, example: pty_5g4h3j, description: Present on party.updated event payloads; identifies which party the timeline belongs to }
 
     PartyInvite:
       type: object
@@ -2429,7 +2466,7 @@ components:
         name: { type: string }
         artistName: { type: string, nullable: true }
         owned: { type: boolean }
-        ref: { type: string, nullable: true, example: art_9f3kq2, description: "Canonical id (set for owned items and known external artists)" }
+        ref: { type: string, nullable: true, example: art_9f3kq2, description: "Canonical id — always set for artists (minted on first surface); null only for unowned albums/tracks" }
         artId: { type: string, nullable: true, example: img_4c5d6e }
         reason: { type: string, nullable: true, example: "Because you love Deftones" }
         loveState: { $ref: "#/components/schemas/LoveState" }
