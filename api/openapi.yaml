@@ -12,8 +12,8 @@ info:
     state.
 
     **Auth realms:** device endpoints use bearer tokens; `/admin/api/*` uses an
-    admin cookie session. The WebSocket event channel is documented in
-    `docs/architecture.md` (envelope + event catalog).
+    admin cookie session. Server push is SSE — see `GET /v1/events` for the
+    envelope and event catalog.
 
     **Users are household profiles** (Netflix-style, passwordless, optional
     PIN; created by the admin in the web admin UI). PIN pairing mints a
@@ -979,7 +979,8 @@ paths:
       description: |
         Idempotent per (trackId, format, bitrateKbps): re-requesting returns the
         existing artifact. `format: original` artifacts are immediately `ready`.
-        Progress and readiness arrive via WS `artifact.updated`.
+        Progress and readiness arrive via the `artifact.updated` event on
+        `GET /v1/events`.
 
         Each artifact carries `albumId` + `artId` so sync flows can prefetch
         album art (one fetch per distinct albumId) and downloaded content
@@ -1397,20 +1398,41 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
 
   # ───────────────────────────── events ─────────────────────────────
-  /v1/ws:
+  /v1/events:
     get:
-      operationId: subscribeEvents
+      operationId: streamEvents
       tags: [events]
-      summary: WebSocket upgrade — typed event stream
+      summary: Server-sent events — typed event stream
       description: |
-        Standard WS upgrade authenticated with a profile token. Envelope
-        `{type, at, data}`; event catalog in docs/architecture.md. Instance
-        events (library.changed, artifact.updated, acquisition.updated) go to
-        every connection; profile-scoped events (playlist.changed,
-        love.updated, taste.updated) only to that profile's connections.
-        Clients MUST ignore unknown event types.
+        SSE (`text/event-stream`), authenticated with a profile token. Each
+        message's `id:` field is a monotonic sequence number; reconnect with
+        `Last-Event-ID` to resume without loss. `data:` is an Event envelope
+        (`{type, at, data}`). Clients MUST ignore unknown types.
+
+        | type | data | scope |
+        |---|---|---|
+        | `library.changed` | `{libraryId, updatedAt}` | instance |
+        | `artifact.updated` | `Artifact` | instance |
+        | `acquisition.updated` | `AcquisitionActivity` | instance |
+        | `presence.updated` | `PresenceEntry` | instance (honors share-listening) |
+        | `love.updated` | `LoveRecord` | profile |
+        | `playlist.changed` | `{playlistId}` | profile (incl. shared/collab changes by others) |
+        | `taste.updated` | `{}` | profile |
+        | `recommendation.received` | `Recommendation` | profile |
+        | `party.invited` | `PartyInvite` | profile |
+        | `party.updated` | `PartyState` (with `partyId`) | party members |
+
+        There is no client→server channel — control actions are ordinary
+        POSTs. Every event-producing resource keeps a plain pollable GET as
+        the resync path (mandatory after iOS backgrounding kills the stream).
+      parameters:
+        - { name: Last-Event-ID, in: header, required: false, schema: { type: string }, description: Sequence number of the last event received }
       responses:
-        "101": { description: Switching protocols }
+        "200":
+          description: Event stream (unbounded)
+          content:
+            text/event-stream:
+              schema: { type: string, description: SSE frames whose data lines carry Event JSON }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
   # ───────────────────────────── admin ─────────────────────────────
@@ -2411,6 +2433,16 @@ components:
         artId: { type: string, nullable: true, example: img_4c5d6e }
         reason: { type: string, nullable: true, example: "Because you love Deftones" }
         loveState: { $ref: "#/components/schemas/LoveState" }
+
+    Event:
+      type: object
+      required: [type, at, data]
+      properties:
+        type:
+          type: string
+          enum: [library.changed, artifact.updated, acquisition.updated, presence.updated, love.updated, playlist.changed, taste.updated, recommendation.received, party.invited, party.updated]
+        at: { type: string, format: date-time }
+        data: { type: object, description: Payload per the catalog in GET /v1/events }
 
     AcquisitionActivity:
       type: object

@@ -3,3 +3,6 @@
 api/openapi.yaml:
   operation-4xx-response:
     - '#/paths/~1v1~1ping/get/responses'
+  no-unused-components:
+    - '#/components/schemas/PartyInvite'
+    - '#/components/schemas/Event'
