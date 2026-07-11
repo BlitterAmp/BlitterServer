@@ -25,7 +25,7 @@ make build
 ./dist/blitterserver
 ```
 
-Then open `http://127.0.0.1:8484/docs/` for the interactive API reference. Logs go to stdout and to a rotating file under the data directory.
+Then open `http://127.0.0.1:8484/admin/` for the admin console (first run walks you through creating the admin password) and `http://127.0.0.1:8484/docs/` for the interactive API reference. Logs go to stdout and to a rotating file under the data directory.
 
 ### Configuration
 
@@ -69,6 +69,7 @@ make generate    # regenerate internal/api from the spec (oapi-codegen, pinned i
 make lint-api    # redocly lint of the OpenAPI spec
 make gen-check   # verify the spec survives TS + Go client codegen
 make run         # go run ./cmd/blitterserver
+make web         # rebuild the embedded admin console (node; dist/ is committed)
 ```
 
 The generated server (`internal/api/api.gen.go`) is committed; CI regenerates and fails on any diff, so spec and server cannot drift. Handlers implement the generated strict interface and embed an `Unimplemented` base — adding an operation to the spec breaks the build until it is implemented or consciously 501'd.

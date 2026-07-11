@@ -22,7 +22,9 @@ func isPublic(method, path string) bool {
 		method == "GET" && strings.HasPrefix(path, "/v1/pair/"),
 		method == "GET" && path == "/",
 		method == "GET" && path == "/api/openapi.yaml",
-		method == "GET" && strings.HasPrefix(path, "/docs/"):
+		method == "GET" && strings.HasPrefix(path, "/docs/"),
+		// The SPA shell + assets are public; only /admin/api/* is gated.
+		method == "GET" && path == "/admin/" || method == "GET" && strings.HasPrefix(path, "/admin/assets/"):
 		return true
 	}
 	return false

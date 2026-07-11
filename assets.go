@@ -15,3 +15,10 @@ var OpenAPISpec []byte
 //
 //go:embed web/docs
 var DocsAssets embed.FS
+
+// AdminSPA holds the built admin console (Svelte + DaisyUI, built with
+// `make web`, dist committed so `go build` never needs node), served under
+// /admin/.
+//
+//go:embed web/admin/dist
+var AdminSPA embed.FS

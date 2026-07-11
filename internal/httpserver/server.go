@@ -42,8 +42,13 @@ func Handler(st *store.Store, mgr *library.Manager, dataDir, version string) htt
 		panic(err) // embedded path is fixed at compile time
 	}
 	mux.Handle("GET /docs/", http.StripPrefix("/docs/", http.FileServerFS(docs)))
+	adminSPA, err := fs.Sub(blitterserver.AdminSPA, "web/admin/dist")
+	if err != nil {
+		panic(err) // embedded path is fixed at compile time
+	}
+	mux.Handle("GET /admin/", http.StripPrefix("/admin/", http.FileServerFS(adminSPA)))
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/docs/", http.StatusTemporaryRedirect)
+		http.Redirect(w, r, "/admin/", http.StatusTemporaryRedirect)
 	})
 
 	bus := events.NewBus(st)
