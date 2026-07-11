@@ -855,6 +855,26 @@ paths:
               schema: { $ref: "#/components/schemas/ExternalArtist" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /v1/me/discover:
+    get:
+      operationId: getMyDiscover
+      tags: [discovery]
+      summary: Engine recommendations for the calling profile
+      description: |
+        Provider-backed (last.fm in v1; the provider is an admin-side choice
+        behind the server's RecommendationProvider interface and invisible to
+        this contract). Items the profile marked `not_for_me` never appear.
+        Empty when no provider is configured (`capabilities.discovery=false`).
+      responses:
+        "200":
+          description: Recommendations
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/DiscoverItem" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
   # ───────────────────────────── playback ─────────────────────────────
   /v1/playback/events:
     post:
@@ -1947,6 +1967,7 @@ components:
           items: { type: string, enum: [original, aac] }
           description: aac absent when ffmpeg unavailable
         radio: { type: boolean }
+        discovery: { type: boolean, description: "An engine recommendation provider is configured — /v1/me/discover returns items" }
 
     Device:
       type: object
@@ -2377,6 +2398,19 @@ components:
         fromProfileId: { type: string, example: prf_1a2b3c }
         fromProfileName: { type: string }
         at: { type: string, format: date-time }
+
+    DiscoverItem:
+      type: object
+      required: [kind, name, owned]
+      properties:
+        kind: { type: string, enum: [artist, album, track] }
+        name: { type: string }
+        artistName: { type: string, nullable: true }
+        owned: { type: boolean }
+        ref: { type: string, nullable: true, example: art_9f3kq2, description: "Canonical id (set for owned items and known external artists)" }
+        artId: { type: string, nullable: true, example: img_4c5d6e }
+        reason: { type: string, nullable: true, example: "Because you love Deftones" }
+        loveState: { $ref: "#/components/schemas/LoveState" }
 
     AcquisitionActivity:
       type: object
