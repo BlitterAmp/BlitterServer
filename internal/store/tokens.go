@@ -2,19 +2,14 @@ package store
 
 import (
 	"context"
+
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"github.com/BlitterAmp/BlitterServer/internal/auth"
 )
-
-// Identity is a resolved bearer token. Empty ProfileID means a device token
-// (whose only contract powers are listing profiles and minting profile tokens).
-type Identity struct {
-	DeviceID  string
-	ProfileID string
-}
 
 // HashToken maps a raw bearer value to its storage form. Raw tokens are
 // never persisted.
@@ -61,9 +56,9 @@ func (s *Store) CreateProfileToken(ctx context.Context, deviceID, profileID stri
 }
 
 // ResolveToken looks a raw bearer value up in both token tables.
-func (s *Store) ResolveToken(ctx context.Context, raw string) (Identity, bool, error) {
+func (s *Store) ResolveToken(ctx context.Context, raw string) (auth.Identity, bool, error) {
 	h := HashToken(raw)
-	var id Identity
+	var id auth.Identity
 	err := s.db.QueryRowContext(ctx,
 		`SELECT device_id, profile_id FROM profile_tokens WHERE token_hash = ?`, h).
 		Scan(&id.DeviceID, &id.ProfileID)
@@ -71,15 +66,15 @@ func (s *Store) ResolveToken(ctx context.Context, raw string) (Identity, bool, e
 		return id, true, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return Identity{}, false, err
+		return auth.Identity{}, false, err
 	}
 	err = s.db.QueryRowContext(ctx,
 		`SELECT device_id FROM device_tokens WHERE token_hash = ?`, h).Scan(&id.DeviceID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return Identity{}, false, nil
+		return auth.Identity{}, false, nil
 	}
 	if err != nil {
-		return Identity{}, false, err
+		return auth.Identity{}, false, err
 	}
 	return id, true, nil
 }

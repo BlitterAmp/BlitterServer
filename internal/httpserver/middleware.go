@@ -1,34 +1,25 @@
 package httpserver
 
 import (
-	"context"
 	"net/http"
 	"runtime/debug"
 	"strings"
 	"time"
 
+	"github.com/BlitterAmp/BlitterServer/internal/auth"
 	"github.com/BlitterAmp/BlitterServer/internal/logging"
 	"github.com/BlitterAmp/BlitterServer/internal/store"
 )
 
-type identityKey struct{}
-
-// IdentityFrom returns the bearer identity Auth resolved for this request.
-func IdentityFrom(ctx context.Context) (store.Identity, bool) {
-	id, ok := ctx.Value(identityKey{}).(store.Identity)
-	return id, ok
-}
-
 // isPublic lists the routes reachable without credentials: the contract's
-// six security:[] operations plus the docs viewer and spec.
+// security:[] bearer-realm operations plus the docs viewer and spec. The
+// /admin/api realm is not listed — AdminAuth owns it entirely.
 func isPublic(method, path string) bool {
 	switch {
 	case method == "GET" && path == "/v1/ping",
 		method == "POST" && path == "/v1/pair",
 		method == "POST" && path == "/v1/pair/claim",
 		method == "GET" && strings.HasPrefix(path, "/v1/pair/"),
-		method == "POST" && path == "/admin/api/setup",
-		method == "POST" && path == "/admin/api/session",
 		method == "GET" && path == "/",
 		method == "GET" && path == "/api/openapi.yaml",
 		method == "GET" && strings.HasPrefix(path, "/docs/"):
@@ -37,12 +28,27 @@ func isPublic(method, path string) bool {
 	return false
 }
 
-// Auth resolves the bearer token to an identity, or 401s. Public routes and
-// the admin realm's cookie-session enforcement (spec 2) pass through.
+// deviceTokenAllowed whitelists what a device-scoped token may call:
+// identity, the profile picker, token exchange, and system state. Everything
+// else needs a profile token (architecture: device tokens have two powers).
+func deviceTokenAllowed(method, path string) bool {
+	switch {
+	case method == "GET" && path == "/v1/me",
+		method == "GET" && path == "/v1/profiles",
+		method == "POST" && path == "/v1/profile-tokens",
+		method == "GET" && path == "/v1/status",
+		method == "GET" && path == "/v1/capabilities":
+		return true
+	}
+	return false
+}
+
+// Auth resolves the bearer token to an identity, or 401s. Public routes pass
+// through, as does the whole /admin/api realm (cookie-gated by AdminAuth).
 func Auth(st *store.Store) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if isPublic(r.Method, r.URL.Path) {
+			if isPublic(r.Method, r.URL.Path) || strings.HasPrefix(r.URL.Path, "/admin/api/") {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -61,7 +67,14 @@ func Auth(st *store.Store) func(http.Handler) http.Handler {
 				WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "invalid_token")
 				return
 			}
-			ctx := context.WithValue(r.Context(), identityKey{}, id)
+			if id.ProfileID == "" && !deviceTokenAllowed(r.Method, r.URL.Path) {
+				WriteProblem(w, http.StatusForbidden, "Forbidden", "profile_token_required")
+				return
+			}
+			if err := st.TouchDevice(r.Context(), id.DeviceID); err != nil {
+				logging.From(r.Context()).Warn("touch device", "err", err)
+			}
+			ctx := auth.WithIdentity(r.Context(), id)
 			l := logging.From(ctx).With("device_id", id.DeviceID)
 			if id.ProfileID != "" {
 				l = l.With("profile_id", id.ProfileID)

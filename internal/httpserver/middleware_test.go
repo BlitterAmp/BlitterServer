@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/BlitterAmp/BlitterServer/internal/auth"
 	"github.com/BlitterAmp/BlitterServer/internal/logging"
 	"github.com/BlitterAmp/BlitterServer/internal/store"
 )
@@ -26,15 +27,16 @@ func testStore(t *testing.T) *store.Store {
 func TestPublicPathsBypassAuth(t *testing.T) {
 	for _, tc := range []struct{ method, path string }{
 		{"GET", "/v1/ping"}, {"POST", "/v1/pair"}, {"GET", "/v1/pair/pair_abc123"},
-		{"POST", "/v1/pair/claim"}, {"POST", "/admin/api/setup"}, {"POST", "/admin/api/session"},
+		{"POST", "/v1/pair/claim"},
 		{"GET", "/docs/"}, {"GET", "/api/openapi.yaml"}, {"GET", "/"},
 	} {
 		if !isPublic(tc.method, tc.path) {
 			t.Errorf("%s %s must be public", tc.method, tc.path)
 		}
 	}
-	if isPublic("GET", "/v1/status") || isPublic("DELETE", "/admin/api/session") {
-		t.Error("authed routes must not be public")
+	// Admin-realm paths are AdminAuth's business, never bearer-public.
+	if isPublic("GET", "/v1/status") || isPublic("POST", "/admin/api/setup") {
+		t.Error("authed/admin routes must not be bearer-public")
 	}
 }
 
@@ -61,9 +63,9 @@ func TestAuthResolvesIdentityIntoContext(t *testing.T) {
 	prf, _ := st.CreateProfile(ctx, "p")
 	tok, _ := st.CreateProfileToken(ctx, dev, prf)
 
-	var got store.Identity
+	var got auth.Identity
 	h := Auth(st)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got, _ = IdentityFrom(r.Context())
+		got, _ = auth.IdentityFrom(r.Context())
 	}))
 	req := httptest.NewRequest("GET", "/v1/status", nil)
 	req.Header.Set("Authorization", "Bearer "+tok)
