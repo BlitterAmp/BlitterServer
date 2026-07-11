@@ -6,6 +6,7 @@ import (
 	"context"
 
 	"github.com/BlitterAmp/BlitterServer/internal/api"
+	"github.com/BlitterAmp/BlitterServer/internal/library"
 	"github.com/BlitterAmp/BlitterServer/internal/store"
 	"github.com/BlitterAmp/BlitterServer/internal/transcode"
 )
@@ -13,11 +14,19 @@ import (
 type Server struct {
 	api.Unimplemented
 	st      *store.Store
+	lib     *library.Manager
 	version string
 }
 
+// New builds a server with a settings-restored library manager rooted at the
+// store's own view of the world; use NewWithLibrary to share a manager with
+// the HTTP layer.
 func New(st *store.Store, version string) *Server {
-	return &Server{st: st, version: version}
+	return NewWithLibrary(st, library.NewManager(st, ""), version)
+}
+
+func NewWithLibrary(st *store.Store, lib *library.Manager, version string) *Server {
+	return &Server{st: st, lib: lib, version: version}
 }
 
 func (s *Server) GetPing(ctx context.Context, _ api.GetPingRequestObject) (api.GetPingResponseObject, error) {
@@ -34,9 +43,11 @@ func (s *Server) GetStatus(ctx context.Context, _ api.GetStatusRequestObject) (a
 		return nil, err
 	}
 	resp := api.GetStatus200JSONResponse{Version: s.version, SetupComplete: done}
-	// Literal until source config lands in the store (spec 2) — then this must come from settings.
 	resp.Source.Kind = api.ServerStatusSourceKindNone
-	resp.Source.Connected = false
+	if kind := s.lib.SourceKind(ctx); kind != "" {
+		resp.Source.Kind = api.ServerStatusSourceKind(kind)
+		resp.Source.Connected = s.lib.Connected(ctx)
+	}
 	return resp, nil
 }
 

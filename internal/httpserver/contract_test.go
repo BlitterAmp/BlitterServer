@@ -11,6 +11,7 @@ import (
 	blitterserver "github.com/BlitterAmp/BlitterServer"
 	"github.com/BlitterAmp/BlitterServer/internal/api"
 	"github.com/BlitterAmp/BlitterServer/internal/httpserver"
+	"github.com/BlitterAmp/BlitterServer/internal/library"
 	"github.com/BlitterAmp/BlitterServer/internal/store"
 	"gopkg.in/yaml.v3"
 )
@@ -22,7 +23,8 @@ func setup(t *testing.T) (*httptest.Server, *store.Store, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	ts := httptest.NewServer(httpserver.Handler(st, "test"))
+	mgr := library.NewManager(st, t.TempDir())
+	ts := httptest.NewServer(httpserver.Handler(st, mgr, t.TempDir(), "test"))
 	t.Cleanup(ts.Close)
 	dev, _ := st.CreateDevice(context.Background(), "d", "ios")
 	prf, _ := st.CreateProfile(context.Background(), "p")
@@ -133,6 +135,13 @@ func TestEveryUnimplementedOperationAnswersHonestly(t *testing.T) {
 		"adminCreatePairCode": true, "adminListDevices": true, "adminRevokeDevice": true,
 		"adminGetServerSettings": true, "adminSetServerSettings": true,
 		"adminGetTranscodeSettings": true, "adminSetTranscodeSettings": true,
+		"getLibrary": true, "listArtists": true, "getArtist": true,
+		"listArtistAlbums": true, "listArtistTracks": true,
+		"listAlbums": true, "getAlbum": true, "listAlbumTracks": true,
+		"listTracks": true, "getTrack": true, "listGenres": true, "listGenreTracks": true,
+		"search": true, "streamTrack": true, "createStreamGrant": true, "getArt": true,
+		"adminGetFilesystemSource": true, "adminSetFilesystemSource": true,
+		"adminDeleteFilesystemSource": true, "adminScanFilesystemSource": true,
 	}
 	client := ts.Client()
 

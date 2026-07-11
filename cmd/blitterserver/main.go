@@ -13,6 +13,7 @@ import (
 
 	"github.com/BlitterAmp/BlitterServer/internal/config"
 	"github.com/BlitterAmp/BlitterServer/internal/httpserver"
+	"github.com/BlitterAmp/BlitterServer/internal/library"
 	"github.com/BlitterAmp/BlitterServer/internal/logging"
 	"github.com/BlitterAmp/BlitterServer/internal/store"
 )
@@ -62,7 +63,8 @@ func run() error {
 	}
 	defer st.Close()
 
-	srv := httpserver.New(cfg.Listen, st, version)
+	mgr := library.NewManager(st, cfg.DataDir)
+	srv := httpserver.New(cfg.Listen, st, mgr, cfg.DataDir, version)
 	log.Info("blitterserver listening",
 		"addr", cfg.Listen, "version", version, "data_dir", cfg.DataDir,
 		"docs", "http://"+cfg.Listen+"/docs/")

@@ -52,6 +52,17 @@ func Auth(st *store.Store) func(http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
+			// A valid signed grant substitutes for the bearer on stream GETs
+			// only (players that cannot send headers).
+			if r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/v1/stream/") &&
+				r.URL.Query().Get("grant") != "" {
+				if validStreamGrant(r, st) {
+					next.ServeHTTP(w, r)
+				} else {
+					WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "invalid_grant")
+				}
+				return
+			}
 			raw, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 			if !ok || raw == "" {
 				WriteProblem(w, http.StatusUnauthorized, "Unauthorized", "missing_token")
