@@ -6,8 +6,6 @@ The self-hosted backend service for **BlitterAmp** (the player app at `BlitterAm
 
 **This repo carries only the current, accurate implementation and API documentation.** All architecture design, specs, plans, decision history, and session notes live in the AgentOS vault: `~/Documents/Vaults/AgentOS/Apps/BlitterAmp/` (`Blittarr Architecture.md`, `Blittarr v1 Session-2 Design.md`, `Decisions.md`). Read the vault before proposing changes; write design/decision updates THERE, not here. Do not add design docs, specs, or plans to this repo.
 
-**Current drift warning:** `api/openapi.yaml` predates the 2026-07-10 session-2 reconciliation — it still says WebSocket `/v1/ws`, `follows`, and offset/limit pagination. The vault's session-2 work list (SSE `/v1/events`, Love/Not-for-me tri-state, cursor pagination, social resources, QR pairing) is the authoritative direction; the spec-iteration arc brings the YAML current.
-
 ## Non-negotiables
 
 - **Contract-first.** `api/openapi.yaml` is the source of truth. Iterate the spec BEFORE writing handlers; server stubs and the apps' TS client are generated from it. A behavior change that isn't in the spec is a bug.

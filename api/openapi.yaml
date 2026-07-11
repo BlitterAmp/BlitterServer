@@ -1,33 +1,42 @@
 openapi: 3.0.3
 info:
   title: Blittarr API
-  version: 1.0.0-draft.1
+  version: 1.0.0-draft.2
   license:
     name: MIT
     url: https://opensource.org/license/mit
   description: |
     The BlitterAmp middleman service. Apps (BlitterAmp iOS/desktop) talk only to
     this API; Blittarr owns the music source (Plex in v1), server-side
-    transcoding, acquisition (Lidarr), last.fm, and cross-device taste/follow
+    transcoding, acquisition (Lidarr), last.fm, and cross-device taste/love
     state.
 
     **Auth realms:** device endpoints use bearer tokens; `/admin/api/*` uses an
-    admin cookie session. The WebSocket event channel is documented in
-    `docs/architecture.md` (envelope + event catalog).
+    admin cookie session. Server push is SSE — see `GET /v1/events` for the
+    envelope and event catalog.
 
     **Users are household profiles** (Netflix-style, passwordless, optional
     PIN; created by the admin in the web admin UI). PIN pairing mints a
     **device token** whose only powers are listing profiles and exchanging for
     **profile tokens** (`POST /v1/profile-tokens`). Everything else requires a
     profile token and is implicitly scoped to that profile: playlists,
-    ratings, taste, follows, play history, home rails, last.fm connection.
+    ratings, taste, loves, play history, home rails, last.fm connection.
     Shared across profiles: the library, the artifact cache, and acquisition
-    (new-release watching is the union of everyone's artist follows).
+    (new-release watching is the union of everyone's artist loves).
     Profile switching in-app = using a different cached profile token; no
     admin involvement after the one-time device pairing approval.
 
-    **Conventions:** JSON everywhere; opaque string ids; list endpoints paginate
-    with `offset`/`limit` and return `total`; errors are a Problem object.
+    **Conventions:** JSON everywhere; list endpoints paginate
+    with `cursor`/`limit` and return `{items, nextCursor}`; errors are a Problem object.
+
+    **Ids** are opaque strings carrying a type prefix — `art_` artist, `alb_`
+    album, `trk_` track, `pl_` playlist, `pli_` playlist item, `prf_` profile,
+    `dev_` device, `pair_` pairing, `arf_` artifact, `img_` artwork, `lib_`
+    library, `lov_` love, `rec_` recommendation, `pty_` party, `pqi_` party
+    queue item. The prefix is for logs and error messages; clients MUST NOT
+    parse ids beyond treating them as opaque. Exceptions: `mixId` is a
+    computed slug (`mood:driving`), playback `eventId` is a client-generated
+    UUID, and `/admin/api/source/plex/*` exposes source-native ids.
 servers:
   - url: http://{host}:{port}
     variables:
@@ -35,18 +44,19 @@ servers:
       port: { default: "8484" }
 
 tags:
-  - name: system
-  - name: pairing
-  - name: profiles
-  - name: library
-  - name: search
-  - name: discovery
-  - name: playback
-  - name: streaming
-  - name: artifacts
-  - name: follows
-  - name: events
-  - name: admin
+  - { name: system, description: "Liveness, status, capabilities, identity" }
+  - { name: pairing, description: Device pairing (QR claim and short-code approval) }
+  - { name: profiles, description: "Household profiles, profile tokens, per-profile last.fm" }
+  - { name: library, description: "Canonical library index — artists, albums, tracks, genres, playlists, ratings" }
+  - { name: search, description: Federated library + external search }
+  - { name: discovery, description: "Home rails, mixes, radio, similar/external artists, engine recommendations" }
+  - { name: playback, description: Playback event ingestion and taste snapshot }
+  - { name: streaming, description: "Direct-play streaming, stream grants, artwork" }
+  - { name: artifacts, description: Pre-transcoded download artifacts }
+  - { name: loves, description: Love / Not-for-me tri-state and acquisition activity }
+  - { name: social, description: "Household social — recommendations, presence, listen parties" }
+  - { name: events, description: Server-push event stream }
+  - { name: admin, description: Admin web UI API (cookie session realm) }
 
 security:
   - deviceToken: []
@@ -55,6 +65,7 @@ paths:
   # ───────────────────────────── system ─────────────────────────────
   /v1/ping:
     get:
+      operationId: getPing
       tags: [system]
       summary: Unauthenticated liveness + identity (pairing discovery)
       security: []
@@ -73,6 +84,7 @@ paths:
 
   /v1/status:
     get:
+      operationId: getStatus
       tags: [system]
       summary: Server + integration status
       responses:
@@ -85,6 +97,7 @@ paths:
 
   /v1/capabilities:
     get:
+      operationId: getCapabilities
       tags: [system]
       summary: Feature flags the apps use to gate UI
       responses:
@@ -97,6 +110,7 @@ paths:
 
   /v1/me:
     get:
+      operationId: getMe
       tags: [system]
       summary: The calling token's identity (device + profile when profile-scoped)
       responses:
@@ -110,6 +124,7 @@ paths:
   # ───────────────────────────── pairing ─────────────────────────────
   /v1/pair:
     post:
+      operationId: startPairing
       tags: [pairing]
       summary: Begin PIN pairing
       description: |
@@ -143,6 +158,7 @@ paths:
 
   /v1/pair/{pairingId}:
     get:
+      operationId: getPairing
       tags: [pairing]
       summary: Poll pairing state
       security: []
@@ -162,9 +178,49 @@ paths:
                   deviceId: { type: string, nullable: true }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /v1/pair/claim:
+    post:
+      operationId: claimPairCode
+      tags: [pairing]
+      summary: Claim a QR pairing code (one scan = discovery + auth)
+      description: |
+        The QR shown in the web admin encodes the server's canonical URL plus a
+        short-lived (≤15 min) single-use code. Claiming mints a **device
+        token** immediately — no admin approval step (showing the QR was the
+        approval). The app then lists profiles and mints profile tokens as
+        usual.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, deviceName, deviceType]
+              properties:
+                code: { type: string, example: "7GK4PC" }
+                deviceName: { type: string, example: "Nathan's iPhone" }
+                deviceType: { type: string, enum: [ios, desktop, web, other] }
+                appVersion: { type: string }
+      responses:
+        "201":
+          description: Device paired
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token, deviceId]
+                properties:
+                  token: { type: string, description: Device token — exchange via /v1/profile-tokens }
+                  deviceId: { type: string, example: dev_8f2k1q }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "410": { description: Code expired or already used, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+        "429": { $ref: "#/components/responses/Problem" }
+
   # ───────────────────────────── profiles ─────────────────────────────
   /v1/profiles:
     get:
+      operationId: listProfiles
       tags: [profiles]
       summary: Household profiles (for the in-app profile switcher)
       description: Accepts device OR profile tokens. Profiles are created by the admin in the web admin UI.
@@ -180,6 +236,7 @@ paths:
 
   /v1/profile-tokens:
     post:
+      operationId: createProfileToken
       tags: [profiles]
       summary: Exchange into a profile (mints a profile-scoped bearer token)
       description: |
@@ -209,11 +266,13 @@ paths:
                 properties:
                   token: { type: string }
                   profile: { $ref: "#/components/schemas/Profile" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { description: PIN required or wrong, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/me/lastfm:
     get:
+      operationId: getMyLastfm
       tags: [profiles]
       summary: Calling profile's last.fm connection state
       responses:
@@ -228,14 +287,18 @@ paths:
                   available: { type: boolean, description: Instance has last.fm API credentials (admin-configured) }
                   connected: { type: boolean }
                   username: { type: string, nullable: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
     delete:
+      operationId: disconnectMyLastfm
       tags: [profiles]
       summary: Disconnect the calling profile's last.fm
       responses:
         "204": { description: Disconnected }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /v1/me/lastfm/connect:
     post:
+      operationId: connectMyLastfm
       tags: [profiles]
       summary: Start last.fm auth for the calling profile (open the returned URL; completes via callback)
       responses:
@@ -248,11 +311,45 @@ paths:
                 required: [url]
                 properties:
                   url: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "409": { description: Instance has no last.fm API credentials, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+
+  /v1/me/settings:
+    get:
+      operationId: getMySettings
+      tags: [profiles]
+      summary: The calling profile's settings
+      responses:
+        "200":
+          description: Settings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProfileSettings" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    patch:
+      operationId: updateMySettings
+      tags: [profiles]
+      summary: Update the calling profile's settings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                shareListening: { type: boolean }
+      responses:
+        "200":
+          description: Updated settings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProfileSettings" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   # ───────────────────────────── library ─────────────────────────────
   /v1/library:
     get:
+      operationId: getLibrary
       tags: [library]
       summary: Active library summary (freshness anchor)
       responses:
@@ -266,10 +363,11 @@ paths:
 
   /v1/artists:
     get:
+      operationId: listArtists
       tags: [library]
       summary: List artists (paged)
       parameters:
-        - $ref: "#/components/parameters/offset"
+        - $ref: "#/components/parameters/cursor"
         - $ref: "#/components/parameters/limit"
         - $ref: "#/components/parameters/sort"
       responses:
@@ -286,10 +384,12 @@ paths:
                       items:
                         type: array
                         items: { $ref: "#/components/schemas/Artist" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "503": { $ref: "#/components/responses/SourceUnavailable" }
 
   /v1/artists/{artistId}:
     get:
+      operationId: getArtist
       tags: [library]
       summary: Artist detail (includes genres, stats, last.fm bio when available)
       parameters: [{ name: artistId, in: path, required: true, schema: { type: string } }]
@@ -299,10 +399,12 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ArtistDetail" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/artists/{artistId}/albums:
     get:
+      operationId: listArtistAlbums
       tags: [library]
       summary: Artist's albums (owned; for owned+external discography see /v1/external/artists)
       parameters: [{ name: artistId, in: path, required: true, schema: { type: string } }]
@@ -314,10 +416,12 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Album" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/artists/{artistId}/tracks:
     get:
+      operationId: listArtistTracks
       tags: [library]
       summary: All tracks by an artist
       parameters: [{ name: artistId, in: path, required: true, schema: { type: string } }]
@@ -329,10 +433,12 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Track" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/artists/{artistId}/similar:
     get:
+      operationId: listSimilarArtists
       tags: [discovery]
       summary: Similar artists (owned resolved to library entries; unowned flagged external)
       parameters: [{ name: artistId, in: path, required: true, schema: { type: string } }]
@@ -344,14 +450,16 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/SimilarArtist" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/albums:
     get:
+      operationId: listAlbums
       tags: [library]
       summary: List albums (paged)
       parameters:
-        - $ref: "#/components/parameters/offset"
+        - $ref: "#/components/parameters/cursor"
         - $ref: "#/components/parameters/limit"
         - $ref: "#/components/parameters/sort"
       responses:
@@ -368,10 +476,12 @@ paths:
                       items:
                         type: array
                         items: { $ref: "#/components/schemas/Album" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "503": { $ref: "#/components/responses/SourceUnavailable" }
 
   /v1/albums/{albumId}:
     get:
+      operationId: getAlbum
       tags: [library]
       summary: Album detail
       parameters: [{ name: albumId, in: path, required: true, schema: { type: string } }]
@@ -381,10 +491,12 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Album" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/albums/{albumId}/tracks:
     get:
+      operationId: listAlbumTracks
       tags: [library]
       summary: Album tracks
       parameters: [{ name: albumId, in: path, required: true, schema: { type: string } }]
@@ -396,14 +508,16 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Track" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/tracks:
     get:
+      operationId: listTracks
       tags: [library]
       summary: Flat track list (paged)
       parameters:
-        - $ref: "#/components/parameters/offset"
+        - $ref: "#/components/parameters/cursor"
         - $ref: "#/components/parameters/limit"
         - $ref: "#/components/parameters/sort"
       responses:
@@ -420,10 +534,12 @@ paths:
                       items:
                         type: array
                         items: { $ref: "#/components/schemas/Track" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "503": { $ref: "#/components/responses/SourceUnavailable" }
 
   /v1/tracks/{trackId}:
     get:
+      operationId: getTrack
       tags: [library]
       summary: Track detail
       parameters: [{ name: trackId, in: path, required: true, schema: { type: string } }]
@@ -433,10 +549,12 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Track" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/genres:
     get:
+      operationId: listGenres
       tags: [library]
       summary: Genre index
       responses:
@@ -447,9 +565,11 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Genre" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /v1/genres/{genre}/tracks:
     get:
+      operationId: listGenreTracks
       tags: [library]
       summary: Tracks for a genre (server-composed)
       parameters: [{ name: genre, in: path, required: true, schema: { type: string } }]
@@ -461,16 +581,20 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Track" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/playlists:
     get:
+      operationId: listPlaylists
       tags: [library]
-      summary: List playlists — the calling profile's own plus read-only source playlists
+      summary: List playlists — own, household-shared, and read-only source playlists
       description: |
-        Playlists are Blittarr-native and per-profile (`origin: blittarr`).
-        Playlists that exist in the source (Plex) surface read-only to every
-        profile as `origin: source`; mutations on them return 403.
+        Returns the calling profile's own playlists, other profiles' `shared`
+        and `collaborative` playlists, and read-only source (Plex) playlists
+        (`origin: source`, visible to every profile). Mutations return 403
+        unless the caller is the owner — except appending/removing tracks on a
+        `collaborative` playlist, which any profile may do.
       responses:
         "200":
           description: Playlists
@@ -479,7 +603,9 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Playlist" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
     post:
+      operationId: createPlaylist
       tags: [library]
       summary: Create a playlist (Blittarr-native, owned by the calling profile)
       requestBody:
@@ -491,6 +617,7 @@ paths:
               required: [title]
               properties:
                 title: { type: string }
+                visibility: { type: string, enum: [private, shared, collaborative], default: private }
                 trackIds:
                   type: array
                   items: { type: string }
@@ -500,9 +627,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Playlist" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /v1/playlists/{playlistId}:
     get:
+      operationId: getPlaylist
       tags: [library]
       summary: Playlist detail
       parameters: [{ name: playlistId, in: path, required: true, schema: { type: string } }]
@@ -512,10 +641,12 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Playlist" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
     patch:
+      operationId: updatePlaylist
       tags: [library]
-      summary: Rename playlist
+      summary: Update playlist (rename, visibility — owner only)
       parameters: [{ name: playlistId, in: path, required: true, schema: { type: string } }]
       requestBody:
         required: true
@@ -523,31 +654,37 @@ paths:
           application/json:
             schema:
               type: object
-              required: [title]
               properties:
                 title: { type: string }
+                visibility: { type: string, enum: [private, shared, collaborative] }
       responses:
         "200":
           description: Updated
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Playlist" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/NotFound" }
     delete:
+      operationId: deletePlaylist
       tags: [library]
       summary: Delete playlist
       parameters: [{ name: playlistId, in: path, required: true, schema: { type: string } }]
       responses:
         "204": { description: Deleted }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/playlists/{playlistId}/tracks:
     get:
+      operationId: listPlaylistTracks
       tags: [library]
       summary: Playlist tracks (paged for very long playlists)
       parameters:
         - { name: playlistId, in: path, required: true, schema: { type: string } }
-        - $ref: "#/components/parameters/offset"
+        - $ref: "#/components/parameters/cursor"
         - $ref: "#/components/parameters/limit"
       responses:
         "200":
@@ -563,8 +700,10 @@ paths:
                       items:
                         type: array
                         items: { $ref: "#/components/schemas/PlaylistTrack" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
     post:
+      operationId: appendPlaylistTracks
       tags: [library]
       summary: Append tracks
       parameters: [{ name: playlistId, in: path, required: true, schema: { type: string } }]
@@ -581,10 +720,13 @@ paths:
                   items: { type: string }
       responses:
         "204": { description: Appended }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/playlists/{playlistId}/tracks/{itemId}:
     delete:
+      operationId: removePlaylistTrack
       tags: [library]
       summary: Remove one playlist item (by playlist item id, not track id)
       parameters:
@@ -592,10 +734,13 @@ paths:
         - { name: itemId, in: path, required: true, schema: { type: string } }
       responses:
         "204": { description: Removed }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/ratings:
     put:
+      operationId: setRating
       tags: [library]
       summary: Rate an item (track or artist) — Blittarr-native, per profile
       requestBody:
@@ -616,11 +761,13 @@ paths:
                   description: Source scale 0–10 (stars×2); null clears
       responses:
         "204": { description: Rated }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   # ───────────────────────────── search ─────────────────────────────
   /v1/search:
     get:
+      operationId: search
       tags: [search]
       summary: Federated search — library results plus external (not-in-library) artists
       parameters:
@@ -632,10 +779,12 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/SearchResults" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   # ───────────────────────────── discovery ─────────────────────────────
   /v1/home:
     get:
+      operationId: getHome
       tags: [discovery]
       summary: Server-composed home rails (personalized to the calling profile)
       responses:
@@ -644,9 +793,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/HomeRails" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /v1/mixes:
     get:
+      operationId: listMixes
       tags: [discovery]
       summary: Available mixes (smart playlists, for-you, mood mixes)
       responses:
@@ -657,9 +808,11 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Mix" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /v1/mixes/{mixId}/tracks:
     get:
+      operationId: listMixTracks
       tags: [discovery]
       summary: Materialize a mix
       parameters: [{ name: mixId, in: path, required: true, schema: { type: string } }]
@@ -671,10 +824,12 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Track" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/radio/next:
     post:
+      operationId: getRadioNext
       tags: [discovery]
       summary: Next batch of radio tracks for the given seeds
       requestBody:
@@ -703,9 +858,11 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Track" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /v1/external/artists/{name}:
     get:
+      operationId: getExternalArtist
       tags: [discovery]
       summary: External artist page (bio, owned∪external discography, similar)
       parameters: [{ name: name, in: path, required: true, schema: { type: string } }]
@@ -715,18 +872,40 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ExternalArtist" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/me/discover:
+    get:
+      operationId: getMyDiscover
+      tags: [discovery]
+      summary: Engine recommendations for the calling profile
+      description: |
+        Provider-backed (last.fm in v1; the provider is an admin-side choice
+        behind the server's RecommendationProvider interface and invisible to
+        this contract). Items the profile marked `not_for_me` never appear.
+        Empty when no provider is configured (`capabilities.discovery=false`).
+      responses:
+        "200":
+          description: Recommendations
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/DiscoverItem" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   # ───────────────────────────── playback ─────────────────────────────
   /v1/playback/events:
     post:
+      operationId: reportPlaybackEvents
       tags: [playback]
       summary: Report playback events (batched; feeds the calling profile's taste, scrobbles, recently-played)
       description: |
         Apps queue events offline and flush in order. Idempotency: events carry a
-        client-generated `eventId`; duplicates are ignored. Attribution follows
-        the token — events queued under one profile stay that profile's even if
-        the device has since switched.
+        client-generated `eventId`; duplicates are ignored. Attribution is
+        keyed to the token — events queued under one profile stay that
+        profile's even if the device has since switched.
       requestBody:
         required: true
         content:
@@ -741,9 +920,11 @@ paths:
                   items: { $ref: "#/components/schemas/PlaybackEvent" }
       responses:
         "202": { description: Accepted }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /v1/taste/snapshot:
     get:
+      operationId: getTasteSnapshot
       tags: [playback]
       summary: The calling profile's taste snapshot (per-item stats for UI badges/panels)
       responses:
@@ -752,10 +933,12 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/TasteSnapshot" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   # ───────────────────────────── streaming ─────────────────────────────
   /v1/stream/{trackId}:
     get:
+      operationId: streamTrack
       tags: [streaming]
       summary: Stream the original file (direct play, Range supported)
       parameters:
@@ -769,6 +952,7 @@ paths:
 
   /v1/stream-grants:
     post:
+      operationId: createStreamGrant
       tags: [streaming]
       summary: Mint a short-lived signed URL for players that cannot send headers
       requestBody:
@@ -791,9 +975,11 @@ paths:
                 properties:
                   url: { type: string, description: "Absolute URL, valid for the grant lifetime only" }
                   expiresAt: { type: string, format: date-time }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /v1/art/{artId}:
     get:
+      operationId: getArt
       tags: [streaming]
       summary: Artwork with server-side resize + cache
       parameters:
@@ -802,17 +988,20 @@ paths:
         - { name: h, in: query, required: false, schema: { type: integer, maximum: 2048 } }
       responses:
         "200": { description: Image, content: { image/jpeg: { schema: { type: string, format: binary } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   # ───────────────────────────── artifacts ─────────────────────────────
   /v1/artifacts:
     post:
+      operationId: requestArtifacts
       tags: [artifacts]
       summary: Request download artifacts (server transcodes + caches; batch-friendly)
       description: |
         Idempotent per (trackId, format, bitrateKbps): re-requesting returns the
         existing artifact. `format: original` artifacts are immediately `ready`.
-        Progress and readiness arrive via WS `artifact.updated`.
+        Progress and readiness arrive via the `artifact.updated` event on
+        `GET /v1/events`.
 
         Each artifact carries `albumId` + `artId` so sync flows can prefetch
         album art (one fetch per distinct albumId) and downloaded content
@@ -840,9 +1029,11 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Artifact" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /v1/artifacts/{artifactId}:
     get:
+      operationId: getArtifact
       tags: [artifacts]
       summary: Artifact status
       parameters: [{ name: artifactId, in: path, required: true, schema: { type: string } }]
@@ -852,16 +1043,20 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Artifact" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
     delete:
+      operationId: releaseArtifact
       tags: [artifacts]
       summary: Hint that this device no longer needs the artifact (server may evict)
       parameters: [{ name: artifactId, in: path, required: true, schema: { type: string } }]
       responses:
         "204": { description: Released }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /v1/artifacts/{artifactId}/file:
     get:
+      operationId: downloadArtifact
       tags: [artifacts]
       summary: Download the artifact (exact Content-Length; Range supported)
       parameters:
@@ -870,60 +1065,83 @@ paths:
       responses:
         "200": { description: Full content, content: { audio/*: { schema: { type: string, format: binary } } } }
         "206": { description: Partial content }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "409": { description: Not ready yet, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
 
-  # ───────────────────────────── follows ─────────────────────────────
-  /v1/follows:
+  # ───────────────────────────── loves ─────────────────────────────
+  /v1/loves:
     get:
-      tags: [follows]
-      summary: The calling profile's follows
+      operationId: listLoves
+      tags: [loves]
+      summary: The calling profile's non-neutral love records (paged)
+      parameters:
+        - $ref: "#/components/parameters/cursor"
+        - $ref: "#/components/parameters/limit"
+        - { name: kind, in: query, required: false, schema: { type: string, enum: [artist, album, track] } }
+        - { name: state, in: query, required: false, schema: { type: string, enum: [loved, not_for_me] } }
       responses:
         "200":
-          description: Follows
+          description: Love records
           content:
             application/json:
               schema:
-                type: array
-                items: { $ref: "#/components/schemas/FollowRecord" }
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    required: [items]
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/LoveRecord" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/loves/{ref}:
     put:
-      tags: [follows]
-      summary: Follow (idempotent, per profile). Artist follow triggers acquisition + new-release watching server-side.
+      operationId: setLove
+      tags: [loves]
+      summary: Set the tri-state love for an item (idempotent, per profile)
       description: |
-        Acquisition/watching is instance-level — Blittarr watches an artist while
-        ANY profile follows them; unfollow stops watching only when the last
-        following profile lets go. Media acquired is never removed by unfollow.
+        `ref` is a canonical id (`art_`/`alb_`/`trk_` — the kind derives from
+        the prefix). External artists surfaced by search/similar/discover carry
+        canonical ids too, so they are lovable before they are owned.
+
+        `loved` on an artist → Lidarr ensure + monitor + back-catalog search;
+        on a track → auto "Loved Tracks" playlist + `track.love` relay to the
+        profile's connected last.fm. `not_for_me` = never surface in any
+        generated playlist/mix/radio/discovery **for this profile only**.
+        `neutral` clears either state.
+
+        Instance-level: Blittarr watches/acquires an artist while ≥1 profile
+        loves it (union); removing the last love stops watching but never
+        removes media.
+
+        Setting `neutral` returns the resulting record with `state: neutral`;
+        neutral records are not persisted and never appear in `GET /v1/loves`.
+      parameters:
+        - { name: ref, in: path, required: true, schema: { type: string, example: art_9f3kq2 } }
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [kind, name]
+              required: [state]
               properties:
-                kind: { type: string, enum: [artist, album, track] }
-                name: { type: string, description: Artist name (or album/track title) }
-                itemId: { type: string, nullable: true, description: Library id when owned }
-                artistName: { type: string, nullable: true, description: For album/track follows }
+                state: { $ref: "#/components/schemas/LoveState" }
       responses:
         "200":
-          description: Follow record (existing or created)
+          description: Resulting love record
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/FollowRecord" }
-
-  /v1/follows/{followId}:
-    delete:
-      tags: [follows]
-      summary: Unfollow (stops new-release watching; keeps acquired media)
-      parameters: [{ name: followId, in: path, required: true, schema: { type: string } }]
-      responses:
-        "204": { description: Unfollowed }
+              schema: { $ref: "#/components/schemas/LoveRecord" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/acquisition/activity:
     get:
-      tags: [follows]
+      operationId: getAcquisitionActivity
+      tags: [loves]
       summary: Acquisition activity (desktop Activity view; empty when no acquirer configured)
       responses:
         "200":
@@ -931,26 +1149,326 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/AcquisitionActivity" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  # ───────────────────────────── social ─────────────────────────────
+  /v1/recommendations:
+    post:
+      operationId: createRecommendation
+      tags: [social]
+      summary: Recommend an item to another household profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [toProfileId, ref]
+              properties:
+                toProfileId: { type: string, example: prf_1a2b3c }
+                ref: { type: string, example: alb_7xm1pd, description: Canonical id (art_/alb_/trk_) }
+                note: { type: string, nullable: true, maxLength: 500 }
+      responses:
+        "201":
+          description: Sent
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Recommendation" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    get:
+      operationId: listRecommendations
+      tags: [social]
+      summary: Recommendations inbox (received by the calling profile, newest first)
+      parameters:
+        - $ref: "#/components/parameters/cursor"
+        - $ref: "#/components/parameters/limit"
+        - { name: unseen, in: query, required: false, schema: { type: boolean }, description: Only unseen when true }
+      responses:
+        "200":
+          description: Inbox
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    required: [items]
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/Recommendation" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/recommendations/{recommendationId}/seen:
+    post:
+      operationId: markRecommendationSeen
+      tags: [social]
+      summary: Mark a received recommendation seen
+      parameters:
+        - { name: recommendationId, in: path, required: true, schema: { type: string, example: rec_8s7d6f } }
+      responses:
+        "204": { description: Marked }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/presence:
+    get:
+      operationId: getPresence
+      tags: [social]
+      summary: Household presence — what each profile is playing now
+      description: |
+        Derived from playback events. Profiles with `shareListening: false`,
+        and profiles not currently playing, simply do not appear. Poll path
+        for the `presence.updated` event.
+      responses:
+        "200":
+          description: Presence
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/PresenceEntry" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/parties:
+    get:
+      operationId: listParties
+      tags: [social]
+      summary: Parties visible to the calling profile (joined + open invites)
+      responses:
+        "200":
+          description: Parties
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Party" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      operationId: createParty
+      tags: [social]
+      summary: Start a listen party (caller becomes host)
+      description: Parties are ephemeral and in-memory — they do not survive a server restart.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, nullable: true, example: "Friday kitchen disco" }
+      responses:
+        "201":
+          description: Party
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Party" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/parties/{partyId}:
+    get:
+      operationId: getParty
+      tags: [social]
+      summary: Party snapshot (poll/resync path for party.updated)
+      parameters:
+        - $ref: "#/components/parameters/partyId"
+      responses:
+        "200":
+          description: Party
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Party" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      operationId: endParty
+      tags: [social]
+      summary: End the party (host only)
+      parameters:
+        - $ref: "#/components/parameters/partyId"
+      responses:
+        "204": { description: Ended }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/parties/{partyId}/invites:
+    post:
+      operationId: inviteToParty
+      tags: [social]
+      summary: Invite profiles (fires party.invited to each)
+      parameters:
+        - $ref: "#/components/parameters/partyId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [profileIds]
+              properties:
+                profileIds:
+                  type: array
+                  minItems: 1
+                  items: { type: string, example: prf_9z8y7x }
+      responses:
+        "204": { description: Invited }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/parties/{partyId}/join:
+    post:
+      operationId: joinParty
+      tags: [social]
+      summary: Join a party
+      parameters:
+        - $ref: "#/components/parameters/partyId"
+      responses:
+        "200":
+          description: Party after joining
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Party" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/parties/{partyId}/leave:
+    post:
+      operationId: leaveParty
+      tags: [social]
+      summary: Leave a party (host leaving ends it)
+      parameters:
+        - $ref: "#/components/parameters/partyId"
+      responses:
+        "204": { description: Left }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/parties/{partyId}/queue:
+    post:
+      operationId: appendPartyQueue
+      tags: [social]
+      summary: Append tracks to the party queue (any member)
+      parameters:
+        - $ref: "#/components/parameters/partyId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [trackIds]
+              properties:
+                trackIds:
+                  type: array
+                  minItems: 1
+                  items: { type: string, example: trk_2vq8na }
+      responses:
+        "204": { description: Queued }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/parties/{partyId}/transport:
+    post:
+      operationId: partyTransport
+      tags: [social]
+      summary: Transport control (host only)
+      description: |
+        `seek` requires `positionMs`. `skip` advances to the next queue item.
+        Each device streams its own audio via the normal stream path and
+        slaves position to the returned/broadcast timeline — best-effort
+        (sub-second-ish) sync, explicitly NOT sample-accurate.
+      parameters:
+        - $ref: "#/components/parameters/partyId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action: { type: string, enum: [play, pause, skip, seek] }
+                positionMs: { type: integer, nullable: true, description: Required for seek }
+      responses:
+        "200":
+          description: Resulting timeline
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PartyState" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/parties/{partyId}/kick:
+    post:
+      operationId: kickFromParty
+      tags: [social]
+      summary: Remove a member (host only)
+      parameters:
+        - $ref: "#/components/parameters/partyId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [profileId]
+              properties:
+                profileId: { type: string, example: prf_9z8y7x }
+      responses:
+        "204": { description: Removed }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   # ───────────────────────────── events ─────────────────────────────
-  /v1/ws:
+  /v1/events:
     get:
+      operationId: streamEvents
       tags: [events]
-      summary: WebSocket upgrade — typed event stream
+      summary: Server-sent events — typed event stream
       description: |
-        Standard WS upgrade authenticated with a profile token. Envelope
-        `{type, at, data}`; event catalog in docs/architecture.md. Instance
-        events (library.changed, artifact.updated, acquisition.updated) go to
-        every connection; profile-scoped events (playlist.changed,
-        follow.updated, taste.updated) only to that profile's connections.
-        Clients MUST ignore unknown event types.
+        SSE (`text/event-stream`), authenticated with a profile token. Each
+        message's `id:` field is a monotonic sequence number; reconnect with
+        `Last-Event-ID` to resume without loss. `data:` is an Event envelope
+        (`{type, at, data}`). Clients MUST ignore unknown types.
+
+        | type | data | scope |
+        |---|---|---|
+        | `library.changed` | `{libraryId, updatedAt}` | instance |
+        | `artifact.updated` | `Artifact` | instance |
+        | `acquisition.updated` | `AcquisitionActivity` | instance |
+        | `presence.updated` | `PresenceEntry` | instance (honors share-listening) |
+        | `love.updated` | `LoveRecord` | profile |
+        | `playlist.changed` | `{playlistId}` | profile (incl. shared/collab changes by others) |
+        | `taste.updated` | `{}` | profile |
+        | `recommendation.received` | `Recommendation` | profile |
+        | `party.invited` | `PartyInvite` | profile |
+        | `party.updated` | `PartyState` (with `partyId`) | party members |
+
+        There is no client→server channel — control actions are ordinary
+        POSTs. Every event-producing resource keeps a plain pollable GET as
+        the resync path (mandatory after iOS backgrounding kills the stream).
+
+        There is no presence-removal event — a profile stopping playback or
+        disabling share-listening simply stops appearing in `GET /v1/presence`;
+        clients converge via that poll path.
+      parameters:
+        - { name: Last-Event-ID, in: header, required: false, schema: { type: string }, description: Sequence number of the last event received }
       responses:
-        "101": { description: Switching protocols }
+        "200":
+          description: Event stream (unbounded)
+          content:
+            text/event-stream:
+              schema: { type: string, description: SSE frames whose data lines carry Event JSON }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
   # ───────────────────────────── admin ─────────────────────────────
   /admin/api/setup:
     post:
+      operationId: adminSetup
       tags: [admin]
       summary: First-run — set the admin password (only while setupComplete=false)
       security: []
@@ -969,6 +1487,7 @@ paths:
 
   /admin/api/session:
     post:
+      operationId: adminLogin
       tags: [admin]
       summary: Admin login (sets session cookie)
       security: []
@@ -985,14 +1504,17 @@ paths:
         "204": { description: Session cookie set }
         "401": { $ref: "#/components/responses/Unauthorized" }
     delete:
+      operationId: adminLogout
       tags: [admin]
       summary: Admin logout
       security: [{ adminSession: [] }]
       responses:
         "204": { description: Logged out }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /admin/api/state:
     get:
+      operationId: adminGetState
       tags: [admin]
       summary: Admin dashboard state (setup progress, integrations, source health)
       security: [{ adminSession: [] }]
@@ -1002,9 +1524,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/AdminState" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /admin/api/source/plex/pin:
     post:
+      operationId: adminStartPlexPin
       tags: [admin]
       summary: Start Plex account link (PIN flow)
       security: [{ adminSession: [] }]
@@ -1020,9 +1544,11 @@ paths:
                   pinId: { type: string }
                   code: { type: string }
                   url: { type: string, description: plex.tv/link }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /admin/api/source/plex/pin/{pinId}:
     get:
+      operationId: adminGetPlexPin
       tags: [admin]
       summary: Poll Plex PIN
       security: [{ adminSession: [] }]
@@ -1037,9 +1563,11 @@ paths:
                 required: [status]
                 properties:
                   status: { type: string, enum: [pending, linked, expired] }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /admin/api/source/plex/libraries:
     get:
+      operationId: adminListPlexLibraries
       tags: [admin]
       summary: Discoverable music libraries across linked servers
       security: [{ adminSession: [] }]
@@ -1051,9 +1579,11 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/SourceLibrary" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /admin/api/source/plex/library:
     put:
+      operationId: adminSelectPlexLibrary
       tags: [admin]
       summary: Select the active library
       security: [{ adminSession: [] }]
@@ -1069,9 +1599,11 @@ paths:
                 libraryId: { type: string }
       responses:
         "204": { description: Selected }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /admin/api/integrations/lidarr:
     get:
+      operationId: adminGetLidarr
       tags: [admin]
       summary: Lidarr config (secrets reported as set-flags only)
       security: [{ adminSession: [] }]
@@ -1081,7 +1613,9 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/LidarrConfig" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
     put:
+      operationId: adminSetLidarr
       tags: [admin]
       summary: Set Lidarr config
       security: [{ adminSession: [] }]
@@ -1098,15 +1632,19 @@ paths:
                 allowSelfSigned: { type: boolean, default: false }
       responses:
         "204": { description: Saved }
+        "401": { $ref: "#/components/responses/Unauthorized" }
     delete:
+      operationId: adminDeleteLidarr
       tags: [admin]
       summary: Remove Lidarr integration
       security: [{ adminSession: [] }]
       responses:
         "204": { description: Removed }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /admin/api/integrations/lidarr/test:
     post:
+      operationId: adminTestLidarr
       tags: [admin]
       summary: Test Lidarr connectivity
       security: [{ adminSession: [] }]
@@ -1116,9 +1654,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/IntegrationTestResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /admin/api/integrations/lastfm:
     get:
+      operationId: adminGetLastfm
       tags: [admin]
       summary: last.fm config + connection state
       security: [{ adminSession: [] }]
@@ -1128,7 +1668,9 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/LastfmConfig" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
     put:
+      operationId: adminSetLastfm
       tags: [admin]
       summary: Set last.fm API credentials
       security: [{ adminSession: [] }]
@@ -1144,15 +1686,19 @@ paths:
                 sharedSecret: { type: string }
       responses:
         "204": { description: Saved }
+        "401": { $ref: "#/components/responses/Unauthorized" }
     delete:
+      operationId: adminDeleteLastfm
       tags: [admin]
       summary: Disconnect last.fm
       security: [{ adminSession: [] }]
       responses:
         "204": { description: Removed }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /admin/api/profiles:
     get:
+      operationId: adminListProfiles
       tags: [admin]
       summary: List household profiles
       security: [{ adminSession: [] }]
@@ -1164,7 +1710,9 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Profile" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
     post:
+      operationId: adminCreateProfile
       tags: [admin]
       summary: Create a profile
       security: [{ adminSession: [] }]
@@ -1185,9 +1733,11 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Profile" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /admin/api/profiles/{profileId}:
     patch:
+      operationId: adminUpdateProfile
       tags: [admin]
       summary: Update a profile (rename, set/clear PIN, color)
       security: [{ adminSession: [] }]
@@ -1208,18 +1758,22 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Profile" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
     delete:
+      operationId: adminDeleteProfile
       tags: [admin]
-      summary: Delete a profile (its playlists/taste/follows/history go with it; paired devices fall back to the profile picker)
+      summary: Delete a profile (its playlists/taste/loves/history go with it; paired devices fall back to the profile picker)
       security: [{ adminSession: [] }]
       parameters: [{ name: profileId, in: path, required: true, schema: { type: string } }]
       responses:
         "204": { description: Deleted }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /admin/api/pairings:
     get:
+      operationId: adminListPairings
       tags: [admin]
       summary: Pending pairing requests
       security: [{ adminSession: [] }]
@@ -1231,29 +1785,62 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/PairingRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /admin/api/pairings/{pairingId}/approve:
     post:
+      operationId: adminApprovePairing
       tags: [admin]
       summary: Approve a pairing
       security: [{ adminSession: [] }]
       parameters: [{ name: pairingId, in: path, required: true, schema: { type: string } }]
       responses:
         "204": { description: Approved }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /admin/api/pairings/{pairingId}/deny:
     post:
+      operationId: adminDenyPairing
       tags: [admin]
       summary: Deny a pairing
       security: [{ adminSession: [] }]
       parameters: [{ name: pairingId, in: path, required: true, schema: { type: string } }]
       responses:
         "204": { description: Denied }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
+
+  /admin/api/pair-codes:
+    post:
+      operationId: adminCreatePairCode
+      tags: [admin]
+      summary: Mint a single-use QR pairing code
+      description: |
+        Backs the web admin's "Link a device" QR. `qrPayload` is the exact
+        string to encode: `blitteramp://pair?server=<canonicalUrl>&code=<code>`.
+        Requires the canonical URL server setting; the QR must never embed a
+        raw request-derived LAN address.
+      security: [{ adminSession: [] }]
+      responses:
+        "201":
+          description: Pair code
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [code, expiresAt, canonicalUrl, qrPayload]
+                properties:
+                  code: { type: string, example: "7GK4PC" }
+                  expiresAt: { type: string, format: date-time }
+                  canonicalUrl: { type: string, example: "https://music.example.net" }
+                  qrPayload: { type: string, example: "blitteramp://pair?server=https%3A%2F%2Fmusic.example.net&code=7GK4PC" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { description: Canonical URL not configured, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
 
   /admin/api/devices:
     get:
+      operationId: adminListDevices
       tags: [admin]
       summary: Paired devices
       security: [{ adminSession: [] }]
@@ -1265,19 +1852,50 @@ paths:
               schema:
                 type: array
                 items: { $ref: "#/components/schemas/Device" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /admin/api/devices/{deviceId}:
     delete:
+      operationId: adminRevokeDevice
       tags: [admin]
       summary: Revoke a device (its token stops working immediately)
       security: [{ adminSession: [] }]
       parameters: [{ name: deviceId, in: path, required: true, schema: { type: string } }]
       responses:
         "204": { description: Revoked }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
+
+  /admin/api/settings/server:
+    get:
+      operationId: adminGetServerSettings
+      tags: [admin]
+      summary: Server settings (canonical URL)
+      security: [{ adminSession: [] }]
+      responses:
+        "200":
+          description: Settings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ServerSettings" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    put:
+      operationId: adminSetServerSettings
+      tags: [admin]
+      summary: Update server settings
+      security: [{ adminSession: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ServerSettings" }
+      responses:
+        "204": { description: Saved }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /admin/api/settings/transcode:
     get:
+      operationId: adminGetTranscodeSettings
       tags: [admin]
       summary: Transcode + artifact-cache settings
       security: [{ adminSession: [] }]
@@ -1287,7 +1905,9 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/TranscodeSettings" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
     put:
+      operationId: adminSetTranscodeSettings
       tags: [admin]
       summary: Update transcode + artifact-cache settings
       security: [{ adminSession: [] }]
@@ -1298,6 +1918,7 @@ paths:
             schema: { $ref: "#/components/schemas/TranscodeSettings" }
       responses:
         "204": { description: Saved }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
 components:
   securitySchemes:
@@ -1311,10 +1932,14 @@ components:
       name: blittarr_admin
 
   parameters:
-    offset:
-      name: offset
+    cursor:
+      name: cursor
       in: query
-      schema: { type: integer, minimum: 0, default: 0 }
+      schema: { type: string }
+      description: |
+        Opaque page cursor from the previous response's `nextCursor`. Omit for
+        the first page. Only valid for the sort/filter combination it was
+        minted under.
     limit:
       name: limit
       in: query
@@ -1323,6 +1948,11 @@ components:
       name: sort
       in: query
       schema: { type: string, enum: [title, artist, recentlyAdded, year], default: title }
+    partyId:
+      name: partyId
+      in: path
+      required: true
+      schema: { type: string, example: pty_5g4h3j }
 
   responses:
     Unauthorized:
@@ -1358,11 +1988,11 @@ components:
 
     Page:
       type: object
-      required: [offset, limit, total]
       properties:
-        offset: { type: integer }
-        limit: { type: integer }
-        total: { type: integer }
+        nextCursor:
+          type: string
+          nullable: true
+          description: Pass as `cursor` to fetch the next page; null/absent on the last page
 
     ServerStatus:
       type: object
@@ -1387,19 +2017,20 @@ components:
       type: object
       required: [acquisition, lastfm, transcodeFormats]
       properties:
-        acquisition: { type: boolean, description: Follow(artist) will acquire; Activity view available }
+        acquisition: { type: boolean, description: Love(artist) will acquire; Activity view available }
         lastfm: { type: boolean, description: Instance credentials present — profiles can connect via /v1/me/lastfm }
         transcodeFormats:
           type: array
           items: { type: string, enum: [original, aac] }
           description: aac absent when ffmpeg unavailable
         radio: { type: boolean }
+        discovery: { type: boolean, description: "An engine recommendation provider is configured — /v1/me/discover returns items" }
 
     Device:
       type: object
       required: [deviceId, name, type, pairedAt]
       properties:
-        deviceId: { type: string }
+        deviceId: { type: string, example: dev_8f2k1q }
         name: { type: string }
         type: { type: string, enum: [ios, desktop, web, other] }
         pairedAt: { type: string, format: date-time }
@@ -1409,7 +2040,7 @@ components:
       type: object
       required: [profileId, name, hasPin]
       properties:
-        profileId: { type: string }
+        profileId: { type: string, example: prf_1a2b3c }
         name: { type: string }
         hasPin: { type: boolean }
         avatarColor: { type: string, nullable: true, description: Hex color for the profile chip }
@@ -1427,7 +2058,7 @@ components:
       type: object
       required: [pairingId, code, deviceName, deviceType, requestedAt, expiresAt]
       properties:
-        pairingId: { type: string }
+        pairingId: { type: string, example: pair_5t6y7u }
         code: { type: string }
         deviceName: { type: string }
         deviceType: { type: string }
@@ -1438,7 +2069,7 @@ components:
       type: object
       required: [libraryId, title, updatedAt, counts]
       properties:
-        libraryId: { type: string }
+        libraryId: { type: string, example: lib_0m1n2b }
         title: { type: string }
         updatedAt:
           type: integer
@@ -1455,14 +2086,17 @@ components:
       type: object
       required: [artistId, name]
       properties:
-        artistId: { type: string }
+        artistId: { type: string, example: art_9f3kq2 }
         name: { type: string }
-        artId: { type: string, nullable: true }
+        artId: { type: string, nullable: true, example: img_4c5d6e }
         genres:
           type: array
           items: { type: string }
         albumCount: { type: integer, nullable: true }
         userRating10: { type: integer, nullable: true }
+        loveState:
+          allOf: [{ $ref: "#/components/schemas/LoveState" }]
+          description: The calling profile's tri-state; absent = neutral
 
     ArtistDetail:
       allOf:
@@ -1471,7 +2105,6 @@ components:
           properties:
             bio: { type: string, nullable: true, description: "HTML-stripped, from last.fm when available" }
             trackCount: { type: integer, nullable: true }
-            followed: { type: boolean }
             stats:
               type: object
               nullable: true
@@ -1483,12 +2116,12 @@ components:
       type: object
       required: [albumId, title, artistId, artistName]
       properties:
-        albumId: { type: string }
+        albumId: { type: string, example: alb_7xm1pd }
         title: { type: string }
-        artistId: { type: string }
+        artistId: { type: string, example: art_9f3kq2 }
         artistName: { type: string }
         year: { type: integer, nullable: true }
-        artId: { type: string, nullable: true }
+        artId: { type: string, nullable: true, example: img_4c5d6e }
         genres:
           type: array
           items: { type: string }
@@ -1497,26 +2130,28 @@ components:
           items: { type: string }
         trackCount: { type: integer, nullable: true }
         updatedAt: { type: integer, format: int64, nullable: true, description: For client cache validators }
+        loveState: { $ref: "#/components/schemas/LoveState" }
 
     Track:
       type: object
       required: [trackId, title, artistId, artistName, albumId, albumTitle, durationMs, media]
       properties:
-        trackId: { type: string }
+        trackId: { type: string, example: trk_2vq8na }
         title: { type: string }
         index: { type: integer, nullable: true }
         discNumber: { type: integer, nullable: true }
-        artistId: { type: string }
+        artistId: { type: string, example: art_9f3kq2 }
         artistName: { type: string }
-        albumId: { type: string }
+        albumId: { type: string, example: alb_7xm1pd }
         albumTitle: { type: string }
         durationMs: { type: integer }
-        artId: { type: string, nullable: true }
+        artId: { type: string, nullable: true, example: img_4c5d6e }
         userRating10: { type: integer, nullable: true, description: The calling profile's rating }
         genres:
           type: array
           items: { type: string }
         media: { $ref: "#/components/schemas/MediaInfo" }
+        loveState: { $ref: "#/components/schemas/LoveState" }
 
     MediaInfo:
       type: object
@@ -1533,23 +2168,30 @@ components:
       properties:
         name: { type: string }
         albumCount: { type: integer }
-        artId: { type: string, nullable: true, description: Representative art for collage }
+        artId: { type: string, nullable: true, example: img_4c5d6e, description: Representative art for collage }
 
     Playlist:
       type: object
-      required: [playlistId, title, trackCount, origin]
+      required: [playlistId, title, trackCount, origin, visibility]
       properties:
-        playlistId: { type: string }
+        playlistId: { type: string, example: pl_4hh2sm }
         title: { type: string }
         trackCount: { type: integer }
         durationMs: { type: integer, nullable: true }
-        artId: { type: string, nullable: true }
+        artId: { type: string, nullable: true, example: img_4c5d6e }
         origin:
           type: string
           enum: [blittarr, source]
           description: blittarr = the calling profile's own (mutable); source = surfaced from Plex, read-only, visible to all profiles
         smart: { type: boolean, default: false, description: Source-defined smart playlist }
         updatedAt: { type: integer, format: int64, nullable: true }
+        visibility:
+          type: string
+          enum: [private, shared, collaborative]
+          default: private
+          description: "shared = household can see/play; collaborative = household can also add/remove tracks. Owner manages metadata/deletion. Always private-equivalent read-only for origin: source."
+        ownerProfileId: { type: string, nullable: true, example: prf_1a2b3c, description: "Owning profile; null for origin: source" }
+        ownerName: { type: string, nullable: true, description: Display name for "Shared by" chrome }
 
     PlaylistTrack:
       allOf:
@@ -1557,18 +2199,18 @@ components:
         - type: object
           required: [itemId]
           properties:
-            itemId: { type: string, description: Playlist item id (removal handle) }
+            itemId: { type: string, example: pli_9k8j7h, description: Playlist item id (removal handle) }
 
     SimilarArtist:
       type: object
-      required: [name, owned]
+      required: [name, owned, artistId]
       properties:
         name: { type: string }
         owned: { type: boolean }
-        artistId: { type: string, nullable: true, description: Set when owned }
-        artId: { type: string, nullable: true }
+        artistId: { type: string, description: Canonical id (always set; external artists get ids minted on first surface) }
+        artId: { type: string, nullable: true, example: img_4c5d6e }
         match: { type: number, nullable: true, minimum: 0, maximum: 1 }
-        followed: { type: boolean }
+        loveState: { $ref: "#/components/schemas/LoveState" }
 
     SearchResults:
       type: object
@@ -1632,14 +2274,14 @@ components:
 
     ExternalArtist:
       type: object
-      required: [name, owned]
+      required: [name, owned, artistId]
       properties:
         name: { type: string }
         owned: { type: boolean }
-        artistId: { type: string, nullable: true }
+        artistId: { type: string, description: Canonical id (always set; external artists get ids minted on first surface) }
         bio: { type: string, nullable: true }
-        artId: { type: string, nullable: true }
-        followed: { type: boolean }
+        artId: { type: string, nullable: true, example: img_4c5d6e }
+        loveState: { $ref: "#/components/schemas/LoveState" }
         similar:
           type: array
           items: { $ref: "#/components/schemas/SimilarArtist" }
@@ -1692,31 +2334,152 @@ components:
       type: object
       required: [artifactId, trackId, format, status]
       properties:
-        artifactId: { type: string }
-        trackId: { type: string }
-        albumId: { type: string, nullable: true, description: "Grouping key for offline art (one art fetch per album, not per track)" }
-        artId: { type: string, nullable: true, description: "Album art for the track — sync flows prefetch /v1/art/{artId} alongside the file so downloaded content has art offline" }
+        artifactId: { type: string, example: arf_3e4r5t }
+        trackId: { type: string, example: trk_2vq8na }
+        albumId: { type: string, nullable: true, example: alb_7xm1pd, description: "Grouping key for offline art (one art fetch per album, not per track)" }
+        artId: { type: string, nullable: true, example: img_4c5d6e, description: "Album art for the track — sync flows prefetch /v1/art/{artId} alongside the file so downloaded content has art offline" }
         format: { type: string, enum: [original, aac] }
         bitrateKbps: { type: integer, nullable: true }
         status: { type: string, enum: [queued, processing, ready, failed] }
         bytes: { type: integer, format: int64, nullable: true, description: Exact size once ready }
         error: { type: string, nullable: true }
 
-    FollowRecord:
+    LoveState:
+      type: string
+      enum: [loved, neutral, not_for_me]
+      description: Per-profile tri-state; neutral records are not persisted/listed
+
+    LoveRecord:
       type: object
-      required: [followId, kind, name, followedAt, state]
+      required: [loveId, ref, kind, state, name, updatedAt, owned]
       properties:
-        followId: { type: string }
+        loveId: { type: string, example: lov_6r5e4w }
+        ref: { type: string, example: art_9f3kq2, description: Canonical id of the loved item }
+        kind: { type: string, enum: [artist, album, track] }
+        state: { $ref: "#/components/schemas/LoveState" }
+        name: { type: string }
+        artistName: { type: string, nullable: true, description: For album/track loves }
+        owned: { type: boolean, description: Item is in the library (false = external artist being acquired) }
+        updatedAt: { type: string, format: date-time }
+        acquisition:
+          type: object
+          nullable: true
+          description: Artist loves only; absent when no acquirer configured
+          required: [state]
+          properties:
+            state: { type: string, enum: [watching, acquiring, error] }
+            error: { type: string, nullable: true }
+
+    Recommendation:
+      type: object
+      required: [recommendationId, fromProfileId, fromProfileName, toProfileId, ref, kind, name, seen, createdAt]
+      properties:
+        recommendationId: { type: string, example: rec_8s7d6f }
+        fromProfileId: { type: string, example: prf_1a2b3c }
+        fromProfileName: { type: string }
+        toProfileId: { type: string, example: prf_9z8y7x }
+        ref: { type: string, example: alb_7xm1pd }
+        kind: { type: string, enum: [artist, album, track] }
+        name: { type: string, description: Display title of the referenced item }
+        artistName: { type: string, nullable: true }
+        artId: { type: string, nullable: true, example: img_4c5d6e }
+        note: { type: string, nullable: true }
+        seen: { type: boolean }
+        createdAt: { type: string, format: date-time }
+
+    ProfileSettings:
+      type: object
+      required: [shareListening]
+      properties:
+        shareListening: { type: boolean, default: true, description: "Appear in household presence (default ON; honored everywhere presence surfaces)" }
+
+    PresenceEntry:
+      type: object
+      required: [profileId, profileName, track, at]
+      properties:
+        profileId: { type: string, example: prf_1a2b3c }
+        profileName: { type: string }
+        avatarColor: { type: string, nullable: true }
+        track: { $ref: "#/components/schemas/Track" }
+        at: { type: string, format: date-time, description: "When this now-playing state was last observed" }
+
+    Party:
+      type: object
+      required: [partyId, hostProfileId, members, queue, state, createdAt]
+      properties:
+        partyId: { type: string, example: pty_5g4h3j }
+        name: { type: string, nullable: true }
+        hostProfileId: { type: string, example: prf_1a2b3c }
+        members:
+          type: array
+          items:
+            type: object
+            required: [profileId, name]
+            properties:
+              profileId: { type: string, example: prf_1a2b3c }
+              name: { type: string }
+        queue:
+          type: array
+          items: { $ref: "#/components/schemas/PartyQueueItem" }
+        state: { $ref: "#/components/schemas/PartyState" }
+        createdAt: { type: string, format: date-time }
+
+    PartyQueueItem:
+      allOf:
+        - $ref: "#/components/schemas/Track"
+        - type: object
+          required: [itemId, addedByProfileId]
+          properties:
+            itemId: { type: string, example: pqi_2w3e4r, description: Queue item id }
+            addedByProfileId: { type: string, example: prf_9z8y7x }
+
+    PartyState:
+      type: object
+      required: [trackId, paused, positionMs, asOf]
+      description: |
+        Server-owned timeline. `positionMs` is the playback position at `asOf`
+        (server time); while playing, clients extrapolate
+        position = positionMs + (now - asOf) using their clock offset. When
+        paused, `positionMs` is frozen.
+      properties:
+        trackId: { type: string, nullable: true, example: trk_2vq8na, description: Null before the first track starts }
+        paused: { type: boolean }
+        positionMs: { type: integer }
+        asOf: { type: string, format: date-time }
+        partyId: { type: string, example: pty_5g4h3j, description: Present on party.updated event payloads; identifies which party the timeline belongs to }
+
+    PartyInvite:
+      type: object
+      required: [partyId, fromProfileId, fromProfileName, at]
+      properties:
+        partyId: { type: string, example: pty_5g4h3j }
+        partyName: { type: string, nullable: true }
+        fromProfileId: { type: string, example: prf_1a2b3c }
+        fromProfileName: { type: string }
+        at: { type: string, format: date-time }
+
+    DiscoverItem:
+      type: object
+      required: [kind, name, owned]
+      properties:
         kind: { type: string, enum: [artist, album, track] }
         name: { type: string }
         artistName: { type: string, nullable: true }
-        itemId: { type: string, nullable: true }
-        followedAt: { type: string, format: date-time }
-        state:
+        owned: { type: boolean }
+        ref: { type: string, nullable: true, example: art_9f3kq2, description: "Canonical id — always set for artists (minted on first surface); null only for unowned albums/tracks" }
+        artId: { type: string, nullable: true, example: img_4c5d6e }
+        reason: { type: string, nullable: true, example: "Because you love Deftones" }
+        loveState: { $ref: "#/components/schemas/LoveState" }
+
+    Event:
+      type: object
+      required: [type, at, data]
+      properties:
+        type:
           type: string
-          enum: [local, watching, acquiring, error]
-          description: local = favorite only (no acquirer / album / track); watching = Lidarr monitoring; acquiring = back-catalog search in flight
-        error: { type: string, nullable: true }
+          enum: [library.changed, artifact.updated, acquisition.updated, presence.updated, love.updated, playlist.changed, taste.updated, recommendation.received, party.invited, party.updated]
+        at: { type: string, format: date-time }
+        data: { type: object, description: Payload per the catalog in GET /v1/events }
 
     AcquisitionActivity:
       type: object
@@ -1771,6 +2534,7 @@ components:
         pendingPairings: { type: integer }
         deviceCount: { type: integer }
         profileCount: { type: integer }
+        canonicalUrlSet: { type: boolean }
 
     LidarrConfig:
       type: object
@@ -1795,6 +2559,17 @@ components:
         ok: { type: boolean }
         version: { type: string, nullable: true }
         error: { type: string, nullable: true }
+
+    ServerSettings:
+      type: object
+      required: [canonicalUrl]
+      properties:
+        canonicalUrl:
+          type: string
+          nullable: true
+          format: uri
+          example: "https://music.example.net"
+          description: Public base URL embedded in pairing QRs — set during first-run setup; never a raw LAN IP unless devices genuinely reach it there
 
     TranscodeSettings:
       type: object
