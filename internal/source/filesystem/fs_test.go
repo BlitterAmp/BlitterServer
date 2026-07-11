@@ -1,0 +1,158 @@
+package filesystem
+
+import (
+	"context"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"testing"
+
+	"github.com/BlitterAmp/BlitterServer/internal/source"
+)
+
+// fixtureLibrary builds a small on-disk library:
+//
+//	Artist One/Album A/01 - Sine Song.flac  (embedded cover art)
+//	Artist One/Album A/02 - Sine Song.mp3
+//	Artist Two/Album B/01 - Sine Song.m4a
+//	Artist Two/Album B/notes.txt            (ignored)
+func fixtureLibrary(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not on PATH; fixture tests skipped")
+	}
+	root := t.TempDir()
+	cover := filepath.Join(root, "cover.png")
+	run(t, "ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=red:size=64x64:duration=1", "-frames:v", "1", cover)
+
+	a1 := filepath.Join(root, "Artist One", "Album A")
+	a2 := filepath.Join(root, "Artist Two", "Album B")
+	os.MkdirAll(a1, 0o755)
+	os.MkdirAll(a2, 0o755)
+
+	run(t, "ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-i", cover,
+		"-map", "0:a", "-map", "1:v", "-disposition:v", "attached_pic",
+		"-metadata", "title=Sine Song", "-metadata", "artist=Artist One",
+		"-metadata", "album=Album A", "-metadata", "genre=Rock",
+		"-metadata", "date=1994", "-metadata", "track=1",
+		filepath.Join(a1, "01 - Sine Song.flac"))
+	run(t, "ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=550:duration=2",
+		"-metadata", "title=Second Song", "-metadata", "artist=Artist One",
+		"-metadata", "album=Album A", "-metadata", "genre=Rock",
+		"-metadata", "date=1994", "-metadata", "track=2", "-b:a", "192k",
+		filepath.Join(a1, "02 - Second Song.mp3"))
+	run(t, "ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=660:duration=2",
+		"-metadata", "title=Other Song", "-metadata", "artist=Artist Two",
+		"-metadata", "album=Album B", "-metadata", "genre=Jazz",
+		"-metadata", "date=2003", "-metadata", "track=1", "-c:a", "aac",
+		filepath.Join(a2, "01 - Other Song.m4a"))
+	os.WriteFile(filepath.Join(a2, "notes.txt"), []byte("not audio"), 0o644)
+	os.Remove(cover)
+	return root
+}
+
+func run(t *testing.T, name string, args ...string) {
+	t.Helper()
+	if b, err := exec.Command(name, args...).CombinedOutput(); err != nil {
+		t.Fatalf("%s: %v\n%s", name, err, b)
+	}
+}
+
+func scanAll(t *testing.T, src *Source) []source.TrackMeta {
+	t.Helper()
+	var out []source.TrackMeta
+	if err := src.Scan(context.Background(), func(m source.TrackMeta) error {
+		out = append(out, m)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].NativeID < out[j].NativeID })
+	return out
+}
+
+func TestScanFindsTaggedTracks(t *testing.T) {
+	root := fixtureLibrary(t)
+	src, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if src.Kind() != "filesystem" {
+		t.Fatalf("kind: %q", src.Kind())
+	}
+
+	tracks := scanAll(t, src)
+	if len(tracks) != 3 {
+		t.Fatalf("want 3 tracks, got %d: %+v", len(tracks), tracks)
+	}
+
+	flac := tracks[0]
+	if flac.NativeID != filepath.Join("Artist One", "Album A", "01 - Sine Song.flac") {
+		t.Fatalf("native id must be the relative path: %q", flac.NativeID)
+	}
+	if flac.Title != "Sine Song" || flac.Artist != "Artist One" || flac.AlbumArtist != "Artist One" ||
+		flac.Album != "Album A" || flac.Genre != "Rock" || flac.Year != 1994 || flac.Index != 1 {
+		t.Fatalf("flac tags: %+v", flac)
+	}
+	if flac.Codec != "flac" || !durationClose(flac.DurationMs) || flac.SizeBytes <= 0 || flac.Version <= 0 {
+		t.Fatalf("flac media: %+v", flac)
+	}
+	if flac.ArtHash == "" {
+		t.Fatal("flac fixture has embedded art; ArtHash must be set")
+	}
+
+	mp3 := tracks[1]
+	if mp3.Title != "Second Song" || mp3.Index != 2 || mp3.Codec != "mp3" {
+		t.Fatalf("mp3: %+v", mp3)
+	}
+	if mp3.ArtHash != "" {
+		t.Fatalf("mp3 fixture has no art: %+v", mp3)
+	}
+
+	m4a := tracks[2]
+	if m4a.Artist != "Artist Two" || m4a.Album != "Album B" || m4a.Genre != "Jazz" || m4a.Codec != "aac" {
+		t.Fatalf("m4a: %+v", m4a)
+	}
+}
+
+func TestOpenAndArt(t *testing.T) {
+	root := fixtureLibrary(t)
+	src, _ := New(root)
+	tracks := scanAll(t, src)
+
+	rc, err := src.Open(context.Background(), tracks[0].NativeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	head := make([]byte, 4)
+	if _, err := io.ReadFull(rc, head); err != nil || string(head) != "fLaC" {
+		t.Fatalf("open must return the audio bytes: %v %q", err, head)
+	}
+
+	data, mime, err := src.Art(context.Background(), tracks[0].NativeID)
+	if err != nil || len(data) == 0 || mime == "" {
+		t.Fatalf("art: %v %d bytes %q", err, len(data), mime)
+	}
+	if _, _, err := src.Art(context.Background(), tracks[1].NativeID); err == nil {
+		t.Fatal("artless track must error on Art()")
+	}
+
+	// Path traversal must not escape the root.
+	if _, err := src.Open(context.Background(), "../../etc/passwd"); err == nil {
+		t.Fatal("open must reject escaping native ids")
+	}
+}
+
+func TestNewRejectsMissingRoot(t *testing.T) {
+	if _, err := New(filepath.Join(t.TempDir(), "nope")); err == nil {
+		t.Fatal("missing root must error")
+	}
+	f := filepath.Join(t.TempDir(), "file")
+	os.WriteFile(f, []byte("x"), 0o644)
+	if _, err := New(f); err == nil {
+		t.Fatal("non-directory root must error")
+	}
+}

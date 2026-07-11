@@ -92,7 +92,7 @@ func (s *Store) GetProfileRecord(ctx context.Context, profileID string) (Profile
 
 func (s *Store) ListProfileRecords(ctx context.Context) ([]ProfileRecord, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+profileCols+` FROM profiles ORDER BY created_at, profile_id`)
+		`SELECT `+profileCols+` FROM profiles ORDER BY created_at, name, profile_id`)
 	if err != nil {
 		return nil, err
 	}

@@ -43,7 +43,7 @@ func TestGetStatusHonestZeros(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := resp.(api.GetStatus200JSONResponse)
-	if r.Source.Connected || r.Source.Kind != "plex" || r.SetupComplete {
+	if r.Source.Connected || r.Source.Kind != "none" || r.SetupComplete {
 		t.Fatalf("dishonest status: %+v", r)
 	}
 }
@@ -63,7 +63,7 @@ func TestGetCapabilitiesFFmpegBranch(t *testing.T) {
 
 func TestUnimplementedInheritance(t *testing.T) {
 	srv := New(testStore(t), "v")
-	_, err := srv.ListArtists(context.Background(), api.ListArtistsRequestObject{})
+	_, err := srv.GetHome(context.Background(), api.GetHomeRequestObject{})
 	if err != api.ErrNotImplemented {
 		t.Fatalf("unoverridden ops must flow to Unimplemented, got %v", err)
 	}
