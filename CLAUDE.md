@@ -4,7 +4,7 @@ The self-hosted backend service for **BlitterAmp** (the player app at `BlitterAm
 
 ## Where the design lives (POLICY — decided 2026-07-10)
 
-**This repo carries only the current, accurate implementation and API documentation.** All architecture design, specs, plans, decision history, and session notes live in the AgentOS vault: `~/Documents/Vaults/AgentOS/Apps/BlitterAmp/` (`BlitterServer Architecture.md`, `BlitterServer v1 Session-2 Design.md`, `Decisions.md`). Read the vault before proposing changes; write design/decision updates THERE, not here. Do not add design docs, specs, or plans to this repo.
+**This repo carries only the current, accurate implementation and API documentation.** All architecture design, specs, plans, decision history, and session notes live in the AgentOS vault: `~/Documents/Vaults/AgentOS/Apps/BlitterAmp/` (`BlitterServer Architecture.md`, `Blittarr v1 Session-2 Design.md` (historical name), `Decisions.md`). Read the vault before proposing changes; write design/decision updates THERE, not here. Do not add design docs, specs, or plans to this repo.
 
 ## Non-negotiables
 
