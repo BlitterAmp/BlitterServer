@@ -546,9 +546,11 @@ paths:
       tags: [library]
       summary: List playlists — the calling profile's own plus read-only source playlists
       description: |
-        Playlists are Blittarr-native and per-profile (`origin: blittarr`).
-        Playlists that exist in the source (Plex) surface read-only to every
-        profile as `origin: source`; mutations on them return 403.
+        Returns the calling profile's own playlists, other profiles' `shared`
+        and `collaborative` playlists, and read-only source (Plex) playlists
+        (`origin: source`, visible to every profile). Mutations return 403
+        unless the caller is the owner — except appending/removing tracks on a
+        `collaborative` playlist, which any profile may do.
       responses:
         "200":
           description: Playlists
@@ -571,6 +573,7 @@ paths:
               required: [title]
               properties:
                 title: { type: string }
+                visibility: { type: string, enum: [private, shared, collaborative], default: private }
                 trackIds:
                   type: array
                   items: { type: string }
@@ -598,7 +601,7 @@ paths:
     patch:
       operationId: updatePlaylist
       tags: [library]
-      summary: Rename playlist
+      summary: Update playlist (rename, visibility — owner only)
       parameters: [{ name: playlistId, in: path, required: true, schema: { type: string } }]
       requestBody:
         required: true
@@ -606,15 +609,16 @@ paths:
           application/json:
             schema:
               type: object
-              required: [title]
               properties:
                 title: { type: string }
+                visibility: { type: string, enum: [private, shared, collaborative] }
       responses:
         "200":
           description: Updated
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Playlist" }
+        "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/NotFound" }
     delete:
       operationId: deletePlaylist
@@ -623,6 +627,7 @@ paths:
       parameters: [{ name: playlistId, in: path, required: true, schema: { type: string } }]
       responses:
         "204": { description: Deleted }
+        "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/playlists/{playlistId}/tracks:
@@ -667,6 +672,7 @@ paths:
                   items: { type: string }
       responses:
         "204": { description: Appended }
+        "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/playlists/{playlistId}/tracks/{itemId}:
@@ -679,6 +685,7 @@ paths:
         - { name: itemId, in: path, required: true, schema: { type: string } }
       responses:
         "204": { description: Removed }
+        "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/ratings:
@@ -1776,7 +1783,7 @@ components:
 
     Playlist:
       type: object
-      required: [playlistId, title, trackCount, origin]
+      required: [playlistId, title, trackCount, origin, visibility]
       properties:
         playlistId: { type: string, example: pl_4hh2sm }
         title: { type: string }
@@ -1789,6 +1796,13 @@ components:
           description: blittarr = the calling profile's own (mutable); source = surfaced from Plex, read-only, visible to all profiles
         smart: { type: boolean, default: false, description: Source-defined smart playlist }
         updatedAt: { type: integer, format: int64, nullable: true }
+        visibility:
+          type: string
+          enum: [private, shared, collaborative]
+          default: private
+          description: "shared = household can see/play; collaborative = household can also add/remove tracks. Owner manages metadata/deletion. Always private-equivalent read-only for origin: source."
+        ownerProfileId: { type: string, nullable: true, example: prf_1a2b3c, description: "Owning profile; null for origin: source" }
+        ownerName: { type: string, nullable: true, description: Display name for "Shared by" chrome }
 
     PlaylistTrack:
       allOf:
