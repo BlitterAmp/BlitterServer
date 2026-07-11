@@ -577,7 +577,7 @@ paths:
     get:
       operationId: listPlaylists
       tags: [library]
-      summary: List playlists — the calling profile's own plus read-only source playlists
+      summary: List playlists — own, household-shared, and read-only source playlists
       description: |
         Returns the calling profile's own playlists, other profiles' `shared`
         and `collaborative` playlists, and read-only source (Plex) playlists
