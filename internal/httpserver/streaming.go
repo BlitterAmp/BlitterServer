@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/BlitterAmp/BlitterServer/internal/artifacts"
 	"github.com/BlitterAmp/BlitterServer/internal/library"
 	"github.com/BlitterAmp/BlitterServer/internal/logging"
 	"github.com/BlitterAmp/BlitterServer/internal/store"
@@ -161,6 +162,50 @@ func handleStreamTrack(st *store.Store, mgr *library.Manager) http.HandlerFunc {
 		defer rc.Close()
 		if mime, ok := containerMIME[tr.Container]; ok {
 			w.Header().Set("Content-Type", mime)
+		}
+		http.ServeContent(w, r, "", time.Time{}, rc)
+	}
+}
+
+// handleDownloadArtifact serves a ready artifact with its exact size (iOS
+// background URLSession needs Content-Length). Unready artifacts are 409.
+func handleDownloadArtifact(st *store.Store, artMgr *artifacts.Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		artifactID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/artifacts/"), "/file")
+		a, found, err := st.GetArtifact(r.Context(), artifactID)
+		if err != nil {
+			logging.From(r.Context()).Error("artifact lookup", "err", err)
+			WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "internal")
+			return
+		}
+		if !found {
+			WriteProblem(w, http.StatusNotFound, "Not Found", "not_found")
+			return
+		}
+		if a.Status != "ready" {
+			code := "artifact_not_ready"
+			if a.Status == "failed" {
+				code = "artifact_failed"
+			}
+			WriteProblem(w, http.StatusConflict, "Conflict", code)
+			return
+		}
+		rc, _, err := artMgr.Open(r.Context(), artifactID)
+		if err != nil {
+			logging.From(r.Context()).Error("artifact open", "err", err)
+			WriteProblem(w, http.StatusServiceUnavailable, "Source Unavailable", "source_unavailable")
+			return
+		}
+		defer rc.Close()
+		if a.Format == "original" {
+			tr, found, _ := st.GetTrack(r.Context(), a.TrackID)
+			if found {
+				if mime, ok := containerMIME[tr.Container]; ok {
+					w.Header().Set("Content-Type", mime)
+				}
+			}
+		} else {
+			w.Header().Set("Content-Type", "audio/mp4")
 		}
 		http.ServeContent(w, r, "", time.Time{}, rc)
 	}
