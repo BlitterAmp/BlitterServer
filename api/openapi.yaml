@@ -54,6 +54,7 @@ tags:
   - { name: streaming, description: "Direct-play streaming, stream grants, artwork" }
   - { name: artifacts, description: Pre-transcoded download artifacts }
   - { name: loves, description: Love / Not-for-me tri-state and acquisition activity }
+  - { name: social, description: "Household social — recommendations, presence, listen parties" }
   - { name: events, description: Server-push event stream }
   - { name: admin, description: Admin web UI API (cookie session realm) }
 
@@ -1071,6 +1072,67 @@ paths:
               schema: { $ref: "#/components/schemas/AcquisitionActivity" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
+  # ───────────────────────────── social ─────────────────────────────
+  /v1/recommendations:
+    post:
+      operationId: createRecommendation
+      tags: [social]
+      summary: Recommend an item to another household profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [toProfileId, ref]
+              properties:
+                toProfileId: { type: string, example: prf_1a2b3c }
+                ref: { type: string, example: alb_7xm1pd, description: Canonical id (art_/alb_/trk_) }
+                note: { type: string, nullable: true, maxLength: 500 }
+      responses:
+        "201":
+          description: Sent
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Recommendation" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    get:
+      operationId: listRecommendations
+      tags: [social]
+      summary: Recommendations inbox (received by the calling profile, newest first)
+      parameters:
+        - $ref: "#/components/parameters/cursor"
+        - $ref: "#/components/parameters/limit"
+        - { name: unseen, in: query, required: false, schema: { type: boolean }, description: Only unseen when true }
+      responses:
+        "200":
+          description: Inbox
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Page"
+                  - type: object
+                    required: [items]
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/Recommendation" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/recommendations/{recommendationId}/seen:
+    post:
+      operationId: markRecommendationSeen
+      tags: [social]
+      summary: Mark a received recommendation seen
+      parameters:
+        - { name: recommendationId, in: path, required: true, schema: { type: string, example: rec_8s7d6f } }
+      responses:
+        "204": { description: Marked }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   # ───────────────────────────── events ─────────────────────────────
   /v1/ws:
     get:
@@ -1980,6 +2042,23 @@ components:
           properties:
             state: { type: string, enum: [watching, acquiring, error] }
             error: { type: string, nullable: true }
+
+    Recommendation:
+      type: object
+      required: [recommendationId, fromProfileId, fromProfileName, toProfileId, ref, kind, name, seen, createdAt]
+      properties:
+        recommendationId: { type: string, example: rec_8s7d6f }
+        fromProfileId: { type: string, example: prf_1a2b3c }
+        fromProfileName: { type: string }
+        toProfileId: { type: string, example: prf_9z8y7x }
+        ref: { type: string, example: alb_7xm1pd }
+        kind: { type: string, enum: [artist, album, track] }
+        name: { type: string, description: Display title of the referenced item }
+        artistName: { type: string, nullable: true }
+        artId: { type: string, nullable: true, example: img_4c5d6e }
+        note: { type: string, nullable: true }
+        seen: { type: boolean }
+        createdAt: { type: string, format: date-time }
 
     AcquisitionActivity:
       type: object
