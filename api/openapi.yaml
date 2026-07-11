@@ -26,8 +26,17 @@ info:
     Profile switching in-app = using a different cached profile token; no
     admin involvement after the one-time device pairing approval.
 
-    **Conventions:** JSON everywhere; opaque string ids; list endpoints paginate
+    **Conventions:** JSON everywhere; list endpoints paginate
     with `offset`/`limit` and return `total`; errors are a Problem object.
+
+    **Ids** are opaque strings carrying a type prefix — `art_` artist, `alb_`
+    album, `trk_` track, `pl_` playlist, `pli_` playlist item, `prf_` profile,
+    `dev_` device, `pair_` pairing, `arf_` artifact, `img_` artwork, `lib_`
+    library, `lov_` love, `rec_` recommendation, `pty_` party, `pqi_` party
+    queue item. The prefix is for logs and error messages; clients MUST NOT
+    parse ids beyond treating them as opaque. Exceptions: `mixId` is a
+    computed slug (`mood:driving`), playback `eventId` is a client-generated
+    UUID, and `/admin/api/source/plex/*` exposes source-native ids.
 servers:
   - url: http://{host}:{port}
     variables:
@@ -1517,7 +1526,7 @@ components:
       type: object
       required: [deviceId, name, type, pairedAt]
       properties:
-        deviceId: { type: string }
+        deviceId: { type: string, example: dev_8f2k1q }
         name: { type: string }
         type: { type: string, enum: [ios, desktop, web, other] }
         pairedAt: { type: string, format: date-time }
@@ -1527,7 +1536,7 @@ components:
       type: object
       required: [profileId, name, hasPin]
       properties:
-        profileId: { type: string }
+        profileId: { type: string, example: prf_1a2b3c }
         name: { type: string }
         hasPin: { type: boolean }
         avatarColor: { type: string, nullable: true, description: Hex color for the profile chip }
@@ -1545,7 +1554,7 @@ components:
       type: object
       required: [pairingId, code, deviceName, deviceType, requestedAt, expiresAt]
       properties:
-        pairingId: { type: string }
+        pairingId: { type: string, example: pair_5t6y7u }
         code: { type: string }
         deviceName: { type: string }
         deviceType: { type: string }
@@ -1556,7 +1565,7 @@ components:
       type: object
       required: [libraryId, title, updatedAt, counts]
       properties:
-        libraryId: { type: string }
+        libraryId: { type: string, example: lib_0m1n2b }
         title: { type: string }
         updatedAt:
           type: integer
@@ -1573,9 +1582,9 @@ components:
       type: object
       required: [artistId, name]
       properties:
-        artistId: { type: string }
+        artistId: { type: string, example: art_9f3kq2 }
         name: { type: string }
-        artId: { type: string, nullable: true }
+        artId: { type: string, nullable: true, example: img_4c5d6e }
         genres:
           type: array
           items: { type: string }
@@ -1601,12 +1610,12 @@ components:
       type: object
       required: [albumId, title, artistId, artistName]
       properties:
-        albumId: { type: string }
+        albumId: { type: string, example: alb_7xm1pd }
         title: { type: string }
-        artistId: { type: string }
+        artistId: { type: string, example: art_9f3kq2 }
         artistName: { type: string }
         year: { type: integer, nullable: true }
-        artId: { type: string, nullable: true }
+        artId: { type: string, nullable: true, example: img_4c5d6e }
         genres:
           type: array
           items: { type: string }
@@ -1620,16 +1629,16 @@ components:
       type: object
       required: [trackId, title, artistId, artistName, albumId, albumTitle, durationMs, media]
       properties:
-        trackId: { type: string }
+        trackId: { type: string, example: trk_2vq8na }
         title: { type: string }
         index: { type: integer, nullable: true }
         discNumber: { type: integer, nullable: true }
-        artistId: { type: string }
+        artistId: { type: string, example: art_9f3kq2 }
         artistName: { type: string }
-        albumId: { type: string }
+        albumId: { type: string, example: alb_7xm1pd }
         albumTitle: { type: string }
         durationMs: { type: integer }
-        artId: { type: string, nullable: true }
+        artId: { type: string, nullable: true, example: img_4c5d6e }
         userRating10: { type: integer, nullable: true, description: The calling profile's rating }
         genres:
           type: array
@@ -1651,17 +1660,17 @@ components:
       properties:
         name: { type: string }
         albumCount: { type: integer }
-        artId: { type: string, nullable: true, description: Representative art for collage }
+        artId: { type: string, nullable: true, example: img_4c5d6e, description: Representative art for collage }
 
     Playlist:
       type: object
       required: [playlistId, title, trackCount, origin]
       properties:
-        playlistId: { type: string }
+        playlistId: { type: string, example: pl_4hh2sm }
         title: { type: string }
         trackCount: { type: integer }
         durationMs: { type: integer, nullable: true }
-        artId: { type: string, nullable: true }
+        artId: { type: string, nullable: true, example: img_4c5d6e }
         origin:
           type: string
           enum: [blittarr, source]
@@ -1675,7 +1684,7 @@ components:
         - type: object
           required: [itemId]
           properties:
-            itemId: { type: string, description: Playlist item id (removal handle) }
+            itemId: { type: string, example: pli_9k8j7h, description: Playlist item id (removal handle) }
 
     SimilarArtist:
       type: object
@@ -1684,7 +1693,7 @@ components:
         name: { type: string }
         owned: { type: boolean }
         artistId: { type: string, nullable: true, description: Set when owned }
-        artId: { type: string, nullable: true }
+        artId: { type: string, nullable: true, example: img_4c5d6e }
         match: { type: number, nullable: true, minimum: 0, maximum: 1 }
         followed: { type: boolean }
 
@@ -1756,7 +1765,7 @@ components:
         owned: { type: boolean }
         artistId: { type: string, nullable: true }
         bio: { type: string, nullable: true }
-        artId: { type: string, nullable: true }
+        artId: { type: string, nullable: true, example: img_4c5d6e }
         followed: { type: boolean }
         similar:
           type: array
@@ -1810,10 +1819,10 @@ components:
       type: object
       required: [artifactId, trackId, format, status]
       properties:
-        artifactId: { type: string }
-        trackId: { type: string }
-        albumId: { type: string, nullable: true, description: "Grouping key for offline art (one art fetch per album, not per track)" }
-        artId: { type: string, nullable: true, description: "Album art for the track — sync flows prefetch /v1/art/{artId} alongside the file so downloaded content has art offline" }
+        artifactId: { type: string, example: arf_3e4r5t }
+        trackId: { type: string, example: trk_2vq8na }
+        albumId: { type: string, nullable: true, example: alb_7xm1pd, description: "Grouping key for offline art (one art fetch per album, not per track)" }
+        artId: { type: string, nullable: true, example: img_4c5d6e, description: "Album art for the track — sync flows prefetch /v1/art/{artId} alongside the file so downloaded content has art offline" }
         format: { type: string, enum: [original, aac] }
         bitrateKbps: { type: integer, nullable: true }
         status: { type: string, enum: [queued, processing, ready, failed] }
