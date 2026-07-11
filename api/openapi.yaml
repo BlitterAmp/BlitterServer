@@ -27,7 +27,7 @@ info:
     admin involvement after the one-time device pairing approval.
 
     **Conventions:** JSON everywhere; list endpoints paginate
-    with `offset`/`limit` and return `total`; errors are a Problem object.
+    with `cursor`/`limit` and return `{items, nextCursor}`; errors are a Problem object.
 
     **Ids** are opaque strings carrying a type prefix — `art_` artist, `alb_`
     album, `trk_` track, `pl_` playlist, `pli_` playlist item, `prf_` profile,
@@ -293,7 +293,7 @@ paths:
       tags: [library]
       summary: List artists (paged)
       parameters:
-        - $ref: "#/components/parameters/offset"
+        - $ref: "#/components/parameters/cursor"
         - $ref: "#/components/parameters/limit"
         - $ref: "#/components/parameters/sort"
       responses:
@@ -381,7 +381,7 @@ paths:
       tags: [library]
       summary: List albums (paged)
       parameters:
-        - $ref: "#/components/parameters/offset"
+        - $ref: "#/components/parameters/cursor"
         - $ref: "#/components/parameters/limit"
         - $ref: "#/components/parameters/sort"
       responses:
@@ -437,7 +437,7 @@ paths:
       tags: [library]
       summary: Flat track list (paged)
       parameters:
-        - $ref: "#/components/parameters/offset"
+        - $ref: "#/components/parameters/cursor"
         - $ref: "#/components/parameters/limit"
         - $ref: "#/components/parameters/sort"
       responses:
@@ -594,7 +594,7 @@ paths:
       summary: Playlist tracks (paged for very long playlists)
       parameters:
         - { name: playlistId, in: path, required: true, schema: { type: string } }
-        - $ref: "#/components/parameters/offset"
+        - $ref: "#/components/parameters/cursor"
         - $ref: "#/components/parameters/limit"
       responses:
         "200":
@@ -1438,10 +1438,14 @@ components:
       name: blittarr_admin
 
   parameters:
-    offset:
-      name: offset
+    cursor:
+      name: cursor
       in: query
-      schema: { type: integer, minimum: 0, default: 0 }
+      schema: { type: string }
+      description: |
+        Opaque page cursor from the previous response's `nextCursor`. Omit for
+        the first page. Only valid for the sort/filter combination it was
+        minted under.
     limit:
       name: limit
       in: query
@@ -1485,11 +1489,11 @@ components:
 
     Page:
       type: object
-      required: [offset, limit, total]
       properties:
-        offset: { type: integer }
-        limit: { type: integer }
-        total: { type: integer }
+        nextCursor:
+          type: string
+          nullable: true
+          description: Pass as `cursor` to fetch the next page; null/absent on the last page
 
     ServerStatus:
       type: object
