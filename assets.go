@@ -16,9 +16,11 @@ var OpenAPISpec []byte
 //go:embed web/docs
 var DocsAssets embed.FS
 
-// AdminSPA holds the built admin console (Svelte + DaisyUI, built with
-// `make web`, dist committed so `go build` never needs node), served under
-// /admin/.
+// AdminSPA holds the built admin console (Svelte + DaisyUI), served under
+// /admin/. dist/ is NOT committed: `make web` (or the release pipeline)
+// builds it, and `make build` embeds it. A bare `go build` without the web
+// build still compiles — the server then serves an honest "not built" page
+// at /admin/ instead of a stale UI.
 //
-//go:embed web/admin/dist
+//go:embed all:web/admin/dist
 var AdminSPA embed.FS

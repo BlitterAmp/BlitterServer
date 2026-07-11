@@ -2,6 +2,7 @@ package httpserver_test
 
 import (
 	"context"
+	"io/fs"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -415,6 +416,9 @@ func withClient(hc *http.Client) api.RequestEditorFn {
 // The admin SPA shell is public (it renders the login screen); the API
 // realm behind it stays cookie-gated.
 func TestContractAdminSPAServed(t *testing.T) {
+	if _, err := fs.Stat(blitterserver.AdminSPA, "web/admin/dist/index.html"); err != nil {
+		t.Skip("admin SPA not built into this test binary (run `make web`)")
+	}
 	ts, _, _ := setup(t)
 
 	resp, err := http.Get(ts.URL + "/admin/")

@@ -1,2 +1,4 @@
 /dist/
 /blitterserver
+/web/admin/dist/*
+!/web/admin/dist/.gitkeep

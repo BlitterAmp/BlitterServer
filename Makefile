@@ -1,6 +1,6 @@
 .PHONY: build run check fmt vet lint-api gen-check generate web
 
-build:
+build: web
 	go build -ldflags "-X main.version=$$(git describe --tags --always --dirty)" -o dist/blitterserver ./cmd/blitterserver
 
 run:
