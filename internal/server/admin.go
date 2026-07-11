@@ -74,7 +74,17 @@ func (s *Server) AdminGetState(ctx context.Context, _ api.AdminGetStateRequestOb
 	state.Source.LibrarySelected = &f
 	state.Source.Connected = &f
 	lidarr := api.AdminStateIntegrationsLidarr("absent")
+	if baseURL, apiKey, err := s.lidarrConfigured(ctx); err != nil {
+		return nil, err
+	} else if baseURL != "" && apiKey != "" {
+		lidarr = api.AdminStateIntegrationsLidarr("configured")
+	}
 	lastfm := api.AdminStateIntegrationsLastfm("absent")
+	if configured, err := s.lastfmConfigured(ctx); err != nil {
+		return nil, err
+	} else if configured {
+		lastfm = api.AdminStateIntegrationsLastfm("configured")
+	}
 	state.Integrations.Lidarr = &lidarr
 	state.Integrations.Lastfm = &lastfm
 	return state, nil

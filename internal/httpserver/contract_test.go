@@ -151,6 +151,15 @@ func TestEveryUnimplementedOperationAnswersHonestly(t *testing.T) {
 		"streamEvents":     true,
 		"requestArtifacts": true, "getArtifact": true, "releaseArtifact": true,
 		"downloadArtifact": true,
+		"getHome":          true, "listMixes": true, "listMixTracks": true, "getRadioNext": true,
+		"getMyDiscover": true, "listSimilarArtists": true, "getExternalArtist": true,
+		"getAcquisitionActivity": true,
+		"listParties":            true, "createParty": true, "getParty": true, "endParty": true,
+		"inviteToParty": true, "joinParty": true, "leaveParty": true,
+		"appendPartyQueue": true, "partyTransport": true, "kickFromParty": true,
+		"adminGetLidarr": true, "adminSetLidarr": true, "adminDeleteLidarr": true,
+		"adminTestLidarr": true,
+		"adminGetLastfm":  true, "adminSetLastfm": true, "adminDeleteLastfm": true,
 	}
 	client := ts.Client()
 

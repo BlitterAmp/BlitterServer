@@ -63,7 +63,7 @@ func TestGetCapabilitiesFFmpegBranch(t *testing.T) {
 
 func TestUnimplementedInheritance(t *testing.T) {
 	srv := New(testStore(t), "v")
-	_, err := srv.GetHome(context.Background(), api.GetHomeRequestObject{})
+	_, err := srv.AdminStartPlexPin(context.Background(), api.AdminStartPlexPinRequestObject{})
 	if err != api.ErrNotImplemented {
 		t.Fatalf("unoverridden ops must flow to Unimplemented, got %v", err)
 	}

@@ -9,6 +9,7 @@ import (
 	"github.com/BlitterAmp/BlitterServer/internal/artifacts"
 	"github.com/BlitterAmp/BlitterServer/internal/events"
 	"github.com/BlitterAmp/BlitterServer/internal/library"
+	"github.com/BlitterAmp/BlitterServer/internal/party"
 	"github.com/BlitterAmp/BlitterServer/internal/store"
 	"github.com/BlitterAmp/BlitterServer/internal/transcode"
 )
@@ -19,6 +20,7 @@ type Server struct {
 	lib     *library.Manager
 	bus     *events.Bus
 	art     *artifacts.Manager
+	pty     *party.Manager
 	version string
 }
 
@@ -37,7 +39,7 @@ func NewWithLibrary(st *store.Store, lib *library.Manager, version string) *Serv
 // NewFull wires every dependency explicitly (the HTTP layer shares the bus
 // with the SSE handler and owns the artifact worker's lifecycle).
 func NewFull(st *store.Store, lib *library.Manager, bus *events.Bus, art *artifacts.Manager, version string) *Server {
-	return &Server{st: st, lib: lib, bus: bus, art: art, version: version}
+	return &Server{st: st, lib: lib, bus: bus, art: art, pty: party.NewManager(st, bus), version: version}
 }
 
 func (s *Server) GetPing(ctx context.Context, _ api.GetPingRequestObject) (api.GetPingResponseObject, error) {
@@ -67,8 +69,14 @@ func (s *Server) GetCapabilities(ctx context.Context, _ api.GetCapabilitiesReque
 	if transcode.FFmpegAvailable() {
 		formats = append(formats, api.CapabilitiesTranscodeFormatsAac)
 	}
+	lastfm, err := s.lastfmConfigured(ctx)
+	if err != nil {
+		return nil, err
+	}
 	return api.GetCapabilities200JSONResponse{
-		Acquisition: false, Lastfm: false,
+		// Acquisition stays false until an acquirer adapter actually acts on
+		// loves; stored Lidarr config alone doesn't make that promise true.
+		Acquisition: false, Lastfm: lastfm,
 		TranscodeFormats: formats,
 	}, nil
 }
