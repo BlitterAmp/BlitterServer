@@ -3,7 +3,8 @@ package main
 
 import (
 	"context"
-	"log/slog"
+	"flag"
+	"fmt"
 	"os"
 
 	"github.com/BlitterAmp/Blittarr/internal/config"
@@ -12,38 +13,59 @@ import (
 	"github.com/BlitterAmp/Blittarr/internal/store"
 )
 
-// version is overridden at build time via -ldflags.
+// version is injected at build time via -ldflags "-X main.version=...".
 var version = "dev"
 
 func main() {
-	cfg, err := config.Load(os.Getenv("BLITTARR_CONFIG"), os.Args[1:], os.Getenv)
-	if err != nil {
-		slog.Error("config load failed", "err", err)
-		os.Exit(1)
-	}
-
-	if _, err := logging.Setup(withDefaultFilePath(cfg)); err != nil {
-		slog.Error("logging setup failed", "err", err)
-		os.Exit(1)
-	}
-
-	st, err := store.Open(context.Background(), cfg.DataDir)
-	if err != nil {
-		slog.Error("store open failed", "err", err)
-		os.Exit(1)
-	}
-	defer st.Close()
-
-	srv := httpserver.New(cfg.Listen, st, version)
-	slog.Info("blittarr listening", "addr", cfg.Listen, "docs", "http://"+cfg.Listen+"/docs/")
-	if err := srv.ListenAndServe(); err != nil {
-		slog.Error("server exited", "err", err)
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "blittarr:", err)
 		os.Exit(1)
 	}
 }
 
-func withDefaultFilePath(cfg config.Config) logging.Options {
-	o := cfg.Log
-	o.FilePath = cfg.LogFilePathOrDefault()
-	return o
+func run() error {
+	// Pre-scan only for --config; config.Load owns the rest of the flags.
+	cfgPath := os.Getenv("BLITTARR_CONFIG")
+	args := os.Args[1:]
+	pre := flag.NewFlagSet("pre", flag.ContinueOnError)
+	pre.SetOutput(nil)
+	pre.String("listen", "", "")
+	pre.String("data-dir", "", "")
+	pre.String("log-level", "", "")
+	cp := pre.String("config", cfgPath, "path to blittarr.yaml")
+	_ = pre.Parse(args)
+	cfgPath = *cp
+
+	// Strip --config from args before handing to config.Load.
+	filtered := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--config" || args[i] == "-config" {
+			i++
+			continue
+		}
+		filtered = append(filtered, args[i])
+	}
+
+	cfg, err := config.Load(cfgPath, filtered, os.Getenv)
+	if err != nil {
+		return err
+	}
+	cfg.Log.FilePath = cfg.LogFilePathOrDefault()
+
+	log, err := logging.Setup(cfg.Log)
+	if err != nil {
+		return err
+	}
+
+	st, err := store.Open(context.Background(), cfg.DataDir)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	srv := httpserver.New(cfg.Listen, st, version)
+	log.Info("blittarr listening",
+		"addr", cfg.Listen, "version", version, "data_dir", cfg.DataDir,
+		"docs", "http://"+cfg.Listen+"/docs/")
+	return srv.ListenAndServe()
 }

@@ -1,7 +1,7 @@
 .PHONY: build run check fmt vet lint-api gen-check generate
 
 build:
-	go build -o dist/blittarr ./cmd/blittarr
+	go build -ldflags "-X main.version=$$(git describe --tags --always --dirty)" -o dist/blittarr ./cmd/blittarr
 
 run:
 	go run ./cmd/blittarr
