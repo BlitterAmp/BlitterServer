@@ -11,6 +11,7 @@ import (
 
 	blitterserver "github.com/BlitterAmp/BlitterServer"
 	"github.com/BlitterAmp/BlitterServer/internal/api"
+	"github.com/BlitterAmp/BlitterServer/internal/events"
 	"github.com/BlitterAmp/BlitterServer/internal/library"
 	"github.com/BlitterAmp/BlitterServer/internal/logging"
 	"github.com/BlitterAmp/BlitterServer/internal/server"
@@ -44,7 +45,8 @@ func Handler(st *store.Store, mgr *library.Manager, dataDir, version string) htt
 		http.Redirect(w, r, "/docs/", http.StatusTemporaryRedirect)
 	})
 
-	strict := api.NewStrictHandlerWithOptions(server.NewWithLibrary(st, mgr, version), nil, api.StrictHTTPServerOptions{
+	bus := events.NewBus(st)
+	strict := api.NewStrictHandlerWithOptions(server.NewFull(st, mgr, bus, version), nil, api.StrictHTTPServerOptions{
 		RequestErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, err error) {
 			WriteProblem(w, http.StatusBadRequest, "Bad Request", "bad_request")
 		},
@@ -73,6 +75,7 @@ func Handler(st *store.Store, mgr *library.Manager, dataDir, version string) htt
 	login := handleAdminLogin(st)
 	logout := handleAdminLogout(st)
 	stream := handleStreamTrack(st, mgr)
+	sse := handleStreamEvents(bus)
 	art := handleGetArt(st, dataDir)
 	grants := handleCreateStreamGrant(st)
 	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -81,6 +84,8 @@ func Handler(st *store.Store, mgr *library.Manager, dataDir, version string) htt
 			login(w, r)
 		case r.URL.Path == "/admin/api/session" && r.Method == http.MethodDelete:
 			logout(w, r)
+		case r.URL.Path == "/v1/events" && r.Method == http.MethodGet:
+			sse(w, r)
 		case strings.HasPrefix(r.URL.Path, "/v1/stream/") && r.Method == http.MethodGet:
 			stream(w, r)
 		case strings.HasPrefix(r.URL.Path, "/v1/art/") && r.Method == http.MethodGet:

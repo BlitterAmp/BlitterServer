@@ -144,14 +144,20 @@ func (s *Server) GetArtist(ctx context.Context, req api.GetArtistRequestObject) 
 			NotFoundApplicationProblemPlusJSONResponse: notFoundProblem()}, nil
 	}
 	genres := a.Genres
-	return api.GetArtist200JSONResponse{
+	resp := api.GetArtist200JSONResponse{
 		ArtistId:   a.ArtistID,
 		Name:       a.Name,
 		ArtId:      optStr(a.ArtID),
 		AlbumCount: optInt(a.AlbumCount),
 		TrackCount: optInt(a.TrackCount),
 		Genres:     &genres,
-	}, nil
+	}
+	ls, err := s.loveStateFor(ctx, a.ArtistID)
+	if err != nil {
+		return nil, err
+	}
+	resp.LoveState = ls
+	return resp, nil
 }
 
 func (s *Server) ListArtistAlbums(ctx context.Context, req api.ListArtistAlbumsRequestObject) (api.ListArtistAlbumsResponseObject, error) {
@@ -183,7 +189,11 @@ func (s *Server) ListArtistTracks(ctx context.Context, req api.ListArtistTracksR
 	if err != nil {
 		return nil, err
 	}
-	return api.ListArtistTracks200JSONResponse(apiTracks(rows)), nil
+	tracks := apiTracks(rows)
+	if err := s.decorateTracks(ctx, tracks); err != nil {
+		return nil, err
+	}
+	return api.ListArtistTracks200JSONResponse(tracks), nil
 }
 
 func (s *Server) ListAlbums(ctx context.Context, req api.ListAlbumsRequestObject) (api.ListAlbumsResponseObject, error) {
@@ -213,7 +223,13 @@ func (s *Server) GetAlbum(ctx context.Context, req api.GetAlbumRequestObject) (a
 		return api.GetAlbum404ApplicationProblemPlusJSONResponse{
 			NotFoundApplicationProblemPlusJSONResponse: notFoundProblem()}, nil
 	}
-	return api.GetAlbum200JSONResponse(apiAlbum(a)), nil
+	out := apiAlbum(a)
+	ls, err := s.loveStateFor(ctx, a.AlbumID)
+	if err != nil {
+		return nil, err
+	}
+	out.LoveState = ls
+	return api.GetAlbum200JSONResponse(out), nil
 }
 
 func (s *Server) ListAlbumTracks(ctx context.Context, req api.ListAlbumTracksRequestObject) (api.ListAlbumTracksResponseObject, error) {
@@ -227,7 +243,11 @@ func (s *Server) ListAlbumTracks(ctx context.Context, req api.ListAlbumTracksReq
 	if err != nil {
 		return nil, err
 	}
-	return api.ListAlbumTracks200JSONResponse(apiTracks(rows)), nil
+	tracks := apiTracks(rows)
+	if err := s.decorateTracks(ctx, tracks); err != nil {
+		return nil, err
+	}
+	return api.ListAlbumTracks200JSONResponse(tracks), nil
 }
 
 func (s *Server) ListTracks(ctx context.Context, req api.ListTracksRequestObject) (api.ListTracksResponseObject, error) {
@@ -241,6 +261,9 @@ func (s *Server) ListTracks(ctx context.Context, req api.ListTracksRequestObject
 		return nil, badRequestIfCursor(err)
 	}
 	resp := api.ListTracks200JSONResponse{Items: apiTracks(rows)}
+	if err := s.decorateTracks(ctx, resp.Items); err != nil {
+		return nil, err
+	}
 	resp.NextCursor = optStr(next)
 	return resp, nil
 }
@@ -254,7 +277,11 @@ func (s *Server) GetTrack(ctx context.Context, req api.GetTrackRequestObject) (a
 		return api.GetTrack404ApplicationProblemPlusJSONResponse{
 			NotFoundApplicationProblemPlusJSONResponse: notFoundProblem()}, nil
 	}
-	return api.GetTrack200JSONResponse(apiTrack(tr)), nil
+	one := []api.Track{apiTrack(tr)}
+	if err := s.decorateTracks(ctx, one); err != nil {
+		return nil, err
+	}
+	return api.GetTrack200JSONResponse(one[0]), nil
 }
 
 func (s *Server) ListGenres(ctx context.Context, _ api.ListGenresRequestObject) (api.ListGenresResponseObject, error) {
@@ -278,7 +305,11 @@ func (s *Server) ListGenreTracks(ctx context.Context, req api.ListGenreTracksReq
 		return api.ListGenreTracks404ApplicationProblemPlusJSONResponse{
 			NotFoundApplicationProblemPlusJSONResponse: notFoundProblem()}, nil
 	}
-	return api.ListGenreTracks200JSONResponse(apiTracks(rows)), nil
+	tracks := apiTracks(rows)
+	if err := s.decorateTracks(ctx, tracks); err != nil {
+		return nil, err
+	}
+	return api.ListGenreTracks200JSONResponse(tracks), nil
 }
 
 func (s *Server) Search(ctx context.Context, req api.SearchRequestObject) (api.SearchResponseObject, error) {
@@ -314,6 +345,9 @@ func (s *Server) Search(ctx context.Context, req api.SearchRequestObject) (api.S
 	}
 	if want["tracks"] {
 		out.Tracks = apiTracks(res.Tracks)
+		if err := s.decorateTracks(ctx, out.Tracks); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }
