@@ -18,7 +18,7 @@ On the roadmap (in contract order): admin setup + web UI, device pairing (QR + s
 
 ## Quick start
 
-Requires Go 1.26+. `ffmpeg` on `PATH` is optional and only affects reported transcode capabilities.
+Requires Go 1.26+ and node (for the embedded admin console; `make build` handles it). `ffmpeg` on `PATH` is optional and only affects reported transcode capabilities. A bare `go build ./cmd/blitterserver` works without node but yields a binary whose `/admin/` page explains the console wasn't built — release builds always include it.
 
 ```sh
 make build
@@ -69,7 +69,7 @@ make generate    # regenerate internal/api from the spec (oapi-codegen, pinned i
 make lint-api    # redocly lint of the OpenAPI spec
 make gen-check   # verify the spec survives TS + Go client codegen
 make run         # go run ./cmd/blitterserver
-make web         # rebuild the embedded admin console (node; dist/ is committed)
+make web         # build the admin console (node) — make build runs it for you
 ```
 
 The generated server (`internal/api/api.gen.go`) is committed; CI regenerates and fails on any diff, so spec and server cannot drift. Handlers implement the generated strict interface and embed an `Unimplemented` base — adding an operation to the spec breaks the build until it is implemented or consciously 501'd.

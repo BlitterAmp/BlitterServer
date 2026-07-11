@@ -46,7 +46,16 @@ func Handler(st *store.Store, mgr *library.Manager, dataDir, version string) htt
 	if err != nil {
 		panic(err) // embedded path is fixed at compile time
 	}
-	mux.Handle("GET /admin/", http.StripPrefix("/admin/", http.FileServerFS(adminSPA)))
+	if _, err := fs.Stat(adminSPA, "index.html"); err == nil {
+		mux.Handle("GET /admin/", http.StripPrefix("/admin/", http.FileServerFS(adminSPA)))
+	} else {
+		// Binary was built without the web assets (bare `go build`).
+		mux.HandleFunc("GET /admin/", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`<!doctype html><title>BlitterServer</title><body style="font-family:system-ui;max-width:40rem;margin:4rem auto"><h1>Admin console not built</h1><p>This binary was compiled without the web assets. Build them with <code>make web</code> and rebuild, or use a release build. The API itself is fully functional.</p></body>`))
+		})
+	}
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/", http.StatusTemporaryRedirect)
 	})
