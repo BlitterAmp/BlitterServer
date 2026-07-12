@@ -4,6 +4,9 @@ package store
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"database/sql"
 	"embed"
 	"errors"
@@ -19,7 +22,8 @@ import (
 var migrations embed.FS
 
 type Store struct {
-	db *sql.DB
+	db     *sql.DB
+	secret cipher.AEAD
 }
 
 // Open creates dataDir if needed, opens (or creates) the database, and runs
@@ -28,7 +32,7 @@ func Open(ctx context.Context, dataDir string) (*Store, error) {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("data dir: %w", err)
 	}
-	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)",
+	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_txlock=immediate",
 		filepath.Join(dataDir, "blitterserver.db"))
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -44,7 +48,77 @@ func Open(ctx context.Context, dataDir string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
-	return &Store{db: db}, nil
+	key, err := loadOrCreateLocalKey(filepath.Join(dataDir, "server-local.key"))
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	return &Store{db: db, secret: aead}, nil
+}
+
+// loadOrCreateLocalKey uses O_EXCL so concurrent server opens cannot overwrite
+// one another's key. This adjacent file is a practical self-hosted safeguard
+// against database-only disclosure; copying both files defeats that safeguard.
+func loadOrCreateLocalKey(path string) ([]byte, error) {
+	for {
+		key, err := os.ReadFile(path)
+		if err == nil {
+			if len(key) != 32 {
+				return nil, fmt.Errorf("server-local encryption key: invalid length %d", len(key))
+			}
+			if err := os.Chmod(path, 0o600); err != nil {
+				return nil, fmt.Errorf("server-local encryption key permissions: %w", err)
+			}
+			return key, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("server-local encryption key: %w", err)
+		}
+		key = make([]byte, 32)
+		if _, err := rand.Read(key); err != nil {
+			return nil, fmt.Errorf("generate server-local encryption key: %w", err)
+		}
+		f, err := os.CreateTemp(filepath.Dir(path), ".server-local.key-*")
+		if err != nil {
+			return nil, fmt.Errorf("create temporary server-local encryption key: %w", err)
+		}
+		tmp := f.Name()
+		cleanup := func() { _ = f.Close(); _ = os.Remove(tmp) }
+		if err = os.Chmod(tmp, 0o600); err == nil {
+			_, err = f.Write(key)
+		}
+		if err == nil {
+			err = f.Sync()
+		}
+		if closeErr := f.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			cleanup()
+			return nil, fmt.Errorf("write server-local encryption key: %w", err)
+		}
+		// Linking a fully synced temporary file publishes the key atomically and
+		// cannot replace a key won by another concurrent opener.
+		err = os.Link(tmp, path)
+		_ = os.Remove(tmp)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("publish server-local encryption key: %w", err)
+		}
+		return key, nil
+	}
 }
 
 func (s *Store) Close() error { return s.db.Close() }

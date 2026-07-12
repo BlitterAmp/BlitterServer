@@ -36,7 +36,11 @@ func (s *Server) lidarrConfigured(ctx context.Context) (baseURL, apiKey string, 
 
 func (s *Server) lastfmConfigured(ctx context.Context) (bool, error) {
 	key, _, err := s.st.GetSetting(ctx, settingLastfmAPIKey)
-	return key != "", err
+	if err != nil {
+		return false, err
+	}
+	secret, _, err := s.st.GetSetting(ctx, settingLastfmSharedSecret)
+	return key != "" && secret != "", err
 }
 
 // ── Lidarr ─────────────────────────────────────────────────────
@@ -139,8 +143,11 @@ func (s *Server) AdminGetLastfm(ctx context.Context, _ api.AdminGetLastfmRequest
 	if err != nil {
 		return nil, err
 	}
-	zero := 0
-	return api.AdminGetLastfm200JSONResponse{Configured: configured, ConnectedProfiles: &zero}, nil
+	count, err := s.st.CountLastfmProfiles(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return api.AdminGetLastfm200JSONResponse{Configured: configured, ConnectedProfiles: &count}, nil
 }
 
 func (s *Server) AdminSetLastfm(ctx context.Context, req api.AdminSetLastfmRequestObject) (api.AdminSetLastfmResponseObject, error) {
@@ -153,6 +160,7 @@ func (s *Server) AdminSetLastfm(ctx context.Context, req api.AdminSetLastfmReque
 	if err := s.st.SetSetting(ctx, settingLastfmSharedSecret, req.Body.SharedSecret); err != nil {
 		return nil, err
 	}
+	_ = s.st.ResetArtRetries(ctx, false)
 	return api.AdminSetLastfm204Response{}, nil
 }
 
@@ -161,6 +169,9 @@ func (s *Server) AdminDeleteLastfm(ctx context.Context, _ api.AdminDeleteLastfmR
 		if err := s.st.SetSetting(ctx, key, ""); err != nil {
 			return nil, err
 		}
+	}
+	if err := s.st.DeleteAllLastfmData(ctx); err != nil {
+		return nil, err
 	}
 	return api.AdminDeleteLastfm204Response{}, nil
 }
@@ -180,6 +191,7 @@ func (s *Server) AdminSetFanart(ctx context.Context, req api.AdminSetFanartReque
 	if err := s.st.SetSetting(ctx, settingFanartAPIKey, req.Body.ApiKey); err != nil {
 		return nil, err
 	}
+	_ = s.st.ResetArtRetries(ctx, true)
 	return api.AdminSetFanart204Response{}, nil
 }
 

@@ -3,8 +3,10 @@ package server
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/BlitterAmp/BlitterServer/internal/api"
+	"github.com/BlitterAmp/BlitterServer/internal/lastfm"
 	"github.com/BlitterAmp/BlitterServer/internal/store"
 )
 
@@ -155,10 +157,76 @@ func (s *Server) GetRadioNext(ctx context.Context, req api.GetRadioNextRequestOb
 // GetMyDiscover is honest about the missing provider: empty list, exactly as
 // the contract specifies for capabilities.discovery=false.
 func (s *Server) GetMyDiscover(ctx context.Context, _ api.GetMyDiscoverRequestObject) (api.GetMyDiscoverResponseObject, error) {
-	if _, err := profileID(ctx); err != nil {
+	prf, err := profileID(ctx)
+	if err != nil {
 		return nil, err
 	}
-	return api.GetMyDiscover200JSONResponse{}, nil
+	conn, ok, err := s.st.GetLastfmConnection(ctx, prf)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return api.GetMyDiscover200JSONResponse{}, nil
+	}
+	client, ok, err := s.lastfmClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return api.GetMyDiscover200JSONResponse{}, nil
+	}
+	top, err := client.TopArtists(ctx, conn.Username, 8)
+	if err != nil {
+		return api.GetMyDiscover502ApplicationProblemPlusJSONResponse(problem(502, "Bad Gateway", "discovery_provider_unavailable")), nil
+	}
+	seen := map[string]bool{}
+	out := api.GetMyDiscover200JSONResponse{}
+	for _, seed := range top {
+		similar, e := client.Similar(ctx, seed.Name, 5)
+		if e != nil {
+			return api.GetMyDiscover502ApplicationProblemPlusJSONResponse(problem(502, "Bad Gateway", "discovery_provider_unavailable")), nil
+		}
+		for _, a := range similar {
+			key := strings.ToLower(a.Name)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			id, owned, e := s.st.ResolveArtistName(ctx, a.Name)
+			if e != nil {
+				return nil, e
+			}
+			states, e := s.st.GetLoveStates(ctx, prf, []string{id})
+			if e != nil {
+				return nil, e
+			}
+			if states[id] == "not_for_me" {
+				continue
+			}
+			reason := "Because you listen to " + seed.Name
+			kind := api.DiscoverItemKindArtist
+			out = append(out, api.DiscoverItem{Kind: kind, Name: a.Name, Owned: owned, Ref: &id, Reason: &reason})
+			if len(out) >= 20 {
+				return out, nil
+			}
+		}
+	}
+	return out, nil
+}
+
+func (s *Server) lastfmClient(ctx context.Context) (lastfmProvider, bool, error) {
+	key, _, err := s.st.GetSetting(ctx, settingLastfmAPIKey)
+	if err != nil {
+		return nil, false, err
+	}
+	secret, _, err := s.st.GetSetting(ctx, settingLastfmSharedSecret)
+	if err != nil {
+		return nil, false, err
+	}
+	if key == "" || secret == "" {
+		return nil, false, nil
+	}
+	return s.lastfmFactory(key, secret), true, nil
 }
 
 // ListSimilarArtists returns an empty set until a discovery integration
@@ -175,17 +243,80 @@ func (s *Server) ListSimilarArtists(ctx context.Context, req api.ListSimilarArti
 		return api.ListSimilarArtists404ApplicationProblemPlusJSONResponse{
 			NotFoundApplicationProblemPlusJSONResponse: notFoundProblem()}, nil
 	}
-	return api.ListSimilarArtists200JSONResponse{}, nil
+	client, ok, err := s.lastfmClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return api.ListSimilarArtists200JSONResponse{}, nil
+	}
+	artist, _, _ := s.st.GetArtist(ctx, req.ArtistId)
+	items, err := client.Similar(ctx, artist.Name, 50)
+	if err != nil {
+		return api.ListSimilarArtists502ApplicationProblemPlusJSONResponse(problem(502, "Bad Gateway", "discovery_provider_unavailable")), nil
+	}
+	out := api.ListSimilarArtists200JSONResponse{}
+	for _, item := range items {
+		id, owned, e := s.st.ResolveArtistName(ctx, item.Name)
+		if e != nil {
+			return nil, e
+		}
+		match := float32(item.Match)
+		out = append(out, api.SimilarArtist{Name: item.Name, ArtistId: id, Owned: owned, Match: &match})
+	}
+	return out, nil
 }
 
 // GetExternalArtist needs a discovery integration to say anything useful.
-func (s *Server) GetExternalArtist(ctx context.Context, _ api.GetExternalArtistRequestObject) (api.GetExternalArtistResponseObject, error) {
+func (s *Server) GetExternalArtist(ctx context.Context, req api.GetExternalArtistRequestObject) (api.GetExternalArtistResponseObject, error) {
 	if _, err := profileID(ctx); err != nil {
 		return nil, err
 	}
-	return api.GetExternalArtist404ApplicationProblemPlusJSONResponse{
-		NotFoundApplicationProblemPlusJSONResponse: api.NotFoundApplicationProblemPlusJSONResponse(
-			problem(404, "Not Found", "discovery_not_configured"))}, nil
+	client, ok, err := s.lastfmClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return api.GetExternalArtist404ApplicationProblemPlusJSONResponse{NotFoundApplicationProblemPlusJSONResponse: notFoundProblem()}, nil
+	}
+	info, err := client.ArtistInfo(ctx, req.Name)
+	if err != nil {
+		if providerKind(err) == lastfm.ErrorNotFound {
+			return api.GetExternalArtist404ApplicationProblemPlusJSONResponse{NotFoundApplicationProblemPlusJSONResponse: notFoundProblem()}, nil
+		}
+		return api.GetExternalArtist502ApplicationProblemPlusJSONResponse(problem(502, "Bad Gateway", "discovery_provider_unavailable")), nil
+	}
+	if info.Name == "" {
+		return api.GetExternalArtist404ApplicationProblemPlusJSONResponse{NotFoundApplicationProblemPlusJSONResponse: notFoundProblem()}, nil
+	}
+	id, owned, err := s.st.ResolveArtistName(ctx, info.Name)
+	if err != nil {
+		return nil, err
+	}
+	bio := info.Bio
+	out := api.GetExternalArtist200JSONResponse{Name: info.Name, ArtistId: id, Owned: owned, Bio: &bio}
+	similar, err := client.Similar(ctx, info.Name, 20)
+	if err != nil {
+		return api.GetExternalArtist502ApplicationProblemPlusJSONResponse(problem(502, "Bad Gateway", "discovery_provider_unavailable")), nil
+	}
+	similarOut := []api.SimilarArtist{}
+	for _, a := range similar {
+		sid, sowned, e := s.st.ResolveArtistName(ctx, a.Name)
+		if e != nil {
+			return nil, e
+		}
+		m := float32(a.Match)
+		similarOut = append(similarOut, api.SimilarArtist{Name: a.Name, ArtistId: sid, Owned: sowned, Match: &m})
+	}
+	out.Similar = &similarOut
+	discography := []struct {
+		AlbumId *string                            `json:"albumId,omitempty"`
+		State   api.ExternalArtistDiscographyState `json:"state"`
+		Title   string                             `json:"title"`
+		Year    *int                               `json:"year,omitempty"`
+	}{}
+	out.Discography = &discography
+	return out, nil
 }
 
 // GetAcquisitionActivity is empty until an acquirer adapter exists.

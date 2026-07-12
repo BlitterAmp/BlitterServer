@@ -4,20 +4,26 @@
   let { onAuthLost } = $props()
   let lidarr = $state(null)
   let lastfm = $state(null)
+  let fanart = $state(null)
+  let loading = $state(true)
   let error = $state('')
   let lidarrForm = $state({ baseUrl: '', apiKey: '' })
   let lastfmForm = $state({ apiKey: '', sharedSecret: '' })
+  let fanartKey = $state('')
   let testResult = $state(null)
 
   async function load() {
     try {
       lidarr = await api.get('/admin/api/integrations/lidarr')
-      lastfm = await api.get('/admin/api/integrations/lastfm')
+      ;[lastfm, fanart] = await Promise.all([
+        api.get('/admin/api/integrations/lastfm'),
+        api.get('/admin/api/integrations/fanart'),
+      ])
       if (lidarr?.baseUrl) lidarrForm.baseUrl = lidarr.baseUrl
     } catch (err) {
       if (err.status === 401) { onAuthLost(); return }
       error = err.message
-    }
+    } finally { loading = false }
   }
 
   async function saveLidarr(e) {
@@ -56,9 +62,22 @@
     catch (err) { error = err.message }
   }
 
+  async function saveFanart(e) {
+    e.preventDefault(); error = ''
+    try { await api.put('/admin/api/integrations/fanart', { apiKey: fanartKey }); fanartKey = ''; await load() }
+    catch (err) { error = err.message }
+  }
+
+  async function deleteFanart() {
+    error = ''
+    try { await api.del('/admin/api/integrations/fanart'); await load() }
+    catch (err) { error = err.message }
+  }
+
   load()
 </script>
 
+{#if loading}<span class="loading loading-spinner" aria-label="Loading integrations"></span>{/if}
 {#if error}<div class="alert alert-error mb-4 text-sm">{error}</div>{/if}
 
 <div class="grid gap-6 md:grid-cols-2">
@@ -112,6 +131,23 @@
         {#if lastfm?.configured}
           <button class="btn btn-outline btn-error btn-sm" type="button" onclick={deleteLastfm}>Remove</button>
         {/if}
+      </div>
+    </form>
+  </div>
+
+  <div class="card bg-base-100 shadow-sm">
+    <form class="card-body" onsubmit={saveFanart}>
+      <h2 class="card-title text-base">fanart.tv
+        <span class="badge badge-sm {fanart?.configured ? 'badge-success' : 'badge-ghost'}">{fanart?.configured ? 'configured' : 'not configured'}</span>
+      </h2>
+      <p class="text-sm opacity-70">Optional artist artwork enrichment. The API key is write-only.</p>
+      <label class="form-control">
+        <span class="label label-text">API key {#if fanart?.configured}<span class="opacity-60">(set - enter to replace)</span>{/if}</span>
+        <input class="input input-bordered w-full font-mono" type="password" bind:value={fanartKey} autocomplete="off" />
+      </label>
+      <div class="card-actions">
+        <button class="btn btn-primary btn-sm" type="submit" disabled={!fanartKey}>Save</button>
+        {#if fanart?.configured}<button class="btn btn-outline btn-error btn-sm" type="button" onclick={deleteFanart}>Remove</button>{/if}
       </div>
     </form>
   </div>

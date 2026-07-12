@@ -20,9 +20,9 @@ func seedLibrary(t *testing.T, st *store.Store) {
 		t.Fatal(err)
 	}
 	for _, m := range []source.TrackMeta{
-		{NativeID: "a/1.flac", Title: "One", Artist: "Alpha", AlbumArtist: "Alpha", Album: "AA", Genre: "Rock", Year: 1990, Index: 1, DurationMs: 2000, Container: "flac", Codec: "flac", SizeBytes: 10, Version: 1},
-		{NativeID: "a/2.flac", Title: "Two", Artist: "Alpha", AlbumArtist: "Alpha", Album: "AA", Genre: "Rock", Year: 1990, Index: 2, DurationMs: 2000, Container: "flac", Codec: "flac", SizeBytes: 10, Version: 1},
-		{NativeID: "b/1.mp3", Title: "Three", Artist: "Beta", AlbumArtist: "Beta", Album: "BB", Genre: "Jazz", Year: 2000, Index: 1, DurationMs: 3000, Container: "mp3", Codec: "mp3", SizeBytes: 10, Version: 1},
+		{NativeID: "a/1.flac", Title: "One", Artist: "Alpha", AlbumArtist: "Alpha", Album: "AA", Genre: "Rock", Year: 1990, Index: 1, DurationMs: 300000, Container: "flac", Codec: "flac", SizeBytes: 10, Version: 1},
+		{NativeID: "a/2.flac", Title: "Two", Artist: "Alpha", AlbumArtist: "Alpha", Album: "AA", Genre: "Rock", Year: 1990, Index: 2, DurationMs: 300000, Container: "flac", Codec: "flac", SizeBytes: 10, Version: 1},
+		{NativeID: "b/1.mp3", Title: "Three", Artist: "Beta", AlbumArtist: "Beta", Album: "BB", Genre: "Jazz", Year: 2000, Index: 1, DurationMs: 180000, Container: "mp3", Codec: "mp3", SizeBytes: 10, Version: 1},
 	} {
 		if err := st.UpsertTrack(ctx, "filesystem", m, "", seq); err != nil {
 			t.Fatal(err)

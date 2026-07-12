@@ -65,6 +65,9 @@ func run() error {
 
 	mgr := library.NewManager(st, cfg.DataDir)
 	srv := httpserver.New(cfg.Listen, st, mgr, cfg.DataDir, version)
+	// Registered after the store defer, so workers always stop/join first even
+	// when ListenAndServe fails before the signal-driven Shutdown path.
+	defer srv.StopWorkers()
 	log.Info("blitterserver listening",
 		"addr", cfg.Listen, "version", version, "data_dir", cfg.DataDir,
 		"docs", "http://"+cfg.Listen+"/docs/")

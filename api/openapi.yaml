@@ -286,12 +286,13 @@ paths:
                 properties:
                   available: { type: boolean, description: Instance has last.fm API credentials (admin-configured) }
                   connected: { type: boolean }
-                  username: { type: string, nullable: true }
+                  username: { type: string, nullable: true, description: "PII: last.fm username. Stored only while connected; removed on disconnect/profile deletion/anonymization. Never logged." }
         "401": { $ref: "#/components/responses/Unauthorized" }
     delete:
       operationId: disconnectMyLastfm
       tags: [profiles]
       summary: Disconnect the calling profile's last.fm
+      description: Removes personal last.fm credentials, relay sessions, and provider linkage while retaining ordinary local playback history.
       responses:
         "204": { description: Disconnected }
         "401": { $ref: "#/components/responses/Unauthorized" }
@@ -313,6 +314,56 @@ paths:
                   url: { type: string }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "409": { description: Instance has no last.fm API credentials, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+
+  /v1/lastfm/callback:
+    get:
+      operationId: completeLastfmAuth
+      tags: [profiles]
+      summary: Complete browser-based last.fm authorization
+      description: Single-use callback bound to the initiating profile by an opaque, 15-minute state value. State is consumed only after successful encrypted connection persistence. Returns minimal non-cacheable HTML and never exposes the session key.
+      security: []
+      parameters:
+        - { name: state, in: query, required: true, schema: { type: string } }
+        - { name: token, in: query, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Authorization completed
+          headers: { Cache-Control: { schema: { type: string } }, Referrer-Policy: { schema: { type: string } }, Content-Security-Policy: { schema: { type: string } } }
+          content: { text/html: { schema: { type: string } } }
+        "400":
+          description: "Invalid, expired, reused, or mismatched attempt"
+          headers: { Cache-Control: { schema: { type: string } }, Referrer-Policy: { schema: { type: string } }, Content-Security-Policy: { schema: { type: string } } }
+          content: { text/html: { schema: { type: string } } }
+
+  /admin/api/profiles/{profileId}/anonymize-data:
+    post:
+      operationId: adminAnonymizeProfileData
+      tags: [admin]
+      summary: Preview or remove stored personal last.fm data for a profile
+      description: Admin-authenticated erasure path. Removes the PII username, secret session key, auth attempts, provider relay sessions, and last.fm linkage from retained general playback events. Local playback history remains intact; dry-run reports categories without changing data.
+      parameters: [{ name: profileId, in: path, required: true, schema: { type: string } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [dryRun]
+              properties:
+                dryRun: { type: boolean }
+      responses:
+        "200":
+          description: Erasure preview/result
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [dryRun, categories]
+                properties:
+                  dryRun: { type: boolean }
+                  categories: { type: array, items: { type: string, enum: [lastfm_username, lastfm_session, lastfm_auth_attempts, lastfm_playback] } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /v1/me/settings:
     get:
@@ -486,6 +537,7 @@ paths:
                 items: { $ref: "#/components/schemas/SimilarArtist" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "502": { description: Configured discovery provider is unavailable, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
 
   /v1/albums:
     get:
@@ -908,6 +960,7 @@ paths:
               schema: { $ref: "#/components/schemas/ExternalArtist" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "502": { description: Configured discovery provider is unavailable, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
 
   /v1/me/discover:
     get:
@@ -928,6 +981,7 @@ paths:
                 type: array
                 items: { $ref: "#/components/schemas/DiscoverItem" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { description: Configured discovery provider is unavailable, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
 
   # ───────────────────────────── playback ─────────────────────────────
   /v1/playback/events:
@@ -1776,6 +1830,7 @@ paths:
       operationId: adminDeleteLastfm
       tags: [admin]
       summary: Disconnect last.fm
+      description: Removes instance credentials and all personal last.fm data/linkage while retaining ordinary local playback history.
       security: [{ adminSession: [] }]
       responses:
         "204": { description: Removed }
@@ -2161,7 +2216,7 @@ components:
           items: { type: string, enum: [original, aac] }
           description: aac absent when ffmpeg unavailable
         radio: { type: boolean }
-        discovery: { type: boolean, description: "An engine recommendation provider is configured — /v1/me/discover returns items" }
+        discovery: { type: boolean, description: "A recommendation provider has operational instance credentials; personalized results additionally require a connected profile" }
 
     Device:
       type: object
@@ -2479,6 +2534,7 @@ components:
       required: [eventId, type, trackId, at]
       properties:
         eventId: { type: string, description: Client-generated UUID (dedupe key) }
+        playSessionId: { type: string, nullable: true, description: Stable client-generated ID for one listening session; use it for all events from started through ended/skipped }
         type: { type: string, enum: [started, progress, paused, resumed, ended, skipped] }
         trackId: { type: string }
         positionSec: { type: number, nullable: true }

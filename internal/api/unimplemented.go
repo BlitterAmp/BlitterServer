@@ -16,6 +16,13 @@ var ErrNotImplemented = errors.New("not implemented")
 // embed it and override what they implement.
 type Unimplemented struct{}
 
+func (Unimplemented) CompleteLastfmAuth(context.Context, CompleteLastfmAuthRequestObject) (CompleteLastfmAuthResponseObject, error) {
+	return nil, ErrNotImplemented
+}
+func (Unimplemented) AdminAnonymizeProfileData(context.Context, AdminAnonymizeProfileDataRequestObject) (AdminAnonymizeProfileDataResponseObject, error) {
+	return nil, ErrNotImplemented
+}
+
 func (Unimplemented) AdminListDevices(ctx context.Context, request AdminListDevicesRequestObject) (AdminListDevicesResponseObject, error) {
 	return nil, ErrNotImplemented
 }
