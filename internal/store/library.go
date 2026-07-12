@@ -94,16 +94,12 @@ type LibrarySearch struct {
 // NextScanSeq increments and returns the scan sequence number; UpsertTrack
 // stamps rows with it and FinishScan marks everything older as missing.
 func (s *Store) NextScanSeq(ctx context.Context) (int64, error) {
-	v, _, err := s.GetSetting(ctx, "library_scan_seq")
-	if err != nil {
-		return 0, err
-	}
-	seq, _ := strconv.ParseInt(v, 10, 64)
-	seq++
-	if err := s.SetSetting(ctx, "library_scan_seq", strconv.FormatInt(seq, 10)); err != nil {
-		return 0, err
-	}
-	return seq, nil
+	var seq int64
+	err := s.db.QueryRowContext(ctx, `
+		INSERT INTO settings (key, value) VALUES ('library_scan_seq', '1')
+		ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1
+		RETURNING CAST(value AS INTEGER)`).Scan(&seq)
+	return seq, err
 }
 
 // UpsertTrack indexes one scanned track, minting canonical ids on first
@@ -250,6 +246,7 @@ type AlbumArtNeed struct {
 type ArtistArtNeed struct {
 	ArtistID string
 	Name     string
+	ArtID    string
 }
 
 // AlbumsNeedingArt lists present albums with no cover we haven't tried yet.
@@ -278,7 +275,7 @@ func (s *Store) AlbumsNeedingArt(ctx context.Context, limit int) ([]AlbumArtNeed
 // (even those with an album-cover fallback — fanart.tv can upgrade them).
 func (s *Store) ArtistsNeedingArt(ctx context.Context, limit int) ([]ArtistArtNeed, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT artist_id, name FROM artists
+		SELECT artist_id, name, COALESCE(art_id, '') FROM artists
 		WHERE missing = 0 AND (art_tried = 0 OR art_tried_at < ?)
 		LIMIT ?`, time.Now().Add(-24*time.Hour).Unix(), limit)
 	if err != nil {
@@ -288,7 +285,7 @@ func (s *Store) ArtistsNeedingArt(ctx context.Context, limit int) ([]ArtistArtNe
 	var out []ArtistArtNeed
 	for rows.Next() {
 		var a ArtistArtNeed
-		if err := rows.Scan(&a.ArtistID, &a.Name); err != nil {
+		if err := rows.Scan(&a.ArtistID, &a.Name, &a.ArtID); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
@@ -298,16 +295,24 @@ func (s *Store) ArtistsNeedingArt(ctx context.Context, limit int) ([]ArtistArtNe
 
 // SetAlbumArt/SetArtistArt attach fetched art and bump change_seq so clients
 // pick the new cover up via delta sync. seq is a fresh NextScanSeq for the run.
-func (s *Store) SetAlbumArt(ctx context.Context, albumID, artID string, seq int64) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE albums SET art_id = ?, art_tried = 1, art_tried_at = ?, change_seq = ? WHERE album_id = ?`, artID, time.Now().Unix(), seq, albumID)
-	return err
+func (s *Store) SetAlbumArt(ctx context.Context, albumID, artID string, seq int64) (bool, error) {
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE albums SET art_id = ?, art_tried = 1, art_tried_at = ?, change_seq = ? WHERE album_id = ? AND art_id IS NULL`, artID, time.Now().Unix(), seq, albumID)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	return n == 1, err
 }
 
-func (s *Store) SetArtistArt(ctx context.Context, artistID, artID string, seq int64) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE artists SET art_id = ?, art_tried = 1, art_tried_at = ?, change_seq = ? WHERE artist_id = ?`, artID, time.Now().Unix(), seq, artistID)
-	return err
+func (s *Store) SetArtistArt(ctx context.Context, artistID, expectedArtID, artID string, seq int64) (bool, error) {
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE artists SET art_id = ?, art_tried = 1, art_tried_at = ?, change_seq = ? WHERE artist_id = ? AND COALESCE(art_id, '') = ?`, artID, time.Now().Unix(), seq, artistID, expectedArtID)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	return n == 1, err
 }
 
 // MarkAlbumArtTried/MarkArtistArtTried record a miss so we don't re-query.

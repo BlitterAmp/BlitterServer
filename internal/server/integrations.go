@@ -154,13 +154,10 @@ func (s *Server) AdminSetLastfm(ctx context.Context, req api.AdminSetLastfmReque
 	if req.Body.ApiKey == "" || req.Body.SharedSecret == "" {
 		return nil, badRequest("api_key_and_secret_required")
 	}
-	if err := s.st.SetSetting(ctx, settingLastfmAPIKey, req.Body.ApiKey); err != nil {
+	if err := s.st.SetLastfmCredentials(ctx, req.Body.ApiKey, req.Body.SharedSecret); err != nil {
 		return nil, err
 	}
-	if err := s.st.SetSetting(ctx, settingLastfmSharedSecret, req.Body.SharedSecret); err != nil {
-		return nil, err
-	}
-	_ = s.st.ResetArtRetries(ctx, false)
+	s.lib.TriggerAlbumEnrichment()
 	return api.AdminSetLastfm204Response{}, nil
 }
 
@@ -191,7 +188,7 @@ func (s *Server) AdminSetFanart(ctx context.Context, req api.AdminSetFanartReque
 	if err := s.st.SetSetting(ctx, settingFanartAPIKey, req.Body.ApiKey); err != nil {
 		return nil, err
 	}
-	_ = s.st.ResetArtRetries(ctx, true)
+	s.lib.TriggerArtistEnrichment()
 	return api.AdminSetFanart204Response{}, nil
 }
 

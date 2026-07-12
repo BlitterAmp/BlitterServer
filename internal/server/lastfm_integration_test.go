@@ -13,8 +13,89 @@ import (
 	"github.com/BlitterAmp/BlitterServer/internal/api"
 	"github.com/BlitterAmp/BlitterServer/internal/auth"
 	"github.com/BlitterAmp/BlitterServer/internal/lastfm"
+	"github.com/BlitterAmp/BlitterServer/internal/library"
 	"github.com/BlitterAmp/BlitterServer/internal/store"
 )
+
+type handlerEnricher struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (e *handlerEnricher) Run(ctx context.Context) {
+	e.started <- struct{}{}
+	select {
+	case <-e.release:
+	case <-ctx.Done():
+	}
+}
+
+func assertTriggered(t *testing.T, started <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("enrichment was not triggered")
+	}
+}
+
+func assertNotTriggered(t *testing.T, started <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-started:
+		t.Fatal("enrichment was triggered")
+	default:
+	}
+}
+
+func waitHandlerResult(t *testing.T, result <-chan error) {
+	t.Helper()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("credential handler waited for enrichment")
+	}
+}
+
+func TestAdminArtCredentialsTriggerEnrichmentAfterSuccessfulSave(t *testing.T) {
+	s, _, _, _, _ := dataSrv(t)
+	e := &handlerEnricher{started: make(chan struct{}, 4), release: make(chan struct{}, 4)}
+	s.lib.SetEnricher(e)
+
+	fanartReturned := make(chan error, 1)
+	go func() {
+		_, err := s.AdminSetFanart(context.Background(), api.AdminSetFanartRequestObject{Body: &api.AdminSetFanartJSONRequestBody{ApiKey: "fanart-key"}})
+		fanartReturned <- err
+	}()
+	waitHandlerResult(t, fanartReturned)
+	assertTriggered(t, e.started)
+	lastfmReturned := make(chan error, 1)
+	go func() {
+		_, err := s.AdminSetLastfm(context.Background(), api.AdminSetLastfmRequestObject{Body: &api.AdminSetLastfmJSONRequestBody{ApiKey: "lastfm-key", SharedSecret: "lastfm-secret"}})
+		lastfmReturned <- err
+	}()
+	waitHandlerResult(t, lastfmReturned)
+	e.release <- struct{}{}
+	assertTriggered(t, e.started)
+
+	if _, err := s.AdminSetFanart(context.Background(), api.AdminSetFanartRequestObject{Body: &api.AdminSetFanartJSONRequestBody{}}); err == nil {
+		t.Fatal("empty fanart key accepted")
+	}
+	if _, err := s.AdminSetLastfm(context.Background(), api.AdminSetLastfmRequestObject{Body: &api.AdminSetLastfmJSONRequestBody{ApiKey: "key"}}); err == nil {
+		t.Fatal("incomplete last.fm credentials accepted")
+	}
+	assertNotTriggered(t, e.started)
+
+	_, _ = s.AdminDeleteFanart(context.Background(), api.AdminDeleteFanartRequestObject{})
+	_, _ = s.AdminDeleteLastfm(context.Background(), api.AdminDeleteLastfmRequestObject{})
+	assertNotTriggered(t, e.started)
+	e.release <- struct{}{}
+}
+
+var _ library.Enricher = (*handlerEnricher)(nil)
 
 type fakeLastfm struct {
 	mu                                    sync.Mutex

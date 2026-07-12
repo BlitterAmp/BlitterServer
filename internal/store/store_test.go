@@ -30,6 +30,26 @@ func TestOpenMigratesAndCreatesFile(t *testing.T) {
 	}
 }
 
+func TestSetLastfmCredentialsRollsBackWhenSecondWriteFails(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	if err := s.SetLastfmCredentials(ctx, "old-key", "old-secret"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE TRIGGER fail_lastfm_secret BEFORE UPDATE ON settings
+		WHEN NEW.key = 'lastfm_shared_secret' BEGIN SELECT RAISE(FAIL, 'synthetic failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetLastfmCredentials(ctx, "new-key", "new-secret"); err == nil {
+		t.Fatal("credential transaction unexpectedly succeeded")
+	}
+	key, _, _ := s.GetSetting(ctx, "lastfm_api_key")
+	secret, _, _ := s.GetSetting(ctx, "lastfm_shared_secret")
+	if key != "old-key" || secret != "old-secret" {
+		t.Fatalf("partial credential update: key=%q secret=%q", key, secret)
+	}
+}
+
 func TestSettingsRoundTrip(t *testing.T) {
 	s := open(t)
 	ctx := context.Background()

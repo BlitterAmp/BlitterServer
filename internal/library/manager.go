@@ -23,6 +23,9 @@ import (
 // ErrNotConfigured means no source is linked yet.
 var ErrNotConfigured = errors.New("no source configured")
 
+// ErrClosed means the manager has begun shutdown and accepts no new work.
+var ErrClosed = errors.New("library manager closed")
+
 const (
 	settingSourceKind     = "source_kind"
 	settingFilesystemPath = "filesystem_path"
@@ -50,9 +53,21 @@ type Manager struct {
 	bus      *events.Bus
 	enricher Enricher
 
-	mu       sync.Mutex
-	src      source.MusicSource
-	scanning bool
+	mu                sync.Mutex
+	src               source.MusicSource
+	scanning          bool
+	enriching         bool
+	enrichmentPending bool
+	resetArtists      bool
+	resetAlbums       bool
+	closed            bool
+	lifecycleCtx      context.Context
+	cancelLifecycle   context.CancelFunc
+	enrichmentWG      sync.WaitGroup
+	scanWG            sync.WaitGroup
+	resetArtRetries   func(context.Context, bool) error
+	waitResetRetry    func(context.Context, int) bool
+	operation         chan struct{}
 }
 
 // SetBus wires the event bus so completed scans publish library.changed. The
@@ -60,11 +75,153 @@ type Manager struct {
 func (m *Manager) SetBus(bus *events.Bus) { m.bus = bus }
 
 // SetEnricher wires external art enrichment, run after each completed scan.
-func (m *Manager) SetEnricher(e Enricher) { m.enricher = e }
+func (m *Manager) SetEnricher(e Enricher) {
+	m.mu.Lock()
+	m.enricher = e
+	m.mu.Unlock()
+}
+
+// TriggerEnrichment queues an asynchronous enrichment pass. Triggers received
+// during a pass are coalesced into one follow-up pass.
+func (m *Manager) TriggerEnrichment() {
+	m.triggerEnrichment(false, false)
+}
+
+// TriggerArtistEnrichment resets artist retry state immediately before the
+// next pass, after any stale in-flight pass has finished.
+func (m *Manager) TriggerArtistEnrichment() {
+	m.triggerEnrichment(true, false)
+}
+
+// TriggerAlbumEnrichment resets album retry state immediately before the next
+// pass, after any stale in-flight pass has finished.
+func (m *Manager) TriggerAlbumEnrichment() {
+	m.triggerEnrichment(false, true)
+}
+
+func (m *Manager) triggerEnrichment(resetArtists, resetAlbums bool) {
+	m.mu.Lock()
+	if m.closed || m.enricher == nil {
+		m.mu.Unlock()
+		return
+	}
+	m.enrichmentPending = true
+	m.resetArtists = m.resetArtists || resetArtists
+	m.resetAlbums = m.resetAlbums || resetAlbums
+	if m.enriching {
+		m.mu.Unlock()
+		return
+	}
+	m.enriching = true
+	enricher := m.enricher
+	m.enrichmentWG.Add(1)
+	m.mu.Unlock()
+	go m.runEnrichment(enricher)
+}
+
+func (m *Manager) runEnrichment(enricher Enricher) {
+	defer m.enrichmentWG.Done()
+	retryAttempt := 0
+	for {
+		m.mu.Lock()
+		if m.closed {
+			m.enriching = false
+			m.mu.Unlock()
+			return
+		}
+		m.enrichmentPending = false
+		resetArtists, resetAlbums := m.resetArtists, m.resetAlbums
+		m.resetArtists, m.resetAlbums = false, false
+		m.mu.Unlock()
+		if !m.acquireOperation() {
+			m.mu.Lock()
+			m.enriching = false
+			m.mu.Unlock()
+			return
+		}
+
+		resetFailed := false
+		if resetArtists {
+			if err := m.resetArtRetries(m.lifecycleCtx, true); err != nil {
+				logging.From(m.lifecycleCtx).Warn("reset artist art retries", "err", err)
+				resetFailed = true
+				m.mu.Lock()
+				m.resetArtists = true
+				m.mu.Unlock()
+			}
+		}
+		if resetAlbums {
+			if err := m.resetArtRetries(m.lifecycleCtx, false); err != nil {
+				logging.From(m.lifecycleCtx).Warn("reset album art retries", "err", err)
+				resetFailed = true
+				m.mu.Lock()
+				m.resetAlbums = true
+				m.mu.Unlock()
+			}
+		}
+		if !resetFailed {
+			m.mu.Lock()
+			moreResets := m.resetArtists || m.resetAlbums
+			m.mu.Unlock()
+			if moreResets {
+				m.releaseOperation()
+				continue
+			}
+		}
+		if !resetFailed && m.lifecycleCtx.Err() == nil {
+			retryAttempt = 0
+			enricher.Run(m.lifecycleCtx)
+		}
+		m.releaseOperation()
+
+		m.mu.Lock()
+		if m.closed {
+			m.enriching = false
+			m.mu.Unlock()
+			return
+		}
+		if resetFailed {
+			retryAttempt++
+			m.mu.Unlock()
+			if !m.waitResetRetry(m.lifecycleCtx, retryAttempt) {
+				m.mu.Lock()
+				m.enriching = false
+				m.mu.Unlock()
+				return
+			}
+			continue
+		}
+		if !m.enrichmentPending && !m.resetArtists && !m.resetAlbums {
+			m.enriching = false
+			m.mu.Unlock()
+			return
+		}
+		m.mu.Unlock()
+	}
+}
+
+// Close cancels and joins enrichment work. It is safe to call more than once.
+func (m *Manager) Close() {
+	m.mu.Lock()
+	if !m.closed {
+		m.closed = true
+		m.cancelLifecycle()
+	}
+	m.mu.Unlock()
+	m.scanWG.Wait()
+	m.enrichmentWG.Wait()
+}
 
 // NewManager restores the configured source (if any) from settings.
 func NewManager(st *store.Store, dataDir string) *Manager {
-	m := &Manager{st: st, dataDir: dataDir}
+	lifecycleCtx, cancelLifecycle := context.WithCancel(context.Background())
+	m := &Manager{
+		st: st, dataDir: dataDir, lifecycleCtx: lifecycleCtx,
+		cancelLifecycle: cancelLifecycle, resetArtRetries: st.ResetArtRetries,
+		waitResetRetry: waitForResetRetry,
+		operation:      make(chan struct{}, 1),
+	}
+	m.operation <- struct{}{}
 	ctx := context.Background()
 	if kind, _, _ := st.GetSetting(ctx, settingSourceKind); kind == "filesystem" {
 		if path, ok, _ := st.GetSetting(ctx, settingFilesystemPath); ok && path != "" {
@@ -78,6 +235,12 @@ func NewManager(st *store.Store, dataDir string) *Manager {
 
 // Configure points the filesystem source at path and queues the initial scan.
 func (m *Manager) Configure(ctx context.Context, path string) error {
+	m.mu.Lock()
+	closed := m.closed
+	m.mu.Unlock()
+	if closed {
+		return ErrClosed
+	}
 	st, err := os.Stat(path)
 	if err != nil {
 		return fmt.Errorf("source path: %w", err)
@@ -121,6 +284,9 @@ func (m *Manager) Unlink(ctx context.Context) error {
 func (m *Manager) Rescan(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closed {
+		return ErrClosed
+	}
 	if m.src == nil {
 		return ErrNotConfigured
 	}
@@ -129,19 +295,31 @@ func (m *Manager) Rescan(ctx context.Context) error {
 	}
 	m.scanning = true
 	src := m.src
+	m.scanWG.Add(1)
 	go m.scan(src)
 	return nil
 }
 
 func (m *Manager) scan(src source.MusicSource) {
-	ctx := context.Background()
+	defer m.scanWG.Done()
+	ctx := m.lifecycleCtx
 	log := logging.From(ctx).With("component", "library.scan", "source", src.Kind())
 	start := time.Now()
 
+	if !m.acquireOperation() {
+		m.mu.Lock()
+		m.scanning = false
+		m.mu.Unlock()
+		return
+	}
 	err := m.runScan(ctx, src)
+	m.releaseOperation()
 	m.mu.Lock()
 	m.scanning = false
 	m.mu.Unlock()
+	if ctx.Err() != nil {
+		return
+	}
 
 	_ = m.st.SetSetting(ctx, settingLastScanAt, time.Now().UTC().Format(time.RFC3339))
 	if err != nil {
@@ -163,8 +341,36 @@ func (m *Manager) scan(src source.MusicSource) {
 
 	// Fill any art gaps from external sources in the background; enrichment
 	// emits its own library.changed when it attaches new covers/photos.
-	if m.enricher != nil {
-		go m.enricher.Run(context.Background())
+	m.TriggerEnrichment()
+}
+
+func (m *Manager) acquireOperation() bool {
+	select {
+	case <-m.lifecycleCtx.Done():
+		return false
+	case <-m.operation:
+		if m.lifecycleCtx.Err() != nil {
+			m.releaseOperation()
+			return false
+		}
+		return true
+	}
+}
+
+func (m *Manager) releaseOperation() { m.operation <- struct{}{} }
+
+func waitForResetRetry(ctx context.Context, attempt int) bool {
+	if attempt > 8 {
+		attempt = 8
+	}
+	delay := 100 * time.Millisecond * time.Duration(1<<(attempt-1))
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 

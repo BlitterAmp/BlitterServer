@@ -47,6 +47,84 @@ func TestArtRetryUpgradeAndExternalArtistRace(t *testing.T) {
 	}
 }
 
+func TestNextScanSeqIsAtomic(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	const calls = 20
+	seqs := make(chan int64, calls)
+	errs := make(chan error, calls)
+	var wg sync.WaitGroup
+	for range calls {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			seq, err := s.NextScanSeq(ctx)
+			seqs <- seq
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(seqs)
+	close(errs)
+	seen := make(map[int64]bool, calls)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for seq := range seqs {
+		if seq < 1 || seq > calls || seen[seq] {
+			t.Fatalf("non-atomic sequence %d, seen=%v", seq, seen)
+		}
+		seen[seq] = true
+	}
+}
+
+func TestExternalArtDoesNotOverwriteNewerAttachedArt(t *testing.T) {
+	s := indexFixture(t)
+	ctx := context.Background()
+	albums, _ := s.AlbumsNeedingArt(ctx, 1)
+	artists, _ := s.ArtistsNeedingArt(ctx, 1)
+	oldArtistArt := artists[0].ArtID
+	newID, err := s.UpsertArt(ctx, "newer", "image/jpeg", []byte("newer"), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	externalID, err := s.UpsertArt(ctx, "external", "image/jpeg", []byte("external"), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE albums SET art_id=? WHERE album_id=?`, newID, albums[0].AlbumID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE artists SET art_id=? WHERE artist_id=?`, newID, artists[0].ArtistID); err != nil {
+		t.Fatal(err)
+	}
+	if applied, err := s.SetAlbumArt(ctx, albums[0].AlbumID, externalID, 99); err != nil || applied {
+		t.Fatalf("stale album art applied=%v err=%v", applied, err)
+	}
+	if applied, err := s.SetArtistArt(ctx, artists[0].ArtistID, oldArtistArt, externalID, 99); err != nil || applied {
+		t.Fatalf("stale artist art applied=%v err=%v", applied, err)
+	}
+}
+
+func TestArtistExternalArtUpgradesUnchangedAlbumFallback(t *testing.T) {
+	s := indexFixture(t)
+	ctx := context.Background()
+	artist := func() ArtistArtNeed {
+		rows, _ := s.ArtistsNeedingArt(ctx, 1)
+		return rows[0]
+	}()
+	externalID, err := s.UpsertArt(ctx, "artist-external", "image/jpeg", []byte("external"), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied, err := s.SetArtistArt(ctx, artist.ArtistID, artist.ArtID, externalID, 99)
+	if err != nil || !applied {
+		t.Fatalf("fallback upgrade applied=%v err=%v", applied, err)
+	}
+}
+
 func meta(native, title, artist, album, genre string, year, idx int) source.TrackMeta {
 	return source.TrackMeta{
 		NativeID: native, Title: title, Artist: artist, AlbumArtist: artist,

@@ -52,7 +52,7 @@ type Enricher struct {
 	LastfmBase string
 	FanartBase string
 
-	mb <-chan time.Time // MusicBrainz rate limiter
+	mbInterval time.Duration
 }
 
 func New(st *store.Store, bus *events.Bus, artDir string, cfg Config) *Enricher {
@@ -69,7 +69,7 @@ func New(st *store.Store, bus *events.Bus, artDir string, cfg Config) *Enricher 
 		CAABase:    "https://coverartarchive.org",
 		LastfmBase: "https://ws.audioscrobbler.com/2.0",
 		FanartBase: "https://webservice.fanart.tv/v3",
-		mb:         time.NewTicker(1100 * time.Millisecond).C,
+		mbInterval: 1100 * time.Millisecond,
 	}
 }
 
@@ -90,8 +90,11 @@ func (e *Enricher) Run(ctx context.Context) {
 		}
 		if data, mime := e.albumArt(ctx, a.ArtistName, a.Title); data != nil {
 			if id, err := e.store(ctx, data, mime); err == nil {
-				_ = e.st.SetAlbumArt(ctx, a.AlbumID, id, seq)
-				changed = true
+				applied, err := e.st.SetAlbumArt(ctx, a.AlbumID, id, seq)
+				changed = changed || applied
+				if err != nil {
+					_ = e.st.MarkAlbumArtTried(ctx, a.AlbumID)
+				}
 				continue
 			}
 		}
@@ -106,8 +109,11 @@ func (e *Enricher) Run(ctx context.Context) {
 			}
 			if data, mime := e.artistArt(ctx, ar.Name); data != nil {
 				if id, err := e.store(ctx, data, mime); err == nil {
-					_ = e.st.SetArtistArt(ctx, ar.ArtistID, id, seq)
-					changed = true
+					applied, err := e.st.SetArtistArt(ctx, ar.ArtistID, ar.ArtID, id, seq)
+					changed = changed || applied
+					if err != nil {
+						_ = e.st.MarkArtistArtTried(ctx, ar.ArtistID)
+					}
 					continue
 				}
 			}
@@ -220,7 +226,15 @@ func (e *Enricher) mbArtist(ctx context.Context, name string) string {
 // ── http helpers ──
 
 func (e *Enricher) mbQuery(ctx context.Context, entity, query string, out any) bool {
-	<-e.mb // rate limit
+	if e.mbInterval > 0 {
+		timer := time.NewTimer(e.mbInterval)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return false
+		}
+	}
 	u := fmt.Sprintf("%s/%s?query=%s&fmt=json&limit=1", e.MBBase, entity, url.QueryEscape(query))
 	return e.getJSON(ctx, u, e.cfg.UserAgent, out)
 }

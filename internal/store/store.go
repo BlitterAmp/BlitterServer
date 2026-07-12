@@ -142,6 +142,22 @@ func (s *Store) SetSetting(ctx context.Context, key, value string) error {
 	return err
 }
 
+// SetLastfmCredentials atomically persists the instance-wide provider pair.
+func (s *Store) SetLastfmCredentials(ctx context.Context, apiKey, sharedSecret string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for key, value := range map[string]string{"lastfm_api_key": apiKey, "lastfm_shared_secret": sharedSecret} {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO settings (key, value) VALUES (?, ?)
+			ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // SetupComplete reports whether first-run setup has happened: the admin
 // password hash is the marker (written by the admin setup endpoint, spec 2).
 func (s *Store) SetupComplete(ctx context.Context) (bool, error) {

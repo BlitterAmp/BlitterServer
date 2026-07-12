@@ -61,8 +61,14 @@ func NewFull(st *store.Store, lib *library.Manager, bus *events.Bus, art *artifa
 }
 
 func (s *Server) Close() {
+	if s.art != nil {
+		s.art.Stop()
+	}
 	if s.lastfmWorker != nil {
 		s.lastfmWorker.stop()
+	}
+	if s.lib != nil {
+		s.lib.Close()
 	}
 }
 
