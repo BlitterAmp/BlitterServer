@@ -457,6 +457,11 @@ func keysetClause(keyCol, idCol string, desc bool) string {
 	return fmt.Sprintf("(%s > ? OR (%s = ? AND %s > ?))", keyCol, keyCol, idCol)
 }
 
+const artistArt = `COALESCE(a.art_id,
+	(SELECT al.art_id FROM albums al
+	 WHERE al.artist_id = a.artist_id AND al.art_id IS NOT NULL AND al.missing = 0
+	 ORDER BY COALESCE(al.year, 9999), al.title, al.album_id LIMIT 1), '')`
+
 func (s *Store) ListArtists(ctx context.Context, sort, cur string, limit int) ([]ArtistRow, string, error) {
 	c, err := decodeCursor(cur)
 	if err != nil {
@@ -477,11 +482,11 @@ func (s *Store) ListArtists(ctx context.Context, sort, cur string, limit int) ([
 		dir = "DESC"
 	}
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT a.artist_id, a.name, COALESCE(a.art_id, ''), %s,
+		SELECT a.artist_id, a.name, %s, %s,
 		       (SELECT count(*) FROM albums al WHERE al.artist_id = a.artist_id AND al.missing = 0),
 		       (SELECT count(*) FROM tracks t WHERE t.artist_id = a.artist_id AND t.missing = 0)
 		FROM artists a WHERE %s ORDER BY %s %s, a.artist_id LIMIT %d`,
-		keyCol, where, keyCol, dir, limit+1), args...)
+		artistArt, keyCol, where, keyCol, dir, limit+1), args...)
 	if err != nil {
 		return nil, "", err
 	}
@@ -536,11 +541,11 @@ func (s *Store) artistGenres(ctx context.Context, artistID string) ([]string, er
 
 func (s *Store) GetArtist(ctx context.Context, artistID string) (ArtistRow, bool, error) {
 	var a ArtistRow
-	err := s.db.QueryRowContext(ctx, `
-		SELECT a.artist_id, a.name, COALESCE(a.art_id, ''),
+	err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT a.artist_id, a.name, %s,
 		       (SELECT count(*) FROM albums al WHERE al.artist_id = a.artist_id AND al.missing = 0),
 		       (SELECT count(*) FROM tracks t WHERE t.artist_id = a.artist_id AND t.missing = 0)
-		FROM artists a WHERE a.artist_id = ? AND a.missing = 0`, artistID).
+		FROM artists a WHERE a.artist_id = ? AND a.missing = 0`, artistArt), artistID).
 		Scan(&a.ArtistID, &a.Name, &a.ArtID, &a.AlbumCount, &a.TrackCount)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ArtistRow{}, false, nil
@@ -799,11 +804,11 @@ func (s *Store) SearchLibrary(ctx context.Context, q string) (LibrarySearch, err
 	var res LibrarySearch
 	pattern := "%" + strings.ReplaceAll(strings.ReplaceAll(q, "%", `\%`), "_", `\_`) + "%"
 
-	arows, err := s.db.QueryContext(ctx, `
-		SELECT a.artist_id, a.name, COALESCE(a.art_id, ''),
+	arows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT a.artist_id, a.name, %s,
 		       (SELECT count(*) FROM albums al WHERE al.artist_id = a.artist_id AND al.missing = 0),
 		       (SELECT count(*) FROM tracks t WHERE t.artist_id = a.artist_id AND t.missing = 0)
-		FROM artists a WHERE a.missing = 0 AND a.name LIKE ? ESCAPE '\' ORDER BY a.name LIMIT 25`, pattern)
+		FROM artists a WHERE a.missing = 0 AND a.name LIKE ? ESCAPE '\' ORDER BY a.name LIMIT 25`, artistArt), pattern)
 	if err != nil {
 		return res, err
 	}

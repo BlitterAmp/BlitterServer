@@ -108,6 +108,56 @@ func TestExternalArtDoesNotOverwriteNewerAttachedArt(t *testing.T) {
 	}
 }
 
+func TestSetAlbumArtFallsBackToTracksAndArtistWithoutOverridingExplicitArt(t *testing.T) {
+	s := indexFixture(t)
+	ctx := context.Background()
+	albums, _, err := s.ListAlbums(ctx, "title", "", 10)
+	if err != nil {
+		t.Fatalf("list albums: %v %+v", err, albums)
+	}
+	var album AlbumRow
+	for _, candidate := range albums {
+		if candidate.Title == "First Album" {
+			album = candidate
+			break
+		}
+	}
+	if album.AlbumID == "" {
+		t.Fatalf("First Album missing: %+v", albums)
+	}
+	tracks, err := s.ListAlbumTracks(ctx, album.AlbumID)
+	if err != nil || len(tracks) < 2 {
+		t.Fatalf("list album tracks: %v %+v", err, tracks)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE tracks SET art_id = ? WHERE track_id = ?`, "img_track", tracks[0].TrackID); err != nil {
+		t.Fatal(err)
+	}
+
+	applied, err := s.SetAlbumArt(ctx, album.AlbumID, "img_album", 99)
+	if err != nil || !applied {
+		t.Fatalf("set album art: applied=%v err=%v", applied, err)
+	}
+	tracks, err = s.ListAlbumTracks(ctx, album.AlbumID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tracks[0].ArtID != "img_track" || tracks[1].ArtID != "img_album" {
+		t.Fatalf("track art precedence: %+v", tracks)
+	}
+	artist, found, err := s.GetArtist(ctx, album.ArtistID)
+	if err != nil || !found || artist.ArtID != "img_album" {
+		t.Fatalf("artist album fallback: found=%v err=%v artist=%+v", found, err, artist)
+	}
+
+	if applied, err := s.SetArtistArt(ctx, album.ArtistID, "", "img_artist", 100); err != nil || !applied {
+		t.Fatalf("set artist art: applied=%v err=%v", applied, err)
+	}
+	artist, found, err = s.GetArtist(ctx, album.ArtistID)
+	if err != nil || !found || artist.ArtID != "img_artist" {
+		t.Fatalf("explicit artist art: found=%v err=%v artist=%+v", found, err, artist)
+	}
+}
+
 func TestArtistExternalArtUpgradesUnchangedAlbumFallback(t *testing.T) {
 	s := indexFixture(t)
 	ctx := context.Background()

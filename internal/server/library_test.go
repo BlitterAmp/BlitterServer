@@ -120,6 +120,67 @@ func TestBrowseEndpoints(t *testing.T) {
 	}
 }
 
+func TestAlbumArtFallbacksReachTrackAndArtistAPI(t *testing.T) {
+	s, st := libSrv(t)
+	ctx := context.Background()
+	albums, _, err := st.ListAlbums(ctx, "title", "", 1)
+	if err != nil || len(albums) != 1 {
+		t.Fatalf("list albums: %v %+v", err, albums)
+	}
+	album := albums[0]
+	seq, err := st.NextScanSeq(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertTrack(ctx, "filesystem", source.TrackMeta{
+		NativeID: "a/1.flac", Title: "One", Artist: "Alpha", AlbumArtist: "Alpha", Album: "AA",
+		Genre: "Rock", Year: 1990, Index: 1, DurationMs: 300000, Container: "flac", Codec: "flac",
+		SizeBytes: 10, Version: 1,
+	}, "img_track", seq); err != nil {
+		t.Fatal(err)
+	}
+	if applied, err := st.SetAlbumArt(ctx, album.AlbumID, "img_album", seq); err != nil || !applied {
+		t.Fatalf("set album art: applied=%v err=%v", applied, err)
+	}
+
+	albumResp, err := s.GetAlbum(ctx, api.GetAlbumRequestObject{AlbumId: album.AlbumID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	albumAPI := albumResp.(api.GetAlbum200JSONResponse)
+	if albumAPI.ArtId == nil || *albumAPI.ArtId != "img_album" {
+		t.Fatalf("album API art: %+v", albumAPI)
+	}
+	tracksResp, err := s.ListAlbumTracks(ctx, api.ListAlbumTracksRequestObject{AlbumId: album.AlbumID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracks := tracksResp.(api.ListAlbumTracks200JSONResponse)
+	if tracks[0].ArtId == nil || *tracks[0].ArtId != "img_track" || tracks[1].ArtId == nil || *tracks[1].ArtId != "img_album" {
+		t.Fatalf("track API art precedence: %+v", tracks)
+	}
+	artistResp, err := s.GetArtist(ctx, api.GetArtistRequestObject{ArtistId: album.ArtistID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	artist := artistResp.(api.GetArtist200JSONResponse)
+	if artist.ArtId == nil || *artist.ArtId != "img_album" {
+		t.Fatalf("artist API album fallback: %+v", artist)
+	}
+
+	if applied, err := st.SetArtistArt(ctx, album.ArtistID, "", "img_artist", seq+1); err != nil || !applied {
+		t.Fatalf("set artist art: applied=%v err=%v", applied, err)
+	}
+	artistResp, err = s.GetArtist(ctx, api.GetArtistRequestObject{ArtistId: album.ArtistID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	artist = artistResp.(api.GetArtist200JSONResponse)
+	if artist.ArtId == nil || *artist.ArtId != "img_artist" {
+		t.Fatalf("explicit artist API art: %+v", artist)
+	}
+}
+
 func TestTracksPaginationEndpoint(t *testing.T) {
 	s, _ := libSrv(t)
 	ctx := context.Background()
