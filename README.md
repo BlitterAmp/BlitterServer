@@ -8,13 +8,14 @@ Single-tenant and self-hosted, but multi-user: one household, several profiles, 
 
 ## Status
 
-**Skeleton foundation.** The full v1 API surface is specified in [`api/openapi.yaml`](api/openapi.yaml) and the server is generated from it with a CI drift gate. What responds for real today:
+**Functional server.** The contract in [`api/openapi.yaml`](api/openapi.yaml) is enforced by generated strict handlers and a CI drift gate. The server includes:
 
-- `GET /v1/ping`, `GET /v1/status`, `GET /v1/capabilities` — honest zeros: no source connected, no integrations, transcode formats reflect whether ffmpeg is on `PATH`.
-- Bearer-token auth middleware over a SQLite store (profiles, devices, hashed tokens).
-- Everything else answers `501 Not Implemented` as an RFC 9457 problem — deliberately, so clients can always trust the contract.
+- Filesystem library scanning, canonical artist/album/track ids, search and browse, range streaming, artwork, and ffmpeg-backed transcodes/downloads.
+- Household profiles and devices, PIN pairing, per-profile taste and playback state, playlists, recommendations, presence, listen parties, radio, and SSE updates.
+- MusicBrainz, Cover Art Archive, fanart.tv, and last.fm enrichment; personal last.fm authorization, scrobbling, loves, and discovery.
+- An embedded admin console for setup, sources, profiles, devices, and integrations, plus the admin API used by BlitterAmp's bundled engine.
 
-On the roadmap (in contract order): admin setup + web UI, device pairing (QR + short code), source linking, library index with canonical ids, streaming/transcoding, Love/Not-for-me taste sync, SSE events, playlists and household social features, acquisition via Lidarr, last.fm relay.
+The four Plex administration operations remain honest `501 Not Implemented` responses. Lidarr can be configured and tested, but acquisition actions are not yet connected to loves.
 
 ## Quick start
 
@@ -74,7 +75,7 @@ make web         # build the admin console (node) — make build runs it for you
 
 The generated server (`internal/api/api.gen.go`) is committed; CI regenerates and fails on any diff, so spec and server cannot drift. Handlers implement the generated strict interface and embed an `Unimplemented` base — adding an operation to the spec breaks the build until it is implemented or consciously 501'd.
 
-Layout: `cmd/blitterserver` wires `internal/config` → `internal/logging` → `internal/store` (SQLite + goose migrations) → `internal/httpserver` (middleware + generated handler); `internal/server` holds the endpoint implementations; `internal/transcode` will own the ffmpeg port.
+Layout: `cmd/blitterserver` wires `internal/config` → `internal/logging` → `internal/store` (SQLite + goose migrations) → `internal/httpserver` (middleware + generated handler); `internal/server` holds endpoint implementations, with adapters under packages such as `internal/lastfm`, `internal/source`, and `internal/transcode`.
 
 Development is contract-first and test-driven: spec changes land before handlers, and tests land before implementations — including contract tests that drive a real server through the generated client.
 
