@@ -1148,6 +1148,32 @@ type Library struct {
 
 	// UpdatedAt Freshness anchor (max of source updatedAt/scannedAt); changes when the source rescans
 	UpdatedAt int64 `json:"updatedAt"`
+
+	// Version Monotonic catalog version (scan seq). The delta-sync cursor: after bootstrapping the cache, pass this as `since` to GET /v1/changes.
+	Version int64 `json:"version"`
+}
+
+// LibraryChanges defines model for LibraryChanges.
+type LibraryChanges struct {
+	// Albums Albums that changed (upsert into the cache).
+	Albums []Album `json:"albums"`
+
+	// Artists Artists that changed (upsert into the cache).
+	Artists []Artist `json:"artists"`
+
+	// NextCursor Continue this delta batch; null when drained.
+	NextCursor      *string  `json:"nextCursor,omitempty"`
+	RemovedAlbumIds []string `json:"removedAlbumIds"`
+
+	// RemovedArtistIds Artist ids the client should drop.
+	RemovedArtistIds []string `json:"removedArtistIds"`
+	RemovedTrackIds  []string `json:"removedTrackIds"`
+
+	// Tracks Tracks that changed (upsert into the cache).
+	Tracks []Track `json:"tracks"`
+
+	// Version Current catalog version. When nextCursor is null, use this as `since` next time.
+	Version int64 `json:"version"`
 }
 
 // LidarrConfig defines model for LidarrConfig.
@@ -1672,6 +1698,16 @@ type ListArtistsParams struct {
 
 // ListArtistsParamsSort defines parameters for ListArtists.
 type ListArtistsParamsSort string
+
+// ListChangesParams defines parameters for ListChanges.
+type ListChangesParams struct {
+	// Since The catalog version the client already holds. 0 returns everything.
+	Since *int64 `form:"since,omitempty" json:"since,omitempty"`
+
+	// Cursor Opaque continuation within a delta batch (from a prior nextCursor).
+	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
+	Limit  *Limit  `form:"limit,omitempty" json:"limit,omitempty"`
+}
 
 // StreamEventsParams defines parameters for StreamEvents.
 type StreamEventsParams struct {
@@ -2205,6 +2241,9 @@ type ClientInterface interface {
 
 	// GetCapabilities request
 	GetCapabilities(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListChanges request
+	ListChanges(ctx context.Context, params *ListChangesParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// StreamEvents request
 	StreamEvents(ctx context.Context, params *StreamEventsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3106,6 +3145,18 @@ func (c *Client) ListArtistTracks(ctx context.Context, artistId string, reqEdito
 
 func (c *Client) GetCapabilities(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetCapabilitiesRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListChanges(ctx context.Context, params *ListChangesParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListChangesRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -5699,6 +5750,84 @@ func NewGetCapabilitiesRequest(server string) (*http.Request, error) {
 	return req, nil
 }
 
+// NewListChangesRequest generates requests for ListChanges
+func NewListChangesRequest(server string, params *ListChangesParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/changes")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if params.Since != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "since", *params.Since, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Cursor != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "cursor", *params.Cursor, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
+			}
+
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewStreamEventsRequest generates requests for StreamEvents
 func NewStreamEventsRequest(server string, params *StreamEventsParams) (*http.Request, error) {
 	var err error
@@ -8057,6 +8186,9 @@ type ClientWithResponsesInterface interface {
 	// GetCapabilitiesWithResponse request
 	GetCapabilitiesWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetCapabilitiesResponse, error)
 
+	// ListChangesWithResponse request
+	ListChangesWithResponse(ctx context.Context, params *ListChangesParams, reqEditors ...RequestEditorFn) (*ListChangesResponse, error)
+
 	// StreamEventsWithResponse request
 	StreamEventsWithResponse(ctx context.Context, params *StreamEventsParams, reqEditors ...RequestEditorFn) (*StreamEventsResponse, error)
 
@@ -9764,6 +9896,38 @@ func (r GetCapabilitiesResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r GetCapabilitiesResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type ListChangesResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *LibraryChanges
+	ApplicationproblemJSON401 *Unauthorized
+	ApplicationproblemJSON503 *SourceUnavailable
+}
+
+// Status returns HTTPResponse.Status
+func (r ListChangesResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListChangesResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r ListChangesResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -12072,6 +12236,15 @@ func (c *ClientWithResponses) GetCapabilitiesWithResponse(ctx context.Context, r
 	return ParseGetCapabilitiesResponse(rsp)
 }
 
+// ListChangesWithResponse request returning *ListChangesResponse
+func (c *ClientWithResponses) ListChangesWithResponse(ctx context.Context, params *ListChangesParams, reqEditors ...RequestEditorFn) (*ListChangesResponse, error) {
+	rsp, err := c.ListChanges(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListChangesResponse(rsp)
+}
+
 // StreamEventsWithResponse request returning *StreamEventsResponse
 func (c *ClientWithResponses) StreamEventsWithResponse(ctx context.Context, params *StreamEventsParams, reqEditors ...RequestEditorFn) (*StreamEventsResponse, error) {
 	rsp, err := c.StreamEvents(ctx, params, reqEditors...)
@@ -14318,6 +14491,46 @@ func ParseGetCapabilitiesResponse(rsp *http.Response) (*GetCapabilitiesResponse,
 	return response, nil
 }
 
+// ParseListChangesResponse parses an HTTP response from a ListChangesWithResponse call
+func ParseListChangesResponse(rsp *http.Response) (*ListChangesResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListChangesResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest LibraryChanges
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest Unauthorized
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest SourceUnavailable
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseStreamEventsResponse parses an HTTP response from a StreamEventsWithResponse call
 func ParseStreamEventsResponse(rsp *http.Response) (*StreamEventsResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -16488,6 +16701,9 @@ type ServerInterface interface {
 	// Feature flags the apps use to gate UI
 	// (GET /v1/capabilities)
 	GetCapabilities(w http.ResponseWriter, r *http.Request)
+	// Catalog delta since a version (for client caches)
+	// (GET /v1/changes)
+	ListChanges(w http.ResponseWriter, r *http.Request, params ListChangesParams)
 	// Server-sent events — typed event stream
 	// (GET /v1/events)
 	StreamEvents(w http.ResponseWriter, r *http.Request, params StreamEventsParams)
@@ -17938,6 +18154,71 @@ func (siw *ServerInterfaceWrapper) GetCapabilities(w http.ResponseWriter, r *htt
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetCapabilities(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListChanges operation middleware
+func (siw *ServerInterfaceWrapper) ListChanges(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, DeviceTokenScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListChangesParams
+
+	// ------------- Optional query parameter "since" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "since", r.URL.Query(), &params.Since, runtime.BindQueryParameterOptions{Type: "integer", Format: "int64"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "since"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "since", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "cursor" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "cursor", r.URL.Query(), &params.Cursor, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "cursor"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "cursor", Err: err})
+		}
+		return
+	}
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "limit", r.URL.Query(), &params.Limit, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "limit"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListChanges(w, r, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -19724,6 +20005,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/artists/{artistId}/similar", wrapper.ListSimilarArtists)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/artists/{artistId}/tracks", wrapper.ListArtistTracks)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/capabilities", wrapper.GetCapabilities)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/changes", wrapper.ListChanges)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/events", wrapper.StreamEvents)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/external/artists/{name}", wrapper.GetExternalArtist)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/genres", wrapper.ListGenres)
@@ -21840,6 +22122,60 @@ func (response GetCapabilities401ApplicationProblemPlusJSONResponse) VisitGetCap
 	}
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListChangesRequestObject struct {
+	Params ListChangesParams
+}
+
+type ListChangesResponseObject interface {
+	VisitListChangesResponse(w http.ResponseWriter) error
+}
+
+type ListChanges200JSONResponse LibraryChanges
+
+func (response ListChanges200JSONResponse) VisitListChangesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListChanges401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response ListChanges401ApplicationProblemPlusJSONResponse) VisitListChangesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListChanges503ApplicationProblemPlusJSONResponse struct {
+	SourceUnavailableApplicationProblemPlusJSONResponse
+}
+
+func (response ListChanges503ApplicationProblemPlusJSONResponse) VisitListChangesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(503)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -24670,6 +25006,9 @@ type StrictServerInterface interface {
 	// Feature flags the apps use to gate UI
 	// (GET /v1/capabilities)
 	GetCapabilities(ctx context.Context, request GetCapabilitiesRequestObject) (GetCapabilitiesResponseObject, error)
+	// Catalog delta since a version (for client caches)
+	// (GET /v1/changes)
+	ListChanges(ctx context.Context, request ListChangesRequestObject) (ListChangesResponseObject, error)
 	// Server-sent events — typed event stream
 	// (GET /v1/events)
 	StreamEvents(ctx context.Context, request StreamEventsRequestObject) (StreamEventsResponseObject, error)
@@ -26126,6 +26465,32 @@ func (sh *strictHandler) GetCapabilities(w http.ResponseWriter, r *http.Request)
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(GetCapabilitiesResponseObject); ok {
 		if err := validResponse.VisitGetCapabilitiesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListChanges operation middleware
+func (sh *strictHandler) ListChanges(w http.ResponseWriter, r *http.Request, params ListChangesParams) {
+	var request ListChangesRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.ListChanges(ctx, request.(ListChangesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListChanges")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListChangesResponseObject); ok {
+		if err := validResponse.VisitListChangesResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

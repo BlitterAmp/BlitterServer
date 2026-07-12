@@ -216,6 +216,10 @@ func (Unimplemented) GetLibrary(ctx context.Context, request GetLibraryRequestOb
 	return nil, ErrNotImplemented
 }
 
+func (Unimplemented) ListChanges(ctx context.Context, request ListChangesRequestObject) (ListChangesResponseObject, error) {
+	return nil, ErrNotImplemented
+}
+
 func (Unimplemented) ListLoves(ctx context.Context, request ListLovesRequestObject) (ListLovesResponseObject, error) {
 	return nil, ErrNotImplemented
 }

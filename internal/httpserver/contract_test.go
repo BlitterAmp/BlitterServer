@@ -136,7 +136,7 @@ func TestEveryUnimplementedOperationAnswersHonestly(t *testing.T) {
 		"adminCreatePairCode": true, "adminListDevices": true, "adminRevokeDevice": true,
 		"adminGetServerSettings": true, "adminSetServerSettings": true,
 		"adminGetTranscodeSettings": true, "adminSetTranscodeSettings": true,
-		"getLibrary": true, "listArtists": true, "getArtist": true,
+		"getLibrary": true, "listChanges": true, "listArtists": true, "getArtist": true,
 		"listArtistAlbums": true, "listArtistTracks": true,
 		"listAlbums": true, "getAlbum": true, "listAlbumTracks": true,
 		"listTracks": true, "getTrack": true, "listGenres": true, "listGenreTracks": true,

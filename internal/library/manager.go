@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/BlitterAmp/BlitterServer/internal/events"
 	"github.com/BlitterAmp/BlitterServer/internal/logging"
 	"github.com/BlitterAmp/BlitterServer/internal/source"
 	"github.com/BlitterAmp/BlitterServer/internal/source/filesystem"
@@ -41,11 +42,16 @@ type Status struct {
 type Manager struct {
 	st      *store.Store
 	dataDir string
+	bus     *events.Bus
 
 	mu       sync.Mutex
 	src      source.MusicSource
 	scanning bool
 }
+
+// SetBus wires the event bus so completed scans publish library.changed. The
+// bus is constructed after the manager, so it's injected rather than passed in.
+func (m *Manager) SetBus(bus *events.Bus) { m.bus = bus }
 
 // NewManager restores the configured source (if any) from settings.
 func NewManager(st *store.Store, dataDir string) *Manager {
@@ -136,6 +142,15 @@ func (m *Manager) scan(src source.MusicSource) {
 	}
 	_ = m.st.SetSetting(ctx, settingLastScanError, "")
 	log.Info("scan complete", "duration_ms", time.Since(start).Milliseconds())
+
+	// Nudge connected clients to pull the catalog delta (GET /v1/changes).
+	if m.bus != nil {
+		if sum, err := m.st.GetLibrarySummary(ctx); err == nil {
+			_ = m.bus.Publish(ctx, "library.changed", "", map[string]any{
+				"libraryId": "lib_local", "updatedAt": sum.UpdatedAt,
+			})
+		}
+	}
 }
 
 func (m *Manager) runScan(ctx context.Context, src source.MusicSource) error {

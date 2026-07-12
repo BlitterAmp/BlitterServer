@@ -361,6 +361,40 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "503": { $ref: "#/components/responses/SourceUnavailable" }
 
+  /v1/changes:
+    get:
+      operationId: listChanges
+      tags: [library]
+      summary: Catalog delta since a version (for client caches)
+      description: >
+        Returns catalog entities (artists/albums/tracks) whose client-visible
+        content changed since `since` — a version from a prior sync or
+        `Library.version` — plus the ids of entities to drop. The intended flow:
+        bootstrap the cache from the paged list endpoints, record `Library.version`,
+        then call this (driven by the `library.changed` SSE event) for incremental
+        updates. Keyset-paginated: follow `nextCursor` until null, then the returned
+        `version` is the `since` for the next sync.
+      parameters:
+        - name: since
+          in: query
+          required: false
+          schema: { type: integer, format: int64, default: 0 }
+          description: The catalog version the client already holds. 0 returns everything.
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string }
+          description: Opaque continuation within a delta batch (from a prior nextCursor).
+        - $ref: "#/components/parameters/limit"
+      responses:
+        "200":
+          description: Catalog changes
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LibraryChanges" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/SourceUnavailable" }
+
   /v1/artists:
     get:
       operationId: listArtists
@@ -2126,7 +2160,7 @@ components:
 
     Library:
       type: object
-      required: [libraryId, title, updatedAt, counts]
+      required: [libraryId, title, updatedAt, version, counts]
       properties:
         libraryId: { type: string, example: lib_0m1n2b }
         title: { type: string }
@@ -2134,12 +2168,53 @@ components:
           type: integer
           format: int64
           description: Freshness anchor (max of source updatedAt/scannedAt); changes when the source rescans
+        version:
+          type: integer
+          format: int64
+          description: >
+            Monotonic catalog version (scan seq). The delta-sync cursor: after
+            bootstrapping the cache, pass this as `since` to GET /v1/changes.
         counts:
           type: object
           properties:
             artists: { type: integer }
             albums: { type: integer }
             tracks: { type: integer }
+
+    LibraryChanges:
+      type: object
+      required: [version, artists, albums, tracks, removedArtistIds, removedAlbumIds, removedTrackIds]
+      properties:
+        version:
+          type: integer
+          format: int64
+          description: Current catalog version. When nextCursor is null, use this as `since` next time.
+        nextCursor:
+          type: string
+          nullable: true
+          description: Continue this delta batch; null when drained.
+        artists:
+          type: array
+          description: Artists that changed (upsert into the cache).
+          items: { $ref: "#/components/schemas/Artist" }
+        albums:
+          type: array
+          description: Albums that changed (upsert into the cache).
+          items: { $ref: "#/components/schemas/Album" }
+        tracks:
+          type: array
+          description: Tracks that changed (upsert into the cache).
+          items: { $ref: "#/components/schemas/Track" }
+        removedArtistIds:
+          type: array
+          description: Artist ids the client should drop.
+          items: { type: string }
+        removedAlbumIds:
+          type: array
+          items: { type: string }
+        removedTrackIds:
+          type: array
+          items: { type: string }
 
     Artist:
       type: object
