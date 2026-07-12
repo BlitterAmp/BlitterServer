@@ -62,7 +62,7 @@ func TestEnrichAlbumArtFromCoverArtArchive(t *testing.T) {
 
 	e := New(st, nil, t.TempDir(), Config{})
 	e.MBBase, e.CAABase = mb.URL, caa.URL
-	e.mb = time.NewTicker(time.Millisecond).C // don't wait a real second in tests
+	e.mbInterval = 0
 	e.Run(ctx)
 
 	if need, _ := st.AlbumsNeedingArt(ctx, 10); len(need) != 0 {
@@ -80,7 +80,7 @@ func TestEnrichMarksTriedWhenNothingFound(t *testing.T) {
 
 	e := New(st, nil, t.TempDir(), Config{})
 	e.MBBase = mb.URL
-	e.mb = time.NewTicker(time.Millisecond).C
+	e.mbInterval = 0
 	e.Run(ctx)
 
 	// No art found, but it must be marked tried so we don't re-query forever.
@@ -119,10 +119,53 @@ func TestEnrichArtistPhotoFromFanart(t *testing.T) {
 		FanartKey: func(context.Context) string { return "test-key" },
 	})
 	e.MBBase, e.FanartBase = mb.URL, fanart.URL
-	e.mb = time.NewTicker(time.Millisecond).C
+	e.mbInterval = 0
 	e.Run(ctx)
 
 	if need, _ := st.ArtistsNeedingArt(ctx, 10); len(need) != 0 {
 		t.Fatalf("artist should have a photo (or be tried): %d remain", len(need))
+	}
+}
+
+func TestMusicBrainzRateWaitHonorsCancellation(t *testing.T) {
+	st, _ := seedAlbum(t)
+	e := New(st, nil, t.TempDir(), Config{})
+	e.mbInterval = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { e.Run(ctx); close(done) }()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("enricher ignored cancellation during MusicBrainz rate wait")
+	}
+}
+
+func TestAlbumEnrichmentDoesNotOverwriteArtAttachedDuringLookup(t *testing.T) {
+	st, ctx := seedAlbum(t)
+	needs, _ := st.AlbumsNeedingArt(ctx, 1)
+	newerID, err := st.UpsertArt(ctx, "newer-race", "image/jpeg", []byte("newer"), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if applied, err := st.SetAlbumArt(ctx, needs[0].AlbumID, newerID, 50); err != nil || !applied {
+			t.Errorf("attach newer art applied=%v err=%v", applied, err)
+		}
+		_, _ = w.Write([]byte(`{"release-groups":[{"id":"rg-race"}]}`))
+	}))
+	defer mb.Close()
+	caa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(pngBytes)
+	}))
+	defer caa.Close()
+	e := New(st, nil, t.TempDir(), Config{})
+	e.MBBase, e.CAABase, e.mbInterval = mb.URL, caa.URL, 0
+	e.Run(ctx)
+	album, found, err := st.GetAlbum(ctx, needs[0].AlbumID)
+	if err != nil || !found || album.ArtID != newerID {
+		t.Fatalf("newer art overwritten: found=%v art=%q err=%v", found, album.ArtID, err)
 	}
 }
