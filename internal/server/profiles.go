@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 
@@ -202,7 +201,7 @@ func (s *Server) CompleteLastfmAuth(ctx context.Context, req api.CompleteLastfmA
 		body := "<!doctype html><title>Last.fm connection failed</title><p>This authorization is invalid or expired. Return to BlitterAmp and try again.</p>"
 		return api.CompleteLastfmAuth400TexthtmlResponse{Body: strings.NewReader(body), ContentLength: int64(len(body)), Headers: api.CompleteLastfmAuth400ResponseHeaders{CacheControl: &cache, ContentSecurityPolicy: &csp, ReferrerPolicy: &referrer}}
 	}
-	if !regexp.MustCompile(`^[0-9a-fA-F]{32}$`).MatchString(req.Params.Token) {
+	if !validLastfmToken(req.Params.Token) {
 		return fail(), nil
 	}
 	claimRaw := make([]byte, 16)
@@ -234,6 +233,18 @@ func (s *Server) CompleteLastfmAuth(ctx context.Context, req api.CompleteLastfmA
 	completed = true
 	body := "<!doctype html><title>Last.fm connected</title><p>Connected. You can close this window and return to BlitterAmp.</p>"
 	return api.CompleteLastfmAuth200TexthtmlResponse{Body: strings.NewReader(body), ContentLength: int64(len(body)), Headers: api.CompleteLastfmAuth200ResponseHeaders{CacheControl: &cache, ContentSecurityPolicy: &csp, ReferrerPolicy: &referrer}}, nil
+}
+
+func validLastfmToken(token string) bool {
+	if len(token) == 0 || len(token) > 128 {
+		return false
+	}
+	for _, char := range token {
+		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z')) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) AdminAnonymizeProfileData(ctx context.Context, req api.AdminAnonymizeProfileDataRequestObject) (api.AdminAnonymizeProfileDataResponseObject, error) {

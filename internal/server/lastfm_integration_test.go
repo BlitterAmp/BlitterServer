@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -216,12 +215,12 @@ func TestLastfmCallbackStateAndProfileIsolation(t *testing.T) {
 		t.Fatalf("callback: %s", cb)
 	}
 	state := cb.Query().Get("state")
-	bad, _ := s.CompleteLastfmAuth(context.Background(), api.CompleteLastfmAuthRequestObject{Params: api.CompleteLastfmAuthParams{State: state, Token: "bad"}})
+	bad, _ := s.CompleteLastfmAuth(context.Background(), api.CompleteLastfmAuthRequestObject{Params: api.CompleteLastfmAuthParams{State: state, Token: "bad!"}})
 	if _, ok := bad.(api.CompleteLastfmAuth400TexthtmlResponse); !ok {
 		t.Fatalf("malformed: %T", bad)
 	}
 	f.exchangeErr = &lastfm.ProviderError{Kind: lastfm.ErrorTemporary, Code: 11}
-	valid := strings.Repeat("a", 32)
+	valid := "G234567890abcdefghijklmnopqrstu"
 	_, _ = s.CompleteLastfmAuth(context.Background(), api.CompleteLastfmAuthRequestObject{Params: api.CompleteLastfmAuthParams{State: state, Token: valid}})
 	f.exchangeErr = nil
 	okResp, err := s.CompleteLastfmAuth(context.Background(), api.CompleteLastfmAuthRequestObject{Params: api.CompleteLastfmAuthParams{State: state, Token: valid}})
