@@ -28,6 +28,18 @@ func (Unimplemented) AdminDeleteLastfm(ctx context.Context, request AdminDeleteL
 	return nil, ErrNotImplemented
 }
 
+func (Unimplemented) AdminGetFanart(ctx context.Context, request AdminGetFanartRequestObject) (AdminGetFanartResponseObject, error) {
+	return nil, ErrNotImplemented
+}
+
+func (Unimplemented) AdminSetFanart(ctx context.Context, request AdminSetFanartRequestObject) (AdminSetFanartResponseObject, error) {
+	return nil, ErrNotImplemented
+}
+
+func (Unimplemented) AdminDeleteFanart(ctx context.Context, request AdminDeleteFanartRequestObject) (AdminDeleteFanartResponseObject, error) {
+	return nil, ErrNotImplemented
+}
+
 func (Unimplemented) AdminGetLastfm(ctx context.Context, request AdminGetLastfmRequestObject) (AdminGetLastfmResponseObject, error) {
 	return nil, ErrNotImplemented
 }

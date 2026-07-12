@@ -1593,6 +1593,11 @@ type adminSessionContextKey string
 // deviceTokenContextKey is the context key for deviceToken security scheme
 type deviceTokenContextKey string
 
+// AdminSetFanartJSONBody defines parameters for AdminSetFanart.
+type AdminSetFanartJSONBody struct {
+	ApiKey string `json:"apiKey"`
+}
+
 // AdminSetLastfmJSONBody defines parameters for AdminSetLastfm.
 type AdminSetLastfmJSONBody struct {
 	ApiKey       string `json:"apiKey"`
@@ -1916,6 +1921,9 @@ type ListTracksParams struct {
 // ListTracksParamsSort defines parameters for ListTracks.
 type ListTracksParamsSort string
 
+// AdminSetFanartJSONRequestBody defines body for AdminSetFanart for application/json ContentType.
+type AdminSetFanartJSONRequestBody AdminSetFanartJSONBody
+
 // AdminSetLastfmJSONRequestBody defines body for AdminSetLastfm for application/json ContentType.
 type AdminSetLastfmJSONRequestBody AdminSetLastfmJSONBody
 
@@ -2081,6 +2089,17 @@ type ClientInterface interface {
 
 	// AdminRevokeDevice request
 	AdminRevokeDevice(ctx context.Context, deviceId string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// AdminDeleteFanart request
+	AdminDeleteFanart(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// AdminGetFanart request
+	AdminGetFanart(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// AdminSetFanartWithBody request with any body
+	AdminSetFanartWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	AdminSetFanart(ctx context.Context, body AdminSetFanartJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// AdminDeleteLastfm request
 	AdminDeleteLastfm(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -2461,6 +2480,54 @@ func (c *Client) AdminListDevices(ctx context.Context, reqEditors ...RequestEdit
 
 func (c *Client) AdminRevokeDevice(ctx context.Context, deviceId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewAdminRevokeDeviceRequest(c.Server, deviceId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AdminDeleteFanart(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminDeleteFanartRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AdminGetFanart(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminGetFanartRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AdminSetFanartWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminSetFanartRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AdminSetFanart(ctx context.Context, body AdminSetFanartJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminSetFanartRequest(c.Server, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4100,6 +4167,100 @@ func NewAdminRevokeDeviceRequest(server string, deviceId string) (*http.Request,
 	if err != nil {
 		return nil, err
 	}
+
+	return req, nil
+}
+
+// NewAdminDeleteFanartRequest generates requests for AdminDeleteFanart
+func NewAdminDeleteFanartRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/api/integrations/fanart")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodDelete, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewAdminGetFanartRequest generates requests for AdminGetFanart
+func NewAdminGetFanartRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/api/integrations/fanart")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewAdminSetFanartRequest calls the generic AdminSetFanart builder with application/json body
+func NewAdminSetFanartRequest(server string, body AdminSetFanartJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewAdminSetFanartRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewAdminSetFanartRequestWithBody generates requests for AdminSetFanart with any type of body
+func NewAdminSetFanartRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/api/integrations/fanart")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPut, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -8026,6 +8187,17 @@ type ClientWithResponsesInterface interface {
 	// AdminRevokeDeviceWithResponse request
 	AdminRevokeDeviceWithResponse(ctx context.Context, deviceId string, reqEditors ...RequestEditorFn) (*AdminRevokeDeviceResponse, error)
 
+	// AdminDeleteFanartWithResponse request
+	AdminDeleteFanartWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AdminDeleteFanartResponse, error)
+
+	// AdminGetFanartWithResponse request
+	AdminGetFanartWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AdminGetFanartResponse, error)
+
+	// AdminSetFanartWithBodyWithResponse request with any body
+	AdminSetFanartWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AdminSetFanartResponse, error)
+
+	AdminSetFanartWithResponse(ctx context.Context, body AdminSetFanartJSONRequestBody, reqEditors ...RequestEditorFn) (*AdminSetFanartResponse, error)
+
 	// AdminDeleteLastfmWithResponse request
 	AdminDeleteLastfmWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AdminDeleteLastfmResponse, error)
 
@@ -8447,6 +8619,99 @@ func (r AdminRevokeDeviceResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r AdminRevokeDeviceResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type AdminDeleteFanartResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	ApplicationproblemJSON401 *Unauthorized
+}
+
+// Status returns HTTPResponse.Status
+func (r AdminDeleteFanartResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r AdminDeleteFanartResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r AdminDeleteFanartResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type AdminGetFanartResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *struct {
+		Configured bool `json:"configured"`
+	}
+	ApplicationproblemJSON401 *Unauthorized
+}
+
+// Status returns HTTPResponse.Status
+func (r AdminGetFanartResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r AdminGetFanartResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r AdminGetFanartResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type AdminSetFanartResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	ApplicationproblemJSON401 *Unauthorized
+}
+
+// Status returns HTTPResponse.Status
+func (r AdminSetFanartResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r AdminSetFanartResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r AdminSetFanartResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -11734,6 +11999,41 @@ func (c *ClientWithResponses) AdminRevokeDeviceWithResponse(ctx context.Context,
 	return ParseAdminRevokeDeviceResponse(rsp)
 }
 
+// AdminDeleteFanartWithResponse request returning *AdminDeleteFanartResponse
+func (c *ClientWithResponses) AdminDeleteFanartWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AdminDeleteFanartResponse, error) {
+	rsp, err := c.AdminDeleteFanart(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAdminDeleteFanartResponse(rsp)
+}
+
+// AdminGetFanartWithResponse request returning *AdminGetFanartResponse
+func (c *ClientWithResponses) AdminGetFanartWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AdminGetFanartResponse, error) {
+	rsp, err := c.AdminGetFanart(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAdminGetFanartResponse(rsp)
+}
+
+// AdminSetFanartWithBodyWithResponse request with arbitrary body returning *AdminSetFanartResponse
+func (c *ClientWithResponses) AdminSetFanartWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AdminSetFanartResponse, error) {
+	rsp, err := c.AdminSetFanartWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAdminSetFanartResponse(rsp)
+}
+
+func (c *ClientWithResponses) AdminSetFanartWithResponse(ctx context.Context, body AdminSetFanartJSONRequestBody, reqEditors ...RequestEditorFn) (*AdminSetFanartResponse, error) {
+	rsp, err := c.AdminSetFanart(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAdminSetFanartResponse(rsp)
+}
+
 // AdminDeleteLastfmWithResponse request returning *AdminDeleteLastfmResponse
 func (c *ClientWithResponses) AdminDeleteLastfmWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AdminDeleteLastfmResponse, error) {
 	rsp, err := c.AdminDeleteLastfm(ctx, reqEditors...)
@@ -12944,6 +13244,93 @@ func ParseAdminRevokeDeviceResponse(rsp *http.Response) (*AdminRevokeDeviceRespo
 			return nil, err
 		}
 		response.ApplicationproblemJSON404 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseAdminDeleteFanartResponse parses an HTTP response from a AdminDeleteFanartWithResponse call
+func ParseAdminDeleteFanartResponse(rsp *http.Response) (*AdminDeleteFanartResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AdminDeleteFanartResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest Unauthorized
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseAdminGetFanartResponse parses an HTTP response from a AdminGetFanartWithResponse call
+func ParseAdminGetFanartResponse(rsp *http.Response) (*AdminGetFanartResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AdminGetFanartResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest struct {
+			Configured bool `json:"configured"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest Unauthorized
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseAdminSetFanartResponse parses an HTTP response from a AdminSetFanartWithResponse call
+func ParseAdminSetFanartResponse(rsp *http.Response) (*AdminSetFanartResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AdminSetFanartResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest Unauthorized
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
 
 	}
 
@@ -16563,6 +16950,15 @@ type ServerInterface interface {
 	// Revoke a device (its token stops working immediately)
 	// (DELETE /admin/api/devices/{deviceId})
 	AdminRevokeDevice(w http.ResponseWriter, r *http.Request, deviceId string)
+	// Remove the fanart.tv API key
+	// (DELETE /admin/api/integrations/fanart)
+	AdminDeleteFanart(w http.ResponseWriter, r *http.Request)
+	// fanart.tv config state
+	// (GET /admin/api/integrations/fanart)
+	AdminGetFanart(w http.ResponseWriter, r *http.Request)
+	// Set the fanart.tv API key
+	// (PUT /admin/api/integrations/fanart)
+	AdminSetFanart(w http.ResponseWriter, r *http.Request)
 	// Disconnect last.fm
 	// (DELETE /admin/api/integrations/lastfm)
 	AdminDeleteLastfm(w http.ResponseWriter, r *http.Request)
@@ -16923,6 +17319,66 @@ func (siw *ServerInterfaceWrapper) AdminRevokeDevice(w http.ResponseWriter, r *h
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.AdminRevokeDevice(w, r, deviceId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// AdminDeleteFanart operation middleware
+func (siw *ServerInterfaceWrapper) AdminDeleteFanart(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, AdminSessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AdminDeleteFanart(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// AdminGetFanart operation middleware
+func (siw *ServerInterfaceWrapper) AdminGetFanart(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, AdminSessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AdminGetFanart(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// AdminSetFanart operation middleware
+func (siw *ServerInterfaceWrapper) AdminSetFanart(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, AdminSessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AdminSetFanart(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -19959,6 +20415,9 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/api/devices", wrapper.AdminListDevices)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/admin/api/devices/{deviceId}", wrapper.AdminRevokeDevice)
+	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/admin/api/integrations/fanart", wrapper.AdminDeleteFanart)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/api/integrations/fanart", wrapper.AdminGetFanart)
+	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/admin/api/integrations/fanart", wrapper.AdminSetFanart)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/admin/api/integrations/lastfm", wrapper.AdminDeleteLastfm)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/api/integrations/lastfm", wrapper.AdminGetLastfm)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/admin/api/integrations/lastfm", wrapper.AdminSetLastfm)
@@ -20154,6 +20613,108 @@ func (response AdminRevokeDevice404ApplicationProblemPlusJSONResponse) VisitAdmi
 	}
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminDeleteFanartRequestObject struct {
+}
+
+type AdminDeleteFanartResponseObject interface {
+	VisitAdminDeleteFanartResponse(w http.ResponseWriter) error
+}
+
+type AdminDeleteFanart204Response struct {
+}
+
+func (response AdminDeleteFanart204Response) VisitAdminDeleteFanartResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type AdminDeleteFanart401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response AdminDeleteFanart401ApplicationProblemPlusJSONResponse) VisitAdminDeleteFanartResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminGetFanartRequestObject struct {
+}
+
+type AdminGetFanartResponseObject interface {
+	VisitAdminGetFanartResponse(w http.ResponseWriter) error
+}
+
+type AdminGetFanart200JSONResponse struct {
+	Configured bool `json:"configured"`
+}
+
+func (response AdminGetFanart200JSONResponse) VisitAdminGetFanartResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminGetFanart401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response AdminGetFanart401ApplicationProblemPlusJSONResponse) VisitAdminGetFanartResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminSetFanartRequestObject struct {
+	Body *AdminSetFanartJSONRequestBody
+}
+
+type AdminSetFanartResponseObject interface {
+	VisitAdminSetFanartResponse(w http.ResponseWriter) error
+}
+
+type AdminSetFanart204Response struct {
+}
+
+func (response AdminSetFanart204Response) VisitAdminSetFanartResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type AdminSetFanart401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response AdminSetFanart401ApplicationProblemPlusJSONResponse) VisitAdminSetFanartResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -24868,6 +25429,15 @@ type StrictServerInterface interface {
 	// Revoke a device (its token stops working immediately)
 	// (DELETE /admin/api/devices/{deviceId})
 	AdminRevokeDevice(ctx context.Context, request AdminRevokeDeviceRequestObject) (AdminRevokeDeviceResponseObject, error)
+	// Remove the fanart.tv API key
+	// (DELETE /admin/api/integrations/fanart)
+	AdminDeleteFanart(ctx context.Context, request AdminDeleteFanartRequestObject) (AdminDeleteFanartResponseObject, error)
+	// fanart.tv config state
+	// (GET /admin/api/integrations/fanart)
+	AdminGetFanart(ctx context.Context, request AdminGetFanartRequestObject) (AdminGetFanartResponseObject, error)
+	// Set the fanart.tv API key
+	// (PUT /admin/api/integrations/fanart)
+	AdminSetFanart(ctx context.Context, request AdminSetFanartRequestObject) (AdminSetFanartResponseObject, error)
 	// Disconnect last.fm
 	// (DELETE /admin/api/integrations/lastfm)
 	AdminDeleteLastfm(ctx context.Context, request AdminDeleteLastfmRequestObject) (AdminDeleteLastfmResponseObject, error)
@@ -25248,6 +25818,85 @@ func (sh *strictHandler) AdminRevokeDevice(w http.ResponseWriter, r *http.Reques
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(AdminRevokeDeviceResponseObject); ok {
 		if err := validResponse.VisitAdminRevokeDeviceResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AdminDeleteFanart operation middleware
+func (sh *strictHandler) AdminDeleteFanart(w http.ResponseWriter, r *http.Request) {
+	var request AdminDeleteFanartRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.AdminDeleteFanart(ctx, request.(AdminDeleteFanartRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AdminDeleteFanart")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(AdminDeleteFanartResponseObject); ok {
+		if err := validResponse.VisitAdminDeleteFanartResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AdminGetFanart operation middleware
+func (sh *strictHandler) AdminGetFanart(w http.ResponseWriter, r *http.Request) {
+	var request AdminGetFanartRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.AdminGetFanart(ctx, request.(AdminGetFanartRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AdminGetFanart")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(AdminGetFanartResponseObject); ok {
+		if err := validResponse.VisitAdminGetFanartResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AdminSetFanart operation middleware
+func (sh *strictHandler) AdminSetFanart(w http.ResponseWriter, r *http.Request) {
+	var request AdminSetFanartRequestObject
+
+	var body AdminSetFanartJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.AdminSetFanart(ctx, request.(AdminSetFanartRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AdminSetFanart")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(AdminSetFanartResponseObject); ok {
+		if err := validResponse.VisitAdminSetFanartResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

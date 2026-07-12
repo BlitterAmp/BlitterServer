@@ -3,15 +3,18 @@
 package httpserver
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
 	blitterserver "github.com/BlitterAmp/BlitterServer"
 	"github.com/BlitterAmp/BlitterServer/internal/api"
 	"github.com/BlitterAmp/BlitterServer/internal/artifacts"
+	"github.com/BlitterAmp/BlitterServer/internal/enrich"
 	"github.com/BlitterAmp/BlitterServer/internal/events"
 	"github.com/BlitterAmp/BlitterServer/internal/library"
 	"github.com/BlitterAmp/BlitterServer/internal/logging"
@@ -62,6 +65,10 @@ func Handler(st *store.Store, mgr *library.Manager, dataDir, version string) htt
 
 	bus := events.NewBus(st)
 	mgr.SetBus(bus)
+	mgr.SetEnricher(enrich.New(st, bus, filepath.Join(dataDir, "art"), enrich.Config{
+		LastfmKey: func(ctx context.Context) string { v, _, _ := st.GetSetting(ctx, "lastfm_api_key"); return v },
+		FanartKey: func(ctx context.Context) string { v, _, _ := st.GetSetting(ctx, "fanart_api_key"); return v },
+	}))
 	artMgr := artifacts.NewManager(st, mgr, bus, dataDir)
 	artMgr.Start()
 	strict := api.NewStrictHandlerWithOptions(server.NewFull(st, mgr, bus, artMgr, version), nil, api.StrictHTTPServerOptions{

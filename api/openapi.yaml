@@ -1781,6 +1781,50 @@ paths:
         "204": { description: Removed }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
+  /admin/api/integrations/fanart:
+    get:
+      operationId: adminGetFanart
+      tags: [admin]
+      summary: fanart.tv config state
+      description: fanart.tv supplies artist photos (and extra art) during enrichment.
+      security: [{ adminSession: [] }]
+      responses:
+        "200":
+          description: Config
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [configured]
+                properties:
+                  configured: { type: boolean }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    put:
+      operationId: adminSetFanart
+      tags: [admin]
+      summary: Set the fanart.tv API key
+      security: [{ adminSession: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [apiKey]
+              properties:
+                apiKey: { type: string }
+      responses:
+        "204": { description: Saved }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    delete:
+      operationId: adminDeleteFanart
+      tags: [admin]
+      summary: Remove the fanart.tv API key
+      security: [{ adminSession: [] }]
+      responses:
+        "204": { description: Removed }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
   /admin/api/profiles:
     get:
       operationId: adminListProfiles
