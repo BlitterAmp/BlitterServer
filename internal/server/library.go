@@ -109,10 +109,83 @@ func (s *Server) GetLibrary(ctx context.Context, _ api.GetLibraryRequestObject) 
 		LibraryId: "lib_local",
 		Title:     "Library",
 		UpdatedAt: sum.UpdatedAt,
+		Version:   sum.Version,
 	}
 	resp.Counts.Artists = &sum.Artists
 	resp.Counts.Albums = &sum.Albums
 	resp.Counts.Tracks = &sum.Tracks
+	return resp, nil
+}
+
+// ListChanges returns the catalog delta since a client's known version. Missing
+// rows become removed ids; changed rows are hydrated to the same shapes the list
+// endpoints return. Bootstrap is via the paged lists; this is the incremental path.
+func (s *Server) ListChanges(ctx context.Context, req api.ListChangesRequestObject) (api.ListChangesResponseObject, error) {
+	var since int64
+	if req.Params.Since != nil {
+		since = *req.Params.Since
+	}
+	cur := ""
+	if req.Params.Cursor != nil {
+		cur = *req.Params.Cursor
+	}
+	limit := 200
+	if l := req.Params.Limit; l != nil && int(*l) > 0 && int(*l) <= 1000 {
+		limit = int(*l)
+	}
+	changes, next, err := s.st.ChangesSince(ctx, since, cur, limit)
+	if err != nil {
+		return nil, err
+	}
+	sum, err := s.st.GetLibrarySummary(ctx)
+	if err != nil {
+		return nil, err
+	}
+	resp := api.ListChanges200JSONResponse{
+		Version:          sum.Version,
+		Artists:          []api.Artist{},
+		Albums:           []api.Album{},
+		Tracks:           []api.Track{},
+		RemovedArtistIds: []string{},
+		RemovedAlbumIds:  []string{},
+		RemovedTrackIds:  []string{},
+	}
+	if next != "" {
+		resp.NextCursor = &next
+	}
+	for _, ch := range changes {
+		if ch.Missing {
+			switch ch.Kind {
+			case "artist":
+				resp.RemovedArtistIds = append(resp.RemovedArtistIds, ch.ID)
+			case "album":
+				resp.RemovedAlbumIds = append(resp.RemovedAlbumIds, ch.ID)
+			case "track":
+				resp.RemovedTrackIds = append(resp.RemovedTrackIds, ch.ID)
+			}
+			continue
+		}
+		switch ch.Kind {
+		case "artist":
+			if a, ok, err := s.st.GetArtist(ctx, ch.ID); err != nil {
+				return nil, err
+			} else if ok {
+				resp.Artists = append(resp.Artists, apiArtist(a))
+			}
+		case "album":
+			if a, ok, err := s.st.GetAlbum(ctx, ch.ID); err != nil {
+				return nil, err
+			} else if ok {
+				resp.Albums = append(resp.Albums, apiAlbum(a))
+			}
+		case "track":
+			if tr, ok, err := s.st.GetTrack(ctx, ch.ID); err != nil {
+				return nil, err
+			} else if ok {
+				resp.Tracks = append(resp.Tracks, apiTrack(tr))
+			}
+		}
+	}
 	return resp, nil
 }
 

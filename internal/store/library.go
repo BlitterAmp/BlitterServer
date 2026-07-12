@@ -61,9 +61,25 @@ type TrackRow struct {
 // LibrarySummary backs GET /v1/library.
 type LibrarySummary struct {
 	UpdatedAt int64
+	Version   int64 // scan seq; the delta-sync cursor (see ChangesSince)
 	Artists   int
 	Albums    int
 	Tracks    int
+}
+
+// LibraryChange is one entity that changed since a client's last-known version.
+// Kind is "artist" | "album" | "track"; Missing rows tell the client to drop it.
+type LibraryChange struct {
+	ChangeSeq int64
+	Kind      string
+	ID        string
+	Missing   bool
+}
+
+type changeCursor struct {
+	S  int64  `json:"s"`
+	K  string `json:"k"`
+	ID string `json:"id"`
 }
 
 // LibrarySearch groups SearchLibrary results.
@@ -106,7 +122,7 @@ func (s *Store) UpsertTrack(ctx context.Context, kind string, m source.TrackMeta
 	if errors.Is(err, sql.ErrNoRows) {
 		artistID = NewID("art")
 		_, err = s.db.ExecContext(ctx,
-			`INSERT INTO artists (artist_id, name, created_at) VALUES (?, ?, ?)`, artistID, grouping, now)
+			`INSERT INTO artists (artist_id, name, created_at, change_seq) VALUES (?, ?, ?, ?)`, artistID, grouping, now, seq)
 	}
 	if err != nil {
 		return fmt.Errorf("upsert artist: %w", err)
@@ -118,8 +134,8 @@ func (s *Store) UpsertTrack(ctx context.Context, kind string, m source.TrackMeta
 	if errors.Is(err, sql.ErrNoRows) {
 		albumID = NewID("alb")
 		_, err = s.db.ExecContext(ctx,
-			`INSERT INTO albums (album_id, artist_id, title, year, created_at) VALUES (?, ?, ?, ?, ?)`,
-			albumID, artistID, m.Album, nullInt(m.Year), now)
+			`INSERT INTO albums (album_id, artist_id, title, year, created_at, change_seq) VALUES (?, ?, ?, ?, ?, ?)`,
+			albumID, artistID, m.Album, nullInt(m.Year), now, seq)
 	}
 	if err != nil {
 		return fmt.Errorf("upsert album: %w", err)
@@ -128,8 +144,8 @@ func (s *Store) UpsertTrack(ctx context.Context, kind string, m source.TrackMeta
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO tracks (track_id, album_id, artist_id, artist_name, title, idx, disc, genre,
 		                    duration_ms, container, codec, bitrate_kbps, size_bytes,
-		                    source_kind, native_id, version, art_id, seen_seq, missing, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+		                    source_kind, native_id, version, art_id, seen_seq, missing, created_at, change_seq)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
 		ON CONFLICT(source_kind, native_id) DO UPDATE SET
 		    album_id = excluded.album_id, artist_id = excluded.artist_id,
 		    artist_name = excluded.artist_name, title = excluded.title,
@@ -138,10 +154,26 @@ func (s *Store) UpsertTrack(ctx context.Context, kind string, m source.TrackMeta
 		    codec = excluded.codec, bitrate_kbps = excluded.bitrate_kbps,
 		    size_bytes = excluded.size_bytes, version = excluded.version,
 		    art_id = COALESCE(excluded.art_id, tracks.art_id),
-		    seen_seq = excluded.seen_seq, missing = 0`,
+		    seen_seq = excluded.seen_seq, missing = 0,
+		    change_seq = CASE WHEN tracks.missing = 1
+		        OR tracks.album_id IS NOT excluded.album_id
+		        OR tracks.artist_id IS NOT excluded.artist_id
+		        OR tracks.artist_name IS NOT excluded.artist_name
+		        OR tracks.title IS NOT excluded.title
+		        OR tracks.idx IS NOT excluded.idx
+		        OR tracks.disc IS NOT excluded.disc
+		        OR tracks.genre IS NOT excluded.genre
+		        OR tracks.duration_ms IS NOT excluded.duration_ms
+		        OR tracks.container IS NOT excluded.container
+		        OR tracks.codec IS NOT excluded.codec
+		        OR tracks.bitrate_kbps IS NOT excluded.bitrate_kbps
+		        OR tracks.size_bytes IS NOT excluded.size_bytes
+		        OR tracks.version IS NOT excluded.version
+		        OR (excluded.art_id IS NOT NULL AND excluded.art_id IS NOT tracks.art_id)
+		        THEN ? ELSE tracks.change_seq END`,
 		NewID("trk"), albumID, artistID, m.Artist, m.Title, nullInt(m.Index), nullInt(m.Disc), m.Genre,
 		m.DurationMs, m.Container, m.Codec, nullInt(m.BitrateKbps), m.SizeBytes,
-		kind, m.NativeID, m.Version, nullStr(artID), seq, now)
+		kind, m.NativeID, m.Version, nullStr(artID), seq, now, seq, seq)
 	if err != nil {
 		return fmt.Errorf("upsert track: %w", err)
 	}
@@ -151,13 +183,26 @@ func (s *Store) UpsertTrack(ctx context.Context, kind string, m source.TrackMeta
 // FinishScan marks unseen rows missing, propagates art track→album→artist,
 // and bumps the library freshness anchor.
 func (s *Store) FinishScan(ctx context.Context, kind string, seq int64) error {
+	seqStr := strconv.FormatInt(seq, 10)
 	for _, q := range []string{
-		`UPDATE tracks SET missing = 1 WHERE source_kind = '` + kind + `' AND seen_seq < ` + strconv.FormatInt(seq, 10),
-		`UPDATE albums SET missing = (SELECT count(*) FROM tracks WHERE tracks.album_id = albums.album_id AND tracks.missing = 0) = 0`,
-		`UPDATE artists SET missing = (SELECT count(*) FROM tracks WHERE tracks.artist_id = artists.artist_id AND tracks.missing = 0) = 0`,
-		`UPDATE albums SET art_id = (SELECT t.art_id FROM tracks t WHERE t.album_id = albums.album_id AND t.art_id IS NOT NULL AND t.missing = 0 ORDER BY t.disc, t.idx LIMIT 1)
+		// Newly-missing tracks: flip + stamp only rows that were present.
+		`UPDATE tracks SET missing = 1, change_seq = ` + seqStr + `
+		 WHERE source_kind = '` + kind + `' AND seen_seq < ` + seqStr + ` AND missing = 0`,
+		// Recompute album/artist missing; stamp only rows whose flag actually flips.
+		`UPDATE albums SET
+		    change_seq = CASE WHEN missing != ((SELECT count(*) FROM tracks WHERE tracks.album_id = albums.album_id AND tracks.missing = 0) = 0) THEN ` + seqStr + ` ELSE change_seq END,
+		    missing = (SELECT count(*) FROM tracks WHERE tracks.album_id = albums.album_id AND tracks.missing = 0) = 0`,
+		`UPDATE artists SET
+		    change_seq = CASE WHEN missing != ((SELECT count(*) FROM tracks WHERE tracks.artist_id = artists.artist_id AND tracks.missing = 0) = 0) THEN ` + seqStr + ` ELSE change_seq END,
+		    missing = (SELECT count(*) FROM tracks WHERE tracks.artist_id = artists.artist_id AND tracks.missing = 0) = 0`,
+		// Propagate art up track→album→artist; stamp rows that actually acquire art.
+		`UPDATE albums SET
+		    change_seq = CASE WHEN (SELECT t.art_id FROM tracks t WHERE t.album_id = albums.album_id AND t.art_id IS NOT NULL AND t.missing = 0 ORDER BY t.disc, t.idx LIMIT 1) IS NOT NULL THEN ` + seqStr + ` ELSE change_seq END,
+		    art_id = (SELECT t.art_id FROM tracks t WHERE t.album_id = albums.album_id AND t.art_id IS NOT NULL AND t.missing = 0 ORDER BY t.disc, t.idx LIMIT 1)
 		 WHERE art_id IS NULL`,
-		`UPDATE artists SET art_id = (SELECT a.art_id FROM albums a WHERE a.artist_id = artists.artist_id AND a.art_id IS NOT NULL AND a.missing = 0 ORDER BY a.year LIMIT 1)
+		`UPDATE artists SET
+		    change_seq = CASE WHEN (SELECT a.art_id FROM albums a WHERE a.artist_id = artists.artist_id AND a.art_id IS NOT NULL AND a.missing = 0 ORDER BY a.year LIMIT 1) IS NOT NULL THEN ` + seqStr + ` ELSE change_seq END,
+		    art_id = (SELECT a.art_id FROM albums a WHERE a.artist_id = artists.artist_id AND a.art_id IS NOT NULL AND a.missing = 0 ORDER BY a.year LIMIT 1)
 		 WHERE art_id IS NULL`,
 	} {
 		if _, err := s.db.ExecContext(ctx, q); err != nil {
@@ -214,12 +259,70 @@ func (s *Store) GetLibrarySummary(ctx context.Context) (LibrarySummary, error) {
 		return sum, err
 	}
 	sum.UpdatedAt, _ = strconv.ParseInt(v, 10, 64)
+	sv, _, err := s.GetSetting(ctx, "library_scan_seq")
+	if err != nil {
+		return sum, err
+	}
+	sum.Version, _ = strconv.ParseInt(sv, 10, 64)
 	err = s.db.QueryRowContext(ctx, `
 		SELECT (SELECT count(*) FROM artists WHERE missing = 0),
 		       (SELECT count(*) FROM albums WHERE missing = 0),
 		       (SELECT count(*) FROM tracks WHERE missing = 0)`).
 		Scan(&sum.Artists, &sum.Albums, &sum.Tracks)
 	return sum, err
+}
+
+// ChangesSince returns entities whose change_seq is greater than the client's
+// last-known version, keyset-paginated over (change_seq, kind, id). Missing rows
+// are included so the client learns to drop them. nextCursor is "" when drained.
+func (s *Store) ChangesSince(ctx context.Context, since int64, cur string, limit int) ([]LibraryChange, string, error) {
+	var c changeCursor
+	if cur != "" {
+		b, err := base64.RawURLEncoding.DecodeString(cur)
+		if err != nil {
+			return nil, "", fmt.Errorf("cursor: %w", err)
+		}
+		if err := json.Unmarshal(b, &c); err != nil {
+			return nil, "", fmt.Errorf("cursor: %w", err)
+		}
+	}
+	where := "change_seq > ?"
+	args := []any{since}
+	if cur != "" {
+		where += " AND (change_seq > ? OR (change_seq = ? AND (kind > ? OR (kind = ? AND id > ?))))"
+		args = append(args, c.S, c.S, c.K, c.K, c.ID)
+	}
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT change_seq, kind, id, missing FROM (
+			SELECT change_seq, 'artist' AS kind, artist_id AS id, missing FROM artists
+			UNION ALL SELECT change_seq, 'album', album_id, missing FROM albums
+			UNION ALL SELECT change_seq, 'track', track_id, missing FROM tracks
+		) WHERE %s ORDER BY change_seq, kind, id LIMIT %d`, where, limit+1), args...)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close()
+	var out []LibraryChange
+	for rows.Next() {
+		var ch LibraryChange
+		var missing int
+		if err := rows.Scan(&ch.ChangeSeq, &ch.Kind, &ch.ID, &missing); err != nil {
+			return nil, "", err
+		}
+		ch.Missing = missing != 0
+		out = append(out, ch)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if len(out) > limit {
+		out = out[:limit]
+		last := out[limit-1]
+		b, _ := json.Marshal(changeCursor{S: last.ChangeSeq, K: last.Kind, ID: last.ID})
+		next = base64.RawURLEncoding.EncodeToString(b)
+	}
+	return out, next, nil
 }
 
 // cursor is the stateless keyset token: last row's sort key + id.

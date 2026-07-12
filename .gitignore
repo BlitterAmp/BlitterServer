@@ -2,3 +2,6 @@
 /blitterserver
 /web/admin/dist/*
 !/web/admin/dist/.gitkeep
+
+# macOS
+.DS_Store

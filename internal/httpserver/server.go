@@ -61,6 +61,7 @@ func Handler(st *store.Store, mgr *library.Manager, dataDir, version string) htt
 	})
 
 	bus := events.NewBus(st)
+	mgr.SetBus(bus)
 	artMgr := artifacts.NewManager(st, mgr, bus, dataDir)
 	artMgr.Start()
 	strict := api.NewStrictHandlerWithOptions(server.NewFull(st, mgr, bus, artMgr, version), nil, api.StrictHTTPServerOptions{
