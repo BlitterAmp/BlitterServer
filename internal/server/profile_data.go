@@ -7,6 +7,7 @@ import (
 
 	"github.com/BlitterAmp/BlitterServer/internal/api"
 	"github.com/BlitterAmp/BlitterServer/internal/auth"
+	"github.com/BlitterAmp/BlitterServer/internal/lastfm"
 	"github.com/BlitterAmp/BlitterServer/internal/logging"
 	"github.com/BlitterAmp/BlitterServer/internal/store"
 )
@@ -412,6 +413,21 @@ func (s *Server) SetLove(ctx context.Context, req api.SetLoveRequestObject) (api
 		if err := s.syncLovedTracksPlaylist(ctx, prf, req.Ref, rec.State); err != nil {
 			return nil, err
 		}
+		// Local love is authoritative. Last.fm failure is deliberately best-effort
+		// and never rolls back the user's local action.
+		if conn, ok, e := s.st.GetLastfmConnection(ctx, prf); e == nil && ok {
+			if tr, found, e := s.st.GetTrack(ctx, req.Ref); e == nil && found {
+				client, configured, _ := s.lastfmClient(ctx)
+				if configured {
+					if e := client.Love(ctx, conn.SessionKey, lastfm.Track{Artist: tr.ArtistName, Title: tr.Title, Album: tr.AlbumTitle}, rec.State == "loved"); e != nil {
+						logging.From(ctx).Warn("last.fm love relay failed")
+						if providerKind(e) == lastfm.ErrorInvalidSession {
+							_, _ = s.st.DeleteLastfmData(ctx, prf)
+						}
+					}
+				}
+			}
+		}
 	}
 	out := apiLoveRecord(rec)
 	if err := s.bus.Publish(ctx, "love.updated", prf, out); err != nil {
@@ -483,10 +499,16 @@ func (s *Server) ReportPlaybackEvents(ctx context.Context, req api.ReportPlaybac
 	if id.ProfileID == "" {
 		return nil, &api.StatusError{Status: 403, Code: "profile_token_required", Title: "Forbidden"}
 	}
+	if req.Body == nil || len(req.Body.Events) > 500 {
+		return nil, badRequest("playback_batch_too_large")
+	}
 	records := make([]store.PlaybackEventRecord, 0, len(req.Body.Events))
 	for _, e := range req.Body.Events {
 		rec := store.PlaybackEventRecord{
 			EventID: e.EventId, Type: string(e.Type), TrackID: e.TrackId, At: e.At,
+		}
+		if e.PlaySessionId != nil {
+			rec.PlaySessionID = *e.PlaySessionId
 		}
 		if e.PositionSec != nil {
 			v := float64(*e.PositionSec)
@@ -494,9 +516,13 @@ func (s *Server) ReportPlaybackEvents(ctx context.Context, req api.ReportPlaybac
 		}
 		records = append(records, rec)
 	}
-	accepted, err := s.st.IngestPlaybackEvents(ctx, id.ProfileID, id.DeviceID, records)
+	accepted, ids, err := s.st.IngestPlaybackEventsDetailed(ctx, id.ProfileID, id.DeviceID, records)
 	if err != nil {
 		return nil, err
+	}
+	_ = ids // accepted ids are persisted; the worker scans bounded durable work.
+	if accepted > 0 && s.lastfmWorker != nil {
+		s.lastfmWorker.notify()
 	}
 	if accepted > 0 {
 		if p, found, err := s.st.GetProfileRecord(ctx, id.ProfileID); err == nil && found && p.ShareListening {
@@ -513,6 +539,17 @@ func (s *Server) ReportPlaybackEvents(ctx context.Context, req api.ReportPlaybac
 		}
 	}
 	return api.ReportPlaybackEvents202Response{}, nil
+}
+
+func providerKind(err error) lastfm.ErrorKind {
+	if err == nil {
+		return ""
+	}
+	var pe *lastfm.ProviderError
+	if errors.As(err, &pe) {
+		return pe.Kind
+	}
+	return lastfm.ErrorPermanent
 }
 
 func (s *Server) presenceEntries(ctx context.Context) []api.PresenceEntry {

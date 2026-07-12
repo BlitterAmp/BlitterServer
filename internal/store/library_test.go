@@ -3,10 +3,49 @@ package store
 import (
 	"context"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/BlitterAmp/BlitterServer/internal/source"
 )
+
+func TestArtRetryUpgradeAndExternalArtistRace(t *testing.T) {
+	s := indexFixture(t)
+	ctx := context.Background()
+	if _, err := s.db.ExecContext(ctx, `UPDATE albums SET art_tried=1,art_tried_at=0; UPDATE artists SET art_tried=1,art_tried_at=0`); err != nil {
+		t.Fatal(err)
+	}
+	albums, err := s.AlbumsNeedingArt(ctx, 10)
+	if err != nil || len(albums) == 0 {
+		t.Fatalf("album retry: %d %v", len(albums), err)
+	}
+	artists, err := s.ArtistsNeedingArt(ctx, 10)
+	if err != nil || len(artists) == 0 {
+		t.Fatalf("artist retry: %d %v", len(artists), err)
+	}
+	ids := make([]string, 8)
+	var wg sync.WaitGroup
+	for i := range ids {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			id, owned, e := s.ResolveArtistName(ctx, "Synthetic External")
+			if e != nil {
+				t.Errorf("resolve: %v", e)
+			}
+			if owned {
+				t.Error("external marked owned")
+			}
+			ids[i] = id
+		}()
+	}
+	wg.Wait()
+	for _, id := range ids {
+		if id != ids[0] {
+			t.Fatalf("race minted multiple ids: %v", ids)
+		}
+	}
+}
 
 func meta(native, title, artist, album, genre string, year, idx int) source.TrackMeta {
 	return source.TrackMeta{

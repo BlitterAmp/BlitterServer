@@ -228,6 +228,61 @@ func TestPlaybackIngestionAndPresence(t *testing.T) {
 	}
 }
 
+func TestPlaybackDuplicateEventCannotMutateLastfmSession(t *testing.T) {
+	s, p1, _, tracks := dataFixture(t)
+	ctx := context.Background()
+	_ = s.SetLastfmConnection(ctx, p1.ProfileID, "synthetic_user", "synthetic_session")
+	at := time.Now().UTC()
+	zero := 0.0
+	if n, err := s.IngestPlaybackEvents(ctx, p1.ProfileID, "dev_x", []PlaybackEventRecord{{EventID: "duplicate-event", PlaySessionID: "original-session", Type: "started", TrackID: tracks[0].TrackID, PositionSec: &zero, At: at}}); err != nil || n != 1 {
+		t.Fatalf("first: %d %v", n, err)
+	}
+	changed := 240.0
+	if n, err := s.IngestPlaybackEvents(ctx, p1.ProfileID, "dev_x", []PlaybackEventRecord{{EventID: "duplicate-event", PlaySessionID: "changed-session", Type: "started", TrackID: tracks[1].TrackID, PositionSec: &changed, At: at.Add(time.Minute)}}); err != nil || n != 0 {
+		t.Fatalf("duplicate: %d %v", n, err)
+	}
+	var sessions int
+	var track string
+	var pos float64
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*),min(track_id),max(position_sec) FROM lastfm_play_sessions WHERE profile_id=?`, p1.ProfileID).Scan(&sessions, &track, &pos); err != nil {
+		t.Fatal(err)
+	}
+	if sessions != 1 || track != tracks[0].TrackID || pos != 0 {
+		t.Fatalf("duplicate mutated session: sessions=%d track=%s pos=%v", sessions, track, pos)
+	}
+}
+
+func TestPlaybackLastfmSessionsRequireActiveConnection(t *testing.T) {
+	s, p, _, tracks := dataFixture(t)
+	ctx := context.Background()
+	at := time.Now().UTC()
+	events := func(id string) []PlaybackEventRecord {
+		return []PlaybackEventRecord{{EventID: id, Type: "started", TrackID: tracks[0].TrackID, At: at}}
+	}
+	if _, err := s.IngestPlaybackEvents(ctx, p.ProfileID, "dev_x", events("local-only")); err != nil {
+		t.Fatal(err)
+	}
+	var sessions, local int
+	_ = s.db.QueryRowContext(ctx, `SELECT count(*) FROM lastfm_play_sessions WHERE profile_id=?`, p.ProfileID).Scan(&sessions)
+	_ = s.db.QueryRowContext(ctx, `SELECT count(*) FROM playback_events WHERE profile_id=?`, p.ProfileID).Scan(&local)
+	if sessions != 0 || local != 1 {
+		t.Fatalf("before opt-in sessions=%d local=%d", sessions, local)
+	}
+	_ = s.SetLastfmConnection(ctx, p.ProfileID, "synthetic_user", "synthetic_session")
+	_, _ = s.IngestPlaybackEvents(ctx, p.ProfileID, "dev_x", events("opted-in"))
+	_ = s.db.QueryRowContext(ctx, `SELECT count(*) FROM lastfm_play_sessions WHERE profile_id=?`, p.ProfileID).Scan(&sessions)
+	if sessions != 1 {
+		t.Fatalf("opt-in sessions=%d", sessions)
+	}
+	_, _ = s.DeleteLastfmData(ctx, p.ProfileID)
+	_, _ = s.IngestPlaybackEvents(ctx, p.ProfileID, "dev_x", events("after-disconnect"))
+	_ = s.db.QueryRowContext(ctx, `SELECT count(*) FROM lastfm_play_sessions WHERE profile_id=?`, p.ProfileID).Scan(&sessions)
+	_ = s.db.QueryRowContext(ctx, `SELECT count(*) FROM playback_events WHERE profile_id=?`, p.ProfileID).Scan(&local)
+	if sessions != 0 || local != 3 {
+		t.Fatalf("after disconnect sessions=%d local=%d", sessions, local)
+	}
+}
+
 // ── recommendations ────────────────────────────────────────────
 
 func TestRecommendationsInbox(t *testing.T) {

@@ -237,8 +237,19 @@ func (s *Store) resolveRef(ctx context.Context, ref string) (kind, name, artistN
 	switch {
 	case strings.HasPrefix(ref, "art_"):
 		a, found, err := s.GetArtist(ctx, ref)
-		if err != nil || !found {
-			return "", "", "", false, orNotFound(err, ref)
+		if err != nil {
+			return "", "", "", false, err
+		}
+		if !found {
+			var external string
+			err = s.db.QueryRowContext(ctx, `SELECT name FROM external_artists WHERE artist_id=?`, ref).Scan(&external)
+			if errors.Is(err, sql.ErrNoRows) {
+				return "", "", "", false, orNotFound(nil, ref)
+			}
+			if err != nil {
+				return "", "", "", false, err
+			}
+			return "artist", external, "", false, nil
 		}
 		return "artist", a.Name, "", true, nil
 	case strings.HasPrefix(ref, "alb_"):
@@ -442,55 +453,110 @@ func (s *Store) GetRatings(ctx context.Context, profileID string, itemIDs []stri
 
 // PlaybackEventRecord is one client-reported event.
 type PlaybackEventRecord struct {
-	EventID     string
-	Type        string
-	TrackID     string
-	PositionSec *float64
-	At          time.Time
+	EventID       string
+	PlaySessionID string
+	Type          string
+	TrackID       string
+	PositionSec   *float64
+	At            time.Time
 }
 
 // IngestPlaybackEvents stores a batch (deduped by client event id, unknown
 // tracks skipped) and maintains presence. Returns how many were newly
 // accepted.
 func (s *Store) IngestPlaybackEvents(ctx context.Context, profileID, deviceID string, events []PlaybackEventRecord) (int, error) {
+	n, _, err := s.IngestPlaybackEventsDetailed(ctx, profileID, deviceID, events)
+	return n, err
+}
+
+// IngestPlaybackEventsDetailed also returns the newly accepted ids so provider
+// relays cannot be triggered by replaying an old event id.
+func (s *Store) IngestPlaybackEventsDetailed(ctx context.Context, profileID, deviceID string, events []PlaybackEventRecord) (int, []string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer tx.Rollback()
 	accepted := 0
+	var acceptedIDs []string
 	now := time.Now().UTC().Format(time.RFC3339)
+	var lastfmConnected int
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM lastfm_profiles WHERE profile_id=?)`, profileID).Scan(&lastfmConnected); err != nil {
+		return 0, nil, err
+	}
 	for _, e := range events {
-		if _, found, err := s.GetTrack(ctx, e.TrackID); err != nil {
-			return accepted, err
-		} else if !found {
+		var exists int
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tracks WHERE track_id=?)`, e.TrackID).Scan(&exists); err != nil {
+			return accepted, acceptedIDs, err
+		} else if exists == 0 {
 			continue
 		}
-		res, err := s.db.ExecContext(ctx, `
-			INSERT OR IGNORE INTO playback_events (event_id, profile_id, device_id, type, track_id, position_sec, at, received_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			e.EventID, profileID, deviceID, e.Type, e.TrackID, e.PositionSec, e.At.UTC().Format(time.RFC3339), now)
+		sessionID := ""
+		if lastfmConnected != 0 {
+			sessionID = e.PlaySessionID
+		}
+		if lastfmConnected != 0 && e.Type == "started" {
+			if sessionID == "" {
+				sessionID = e.EventID
+			}
+		} else if lastfmConnected != 0 && sessionID == "" {
+			_ = tx.QueryRowContext(ctx, `SELECT play_session_id FROM lastfm_play_sessions WHERE profile_id=? AND device_id=? AND track_id=? AND started_at<=? ORDER BY started_at DESC LIMIT 1`, profileID, deviceID, e.TrackID, e.At.UTC().Format(time.RFC3339)).Scan(&sessionID)
+		}
+		// The event id is the outer idempotency boundary. Claim it before any
+		// Last.fm session or presence mutation so a replay with altered fields is
+		// inert rather than partially applied.
+		res, err := tx.ExecContext(ctx, `
+			INSERT OR IGNORE INTO playback_events (event_id, profile_id, device_id, type, track_id, position_sec, at, received_at, play_session_id)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			e.EventID, profileID, deviceID, e.Type, e.TrackID, e.PositionSec, e.At.UTC().Format(time.RFC3339), now, nullStr(sessionID))
 		if err != nil {
-			return accepted, err
+			return accepted, acceptedIDs, err
 		}
 		n, err := res.RowsAffected()
 		if err != nil {
-			return accepted, err
+			return accepted, acceptedIDs, err
 		}
 		if n == 0 {
 			continue // duplicate
 		}
 		accepted++
+		acceptedIDs = append(acceptedIDs, e.EventID)
+		if lastfmConnected != 0 && e.Type == "started" {
+			_, err = tx.ExecContext(ctx, `INSERT INTO lastfm_play_sessions(play_session_id,profile_id,device_id,track_id,started_at,position_sec,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(play_session_id) DO NOTHING`, sessionID, profileID, deviceID, e.TrackID, e.At.UTC().Format(time.RFC3339), positionValue(e.PositionSec), now)
+			if err != nil {
+				return accepted, acceptedIDs, err
+			}
+		} else if lastfmConnected != 0 && sessionID != "" && e.PositionSec != nil {
+			_, err = tx.ExecContext(ctx, `UPDATE lastfm_play_sessions SET position_sec=max(position_sec,?),updated_at=? WHERE play_session_id=? AND profile_id=?`, *e.PositionSec, now, sessionID, profileID)
+			if err != nil {
+				return accepted, acceptedIDs, err
+			}
+		}
 
 		playing := 0
 		switch e.Type {
 		case "started", "progress", "resumed":
 			playing = 1
 		}
-		if _, err := s.db.ExecContext(ctx, `
+		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO presence (profile_id, track_id, playing, at) VALUES (?, ?, ?, ?)
 			ON CONFLICT(profile_id) DO UPDATE SET track_id = excluded.track_id,
 			    playing = excluded.playing, at = excluded.at`,
 			profileID, e.TrackID, playing, e.At.UTC().Format(time.RFC3339)); err != nil {
-			return accepted, err
+			return accepted, acceptedIDs, err
 		}
 	}
-	return accepted, nil
+	if err := tx.Commit(); err != nil {
+		return accepted, acceptedIDs, err
+	}
+	return accepted, acceptedIDs, nil
+}
+
+func positionValue(v *float64) float64 {
+	if v == nil {
+		return 0
+	}
+	return *v
 }
 
 // PresenceRow is one member's now-playing state.

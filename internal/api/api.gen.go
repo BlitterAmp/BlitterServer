@@ -563,6 +563,30 @@ func (e Sort) Valid() bool {
 	}
 }
 
+// Defines values for AdminAnonymizeProfileData200JSONResponseBodyCategories.
+const (
+	LastfmAuthAttempts AdminAnonymizeProfileData200JSONResponseBodyCategories = "lastfm_auth_attempts"
+	LastfmPlayback     AdminAnonymizeProfileData200JSONResponseBodyCategories = "lastfm_playback"
+	LastfmSession      AdminAnonymizeProfileData200JSONResponseBodyCategories = "lastfm_session"
+	LastfmUsername     AdminAnonymizeProfileData200JSONResponseBodyCategories = "lastfm_username"
+)
+
+// Valid indicates whether the value is a known member of the AdminAnonymizeProfileData200JSONResponseBodyCategories enum.
+func (e AdminAnonymizeProfileData200JSONResponseBodyCategories) Valid() bool {
+	switch e {
+	case LastfmAuthAttempts:
+		return true
+	case LastfmPlayback:
+		return true
+	case LastfmSession:
+		return true
+	case LastfmUsername:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for AdminGetPlexPin200JSONResponseBodyStatus.
 const (
 	AdminGetPlexPin200JSONResponseBodyStatusExpired AdminGetPlexPin200JSONResponseBodyStatus = "expired"
@@ -1017,7 +1041,7 @@ type Capabilities struct {
 	// Acquisition Love(artist) will acquire; Activity view available
 	Acquisition bool `json:"acquisition"`
 
-	// Discovery An engine recommendation provider is configured — /v1/me/discover returns items
+	// Discovery A recommendation provider has operational instance credentials; personalized results additionally require a connected profile
 	Discovery *bool `json:"discovery,omitempty"`
 
 	// Lastfm Instance credentials present — profiles can connect via /v1/me/lastfm
@@ -1328,10 +1352,13 @@ type PlaybackEvent struct {
 	At time.Time `json:"at"`
 
 	// EventId Client-generated UUID (dedupe key)
-	EventId     string            `json:"eventId"`
-	PositionSec *float32          `json:"positionSec,omitempty"`
-	TrackId     string            `json:"trackId"`
-	Type        PlaybackEventType `json:"type"`
+	EventId string `json:"eventId"`
+
+	// PlaySessionId Stable client-generated ID for one listening session; use it for all events from started through ended/skipped
+	PlaySessionId *string           `json:"playSessionId,omitempty"`
+	PositionSec   *float32          `json:"positionSec,omitempty"`
+	TrackId       string            `json:"trackId"`
+	Type          PlaybackEventType `json:"type"`
 }
 
 // PlaybackEventType defines model for PlaybackEvent.Type.
@@ -1629,6 +1656,14 @@ type AdminUpdateProfileJSONBody struct {
 	Pin nullable.Nullable[string] `json:"pin,omitempty"`
 }
 
+// AdminAnonymizeProfileDataJSONBody defines parameters for AdminAnonymizeProfileData.
+type AdminAnonymizeProfileDataJSONBody struct {
+	DryRun bool `json:"dryRun"`
+}
+
+// AdminAnonymizeProfileData200JSONResponseBodyCategories defines parameters for AdminAnonymizeProfileData.
+type AdminAnonymizeProfileData200JSONResponseBodyCategories string
+
 // AdminLoginJSONBody defines parameters for AdminLogin.
 type AdminLoginJSONBody struct {
 	Password string `json:"password"`
@@ -1718,6 +1753,12 @@ type ListChangesParams struct {
 type StreamEventsParams struct {
 	// LastEventID Sequence number of the last event received
 	LastEventID *string `json:"Last-Event-ID,omitempty"`
+}
+
+// CompleteLastfmAuthParams defines parameters for CompleteLastfmAuth.
+type CompleteLastfmAuthParams struct {
+	State string `form:"state" json:"state"`
+	Token string `form:"token" json:"token"`
 }
 
 // ListLovesParams defines parameters for ListLoves.
@@ -1935,6 +1976,9 @@ type AdminCreateProfileJSONRequestBody AdminCreateProfileJSONBody
 
 // AdminUpdateProfileJSONRequestBody defines body for AdminUpdateProfile for application/json ContentType.
 type AdminUpdateProfileJSONRequestBody AdminUpdateProfileJSONBody
+
+// AdminAnonymizeProfileDataJSONRequestBody defines body for AdminAnonymizeProfileData for application/json ContentType.
+type AdminAnonymizeProfileDataJSONRequestBody AdminAnonymizeProfileDataJSONBody
 
 // AdminLoginJSONRequestBody defines body for AdminLogin for application/json ContentType.
 type AdminLoginJSONRequestBody AdminLoginJSONBody
@@ -2154,6 +2198,11 @@ type ClientInterface interface {
 
 	AdminUpdateProfile(ctx context.Context, profileId string, body AdminUpdateProfileJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// AdminAnonymizeProfileDataWithBody request with any body
+	AdminAnonymizeProfileDataWithBody(ctx context.Context, profileId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	AdminAnonymizeProfileData(ctx context.Context, profileId string, body AdminAnonymizeProfileDataJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// AdminLogout request
 	AdminLogout(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -2278,6 +2327,9 @@ type ClientInterface interface {
 
 	// GetHome request
 	GetHome(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CompleteLastfmAuth request
+	CompleteLastfmAuth(ctx context.Context, params *CompleteLastfmAuthParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetLibrary request
 	GetLibrary(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -2756,6 +2808,30 @@ func (c *Client) AdminUpdateProfileWithBody(ctx context.Context, profileId strin
 
 func (c *Client) AdminUpdateProfile(ctx context.Context, profileId string, body AdminUpdateProfileJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewAdminUpdateProfileRequest(c.Server, profileId, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AdminAnonymizeProfileDataWithBody(ctx context.Context, profileId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminAnonymizeProfileDataRequestWithBody(c.Server, profileId, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AdminAnonymizeProfileData(ctx context.Context, profileId string, body AdminAnonymizeProfileDataJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminAnonymizeProfileDataRequest(c.Server, profileId, body)
 	if err != nil {
 		return nil, err
 	}
@@ -3284,6 +3360,18 @@ func (c *Client) ListGenreTracks(ctx context.Context, genre string, reqEditors .
 
 func (c *Client) GetHome(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetHomeRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CompleteLastfmAuth(ctx context.Context, params *CompleteLastfmAuthParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCompleteLastfmAuthRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -4750,6 +4838,53 @@ func NewAdminUpdateProfileRequestWithBody(server string, profileId string, conte
 	return req, nil
 }
 
+// NewAdminAnonymizeProfileDataRequest calls the generic AdminAnonymizeProfileData builder with application/json body
+func NewAdminAnonymizeProfileDataRequest(server string, profileId string, body AdminAnonymizeProfileDataJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewAdminAnonymizeProfileDataRequestWithBody(server, profileId, "application/json", bodyReader)
+}
+
+// NewAdminAnonymizeProfileDataRequestWithBody generates requests for AdminAnonymizeProfileData with any type of body
+func NewAdminAnonymizeProfileDataRequestWithBody(server string, profileId string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "profileId", profileId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/api/profiles/%s/anonymize-data", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewAdminLogoutRequest generates requests for AdminLogout
 func NewAdminLogoutRequest(server string) (*http.Request, error) {
 	var err error
@@ -6143,6 +6278,64 @@ func NewGetHomeRequest(server string) (*http.Request, error) {
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewCompleteLastfmAuthRequest generates requests for CompleteLastfmAuth
+func NewCompleteLastfmAuthRequest(server string, params *CompleteLastfmAuthParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/lastfm/callback")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		// queryValues collects non-styled parameters (passthrough, JSON)
+		// that are safe to round-trip through url.Values.Encode().
+		queryValues := queryURL.Query()
+		// rawQueryFragments collects pre-encoded query fragments from
+		// styled parameters, preserving literal commas as delimiters
+		// per the OpenAPI spec (e.g. "color=blue,black,brown").
+		var rawQueryFragments []string
+
+		if queryFrag, err := runtime.StyleParamWithOptions("form", true, "state", params.State, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+			return nil, err
+		} else {
+			for _, qp := range strings.Split(queryFrag, "&") {
+				rawQueryFragments = append(rawQueryFragments, qp)
+			}
+		}
+
+		if queryFrag, err := runtime.StyleParamWithOptions("form", true, "token", params.Token, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+			return nil, err
+		} else {
+			for _, qp := range strings.Split(queryFrag, "&") {
+				rawQueryFragments = append(rawQueryFragments, qp)
+			}
+		}
+
+		if encoded := queryValues.Encode(); encoded != "" {
+			rawQueryFragments = append(rawQueryFragments, encoded)
+		}
+		queryURL.RawQuery = strings.Join(rawQueryFragments, "&")
 	}
 
 	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
@@ -8251,6 +8444,11 @@ type ClientWithResponsesInterface interface {
 
 	AdminUpdateProfileWithResponse(ctx context.Context, profileId string, body AdminUpdateProfileJSONRequestBody, reqEditors ...RequestEditorFn) (*AdminUpdateProfileResponse, error)
 
+	// AdminAnonymizeProfileDataWithBodyWithResponse request with any body
+	AdminAnonymizeProfileDataWithBodyWithResponse(ctx context.Context, profileId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AdminAnonymizeProfileDataResponse, error)
+
+	AdminAnonymizeProfileDataWithResponse(ctx context.Context, profileId string, body AdminAnonymizeProfileDataJSONRequestBody, reqEditors ...RequestEditorFn) (*AdminAnonymizeProfileDataResponse, error)
+
 	// AdminLogoutWithResponse request
 	AdminLogoutWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AdminLogoutResponse, error)
 
@@ -8375,6 +8573,9 @@ type ClientWithResponsesInterface interface {
 
 	// GetHomeWithResponse request
 	GetHomeWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetHomeResponse, error)
+
+	// CompleteLastfmAuthWithResponse request
+	CompleteLastfmAuthWithResponse(ctx context.Context, params *CompleteLastfmAuthParams, reqEditors ...RequestEditorFn) (*CompleteLastfmAuthResponse, error)
 
 	// GetLibraryWithResponse request
 	GetLibraryWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetLibraryResponse, error)
@@ -9180,6 +9381,41 @@ func (r AdminUpdateProfileResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r AdminUpdateProfileResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type AdminAnonymizeProfileDataResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *struct {
+		Categories []AdminAnonymizeProfileData200JSONResponseBodyCategories `json:"categories"`
+		DryRun     bool                                                     `json:"dryRun"`
+	}
+	ApplicationproblemJSON401 *Unauthorized
+	ApplicationproblemJSON404 *NotFound
+}
+
+// Status returns HTTPResponse.Status
+func (r AdminAnonymizeProfileDataResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r AdminAnonymizeProfileDataResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r AdminAnonymizeProfileDataResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -10078,6 +10314,7 @@ type ListSimilarArtistsResponse struct {
 	JSON200                   *[]SimilarArtist
 	ApplicationproblemJSON401 *Unauthorized
 	ApplicationproblemJSON404 *NotFound
+	ApplicationproblemJSON502 *Problem
 }
 
 // Status returns HTTPResponse.Status
@@ -10235,6 +10472,7 @@ type GetExternalArtistResponse struct {
 	JSON200                   *ExternalArtist
 	ApplicationproblemJSON401 *Unauthorized
 	ApplicationproblemJSON404 *NotFound
+	ApplicationproblemJSON502 *Problem
 }
 
 // Status returns HTTPResponse.Status
@@ -10349,6 +10587,35 @@ func (r GetHomeResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r GetHomeResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type CompleteLastfmAuthResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r CompleteLastfmAuthResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CompleteLastfmAuthResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r CompleteLastfmAuthResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -10491,6 +10758,7 @@ type GetMyDiscoverResponse struct {
 	HTTPResponse              *http.Response
 	JSON200                   *[]DiscoverItem
 	ApplicationproblemJSON401 *Unauthorized
+	ApplicationproblemJSON502 *Problem
 }
 
 // Status returns HTTPResponse.Status
@@ -10552,9 +10820,11 @@ type GetMyLastfmResponse struct {
 	HTTPResponse *http.Response
 	JSON200      *struct {
 		// Available Instance has last.fm API credentials (admin-configured)
-		Available bool    `json:"available"`
-		Connected bool    `json:"connected"`
-		Username  *string `json:"username,omitempty"`
+		Available bool `json:"available"`
+		Connected bool `json:"connected"`
+
+		// Username PII: last.fm username. Stored only while connected; removed on disconnect/profile deletion/anonymization. Never logged.
+		Username *string `json:"username,omitempty"`
 	}
 	ApplicationproblemJSON401 *Unauthorized
 }
@@ -12201,6 +12471,23 @@ func (c *ClientWithResponses) AdminUpdateProfileWithResponse(ctx context.Context
 	return ParseAdminUpdateProfileResponse(rsp)
 }
 
+// AdminAnonymizeProfileDataWithBodyWithResponse request with arbitrary body returning *AdminAnonymizeProfileDataResponse
+func (c *ClientWithResponses) AdminAnonymizeProfileDataWithBodyWithResponse(ctx context.Context, profileId string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AdminAnonymizeProfileDataResponse, error) {
+	rsp, err := c.AdminAnonymizeProfileDataWithBody(ctx, profileId, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAdminAnonymizeProfileDataResponse(rsp)
+}
+
+func (c *ClientWithResponses) AdminAnonymizeProfileDataWithResponse(ctx context.Context, profileId string, body AdminAnonymizeProfileDataJSONRequestBody, reqEditors ...RequestEditorFn) (*AdminAnonymizeProfileDataResponse, error) {
+	rsp, err := c.AdminAnonymizeProfileData(ctx, profileId, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAdminAnonymizeProfileDataResponse(rsp)
+}
+
 // AdminLogoutWithResponse request returning *AdminLogoutResponse
 func (c *ClientWithResponses) AdminLogoutWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AdminLogoutResponse, error) {
 	rsp, err := c.AdminLogout(ctx, reqEditors...)
@@ -12588,6 +12875,15 @@ func (c *ClientWithResponses) GetHomeWithResponse(ctx context.Context, reqEditor
 		return nil, err
 	}
 	return ParseGetHomeResponse(rsp)
+}
+
+// CompleteLastfmAuthWithResponse request returning *CompleteLastfmAuthResponse
+func (c *ClientWithResponses) CompleteLastfmAuthWithResponse(ctx context.Context, params *CompleteLastfmAuthParams, reqEditors ...RequestEditorFn) (*CompleteLastfmAuthResponse, error) {
+	rsp, err := c.CompleteLastfmAuth(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCompleteLastfmAuthResponse(rsp)
 }
 
 // GetLibraryWithResponse request returning *GetLibraryResponse
@@ -13823,6 +14119,49 @@ func ParseAdminUpdateProfileResponse(rsp *http.Response) (*AdminUpdateProfileRes
 	return response, nil
 }
 
+// ParseAdminAnonymizeProfileDataResponse parses an HTTP response from a AdminAnonymizeProfileDataWithResponse call
+func ParseAdminAnonymizeProfileDataResponse(rsp *http.Response) (*AdminAnonymizeProfileDataResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AdminAnonymizeProfileDataResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest struct {
+			Categories []AdminAnonymizeProfileData200JSONResponseBodyCategories `json:"categories"`
+			DryRun     bool                                                     `json:"dryRun"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest Unauthorized
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest NotFound
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseAdminLogoutResponse parses an HTTP response from a AdminLogoutWithResponse call
 func ParseAdminLogoutResponse(rsp *http.Response) (*AdminLogoutResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -14800,6 +15139,13 @@ func ParseListSimilarArtistsResponse(rsp *http.Response) (*ListSimilarArtistsRes
 		}
 		response.ApplicationproblemJSON404 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 502:
+		var dest Problem
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON502 = &dest
+
 	}
 
 	return response, nil
@@ -14979,6 +15325,13 @@ func ParseGetExternalArtistResponse(rsp *http.Response) (*GetExternalArtistRespo
 		}
 		response.ApplicationproblemJSON404 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 502:
+		var dest Problem
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON502 = &dest
+
 	}
 
 	return response, nil
@@ -15085,6 +15438,22 @@ func ParseGetHomeResponse(rsp *http.Response) (*GetHomeResponse, error) {
 		}
 		response.ApplicationproblemJSON401 = &dest
 
+	}
+
+	return response, nil
+}
+
+// ParseCompleteLastfmAuthResponse parses an HTTP response from a CompleteLastfmAuthWithResponse call
+func ParseCompleteLastfmAuthResponse(rsp *http.Response) (*CompleteLastfmAuthResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CompleteLastfmAuthResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
 	}
 
 	return response, nil
@@ -15269,6 +15638,13 @@ func ParseGetMyDiscoverResponse(rsp *http.Response) (*GetMyDiscoverResponse, err
 		}
 		response.ApplicationproblemJSON401 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 502:
+		var dest Problem
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON502 = &dest
+
 	}
 
 	return response, nil
@@ -15317,9 +15693,11 @@ func ParseGetMyLastfmResponse(rsp *http.Response) (*GetMyLastfmResponse, error) 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest struct {
 			// Available Instance has last.fm API credentials (admin-configured)
-			Available bool    `json:"available"`
-			Connected bool    `json:"connected"`
-			Username  *string `json:"username,omitempty"`
+			Available bool `json:"available"`
+			Connected bool `json:"connected"`
+
+			// Username PII: last.fm username. Stored only while connected; removed on disconnect/profile deletion/anonymization. Never logged.
+			Username *string `json:"username,omitempty"`
 		}
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
@@ -17004,6 +17382,9 @@ type ServerInterface interface {
 	// Update a profile (rename, set/clear PIN, color)
 	// (PATCH /admin/api/profiles/{profileId})
 	AdminUpdateProfile(w http.ResponseWriter, r *http.Request, profileId string)
+	// Preview or remove stored personal last.fm data for a profile
+	// (POST /admin/api/profiles/{profileId}/anonymize-data)
+	AdminAnonymizeProfileData(w http.ResponseWriter, r *http.Request, profileId string)
 	// Admin logout
 	// (DELETE /admin/api/session)
 	AdminLogout(w http.ResponseWriter, r *http.Request)
@@ -17115,6 +17496,9 @@ type ServerInterface interface {
 	// Server-composed home rails (personalized to the calling profile)
 	// (GET /v1/home)
 	GetHome(w http.ResponseWriter, r *http.Request)
+	// Complete browser-based last.fm authorization
+	// (GET /v1/lastfm/callback)
+	CompleteLastfmAuth(w http.ResponseWriter, r *http.Request, params CompleteLastfmAuthParams)
 	// Active library summary (freshness anchor)
 	// (GET /v1/library)
 	GetLibrary(w http.ResponseWriter, r *http.Request)
@@ -17727,6 +18111,38 @@ func (siw *ServerInterfaceWrapper) AdminUpdateProfile(w http.ResponseWriter, r *
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.AdminUpdateProfile(w, r, profileId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// AdminAnonymizeProfileData operation middleware
+func (siw *ServerInterfaceWrapper) AdminAnonymizeProfileData(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "profileId" -------------
+	var profileId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "profileId", r.PathValue("profileId"), &profileId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "profileId", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, DeviceTokenScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AdminAnonymizeProfileData(w, r, profileId)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -18826,6 +19242,52 @@ func (siw *ServerInterfaceWrapper) GetHome(w http.ResponseWriter, r *http.Reques
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetHome(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CompleteLastfmAuth operation middleware
+func (siw *ServerInterfaceWrapper) CompleteLastfmAuth(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params CompleteLastfmAuthParams
+
+	// ------------- Required query parameter "state" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "state", r.URL.Query(), &params.State, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "state"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "state", Err: err})
+		}
+		return
+	}
+
+	// ------------- Required query parameter "token" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "token", r.URL.Query(), &params.Token, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "token"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "token", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CompleteLastfmAuth(w, r, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -20433,6 +20895,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/api/profiles", wrapper.AdminCreateProfile)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/admin/api/profiles/{profileId}", wrapper.AdminDeleteProfile)
 	m.HandleFunc(http.MethodPatch+" "+options.BaseURL+"/admin/api/profiles/{profileId}", wrapper.AdminUpdateProfile)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/api/profiles/{profileId}/anonymize-data", wrapper.AdminAnonymizeProfileData)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/admin/api/session", wrapper.AdminLogout)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/admin/api/session", wrapper.AdminLogin)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/api/settings/server", wrapper.AdminGetServerSettings)
@@ -20470,6 +20933,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/genres", wrapper.ListGenres)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/genres/{genre}/tracks", wrapper.ListGenreTracks)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/home", wrapper.GetHome)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/lastfm/callback", wrapper.CompleteLastfmAuth)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/library", wrapper.GetLibrary)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/loves", wrapper.ListLoves)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/v1/loves/{ref}", wrapper.SetLove)
@@ -21312,6 +21776,64 @@ type AdminUpdateProfile404ApplicationProblemPlusJSONResponse struct {
 }
 
 func (response AdminUpdateProfile404ApplicationProblemPlusJSONResponse) VisitAdminUpdateProfileResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminAnonymizeProfileDataRequestObject struct {
+	ProfileId string `json:"profileId"`
+	Body      *AdminAnonymizeProfileDataJSONRequestBody
+}
+
+type AdminAnonymizeProfileDataResponseObject interface {
+	VisitAdminAnonymizeProfileDataResponse(w http.ResponseWriter) error
+}
+
+type AdminAnonymizeProfileData200JSONResponse struct {
+	Categories []AdminAnonymizeProfileData200JSONResponseBodyCategories `json:"categories"`
+	DryRun     bool                                                     `json:"dryRun"`
+}
+
+func (response AdminAnonymizeProfileData200JSONResponse) VisitAdminAnonymizeProfileDataResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminAnonymizeProfileData401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response AdminAnonymizeProfileData401ApplicationProblemPlusJSONResponse) VisitAdminAnonymizeProfileDataResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminAnonymizeProfileData404ApplicationProblemPlusJSONResponse struct {
+	NotFoundApplicationProblemPlusJSONResponse
+}
+
+func (response AdminAnonymizeProfileData404ApplicationProblemPlusJSONResponse) VisitAdminAnonymizeProfileDataResponse(w http.ResponseWriter) error {
 
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(response); err != nil {
@@ -22596,6 +23118,20 @@ func (response ListSimilarArtists404ApplicationProblemPlusJSONResponse) VisitLis
 	return err
 }
 
+type ListSimilarArtists502ApplicationProblemPlusJSONResponse Problem
+
+func (response ListSimilarArtists502ApplicationProblemPlusJSONResponse) VisitListSimilarArtistsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(502)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type ListArtistTracksRequestObject struct {
 	ArtistId string `json:"artistId"`
 }
@@ -22862,6 +23398,20 @@ func (response GetExternalArtist404ApplicationProblemPlusJSONResponse) VisitGetE
 	return err
 }
 
+type GetExternalArtist502ApplicationProblemPlusJSONResponse Problem
+
+func (response GetExternalArtist502ApplicationProblemPlusJSONResponse) VisitGetExternalArtistResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(502)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type ListGenresRequestObject struct {
 }
 
@@ -22987,6 +23537,86 @@ func (response GetHome401ApplicationProblemPlusJSONResponse) VisitGetHomeRespons
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.WriteHeader(401)
 	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CompleteLastfmAuthRequestObject struct {
+	Params CompleteLastfmAuthParams
+}
+
+type CompleteLastfmAuthResponseObject interface {
+	VisitCompleteLastfmAuthResponse(w http.ResponseWriter) error
+}
+
+type CompleteLastfmAuth200ResponseHeaders struct {
+	CacheControl          *string
+	ContentSecurityPolicy *string
+	ReferrerPolicy        *string
+}
+
+type CompleteLastfmAuth200TexthtmlResponse struct {
+	Body          io.Reader
+	Headers       CompleteLastfmAuth200ResponseHeaders
+	ContentLength int64
+}
+
+func (response CompleteLastfmAuth200TexthtmlResponse) VisitCompleteLastfmAuthResponse(w http.ResponseWriter) error {
+
+	w.Header().Set("Content-Type", "text/html")
+	if response.ContentLength != 0 {
+		w.Header().Set("Content-Length", fmt.Sprint(response.ContentLength))
+	}
+	if response.Headers.CacheControl != nil {
+		w.Header().Set("Cache-Control", fmt.Sprint(*response.Headers.CacheControl))
+	}
+	if response.Headers.ContentSecurityPolicy != nil {
+		w.Header().Set("Content-Security-Policy", fmt.Sprint(*response.Headers.ContentSecurityPolicy))
+	}
+	if response.Headers.ReferrerPolicy != nil {
+		w.Header().Set("Referrer-Policy", fmt.Sprint(*response.Headers.ReferrerPolicy))
+	}
+	w.WriteHeader(200)
+
+	if closer, ok := response.Body.(io.ReadCloser); ok {
+		defer closer.Close()
+	}
+	_, err := io.Copy(w, response.Body)
+	return err
+}
+
+type CompleteLastfmAuth400ResponseHeaders struct {
+	CacheControl          *string
+	ContentSecurityPolicy *string
+	ReferrerPolicy        *string
+}
+
+type CompleteLastfmAuth400TexthtmlResponse struct {
+	Body          io.Reader
+	Headers       CompleteLastfmAuth400ResponseHeaders
+	ContentLength int64
+}
+
+func (response CompleteLastfmAuth400TexthtmlResponse) VisitCompleteLastfmAuthResponse(w http.ResponseWriter) error {
+
+	w.Header().Set("Content-Type", "text/html")
+	if response.ContentLength != 0 {
+		w.Header().Set("Content-Length", fmt.Sprint(response.ContentLength))
+	}
+	if response.Headers.CacheControl != nil {
+		w.Header().Set("Cache-Control", fmt.Sprint(*response.Headers.CacheControl))
+	}
+	if response.Headers.ContentSecurityPolicy != nil {
+		w.Header().Set("Content-Security-Policy", fmt.Sprint(*response.Headers.ContentSecurityPolicy))
+	}
+	if response.Headers.ReferrerPolicy != nil {
+		w.Header().Set("Referrer-Policy", fmt.Sprint(*response.Headers.ReferrerPolicy))
+	}
+	w.WriteHeader(400)
+
+	if closer, ok := response.Body.(io.ReadCloser); ok {
+		defer closer.Close()
+	}
+	_, err := io.Copy(w, response.Body)
 	return err
 }
 
@@ -23215,6 +23845,20 @@ func (response GetMyDiscover401ApplicationProblemPlusJSONResponse) VisitGetMyDis
 	return err
 }
 
+type GetMyDiscover502ApplicationProblemPlusJSONResponse Problem
+
+func (response GetMyDiscover502ApplicationProblemPlusJSONResponse) VisitGetMyDiscoverResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(502)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type DisconnectMyLastfmRequestObject struct {
 }
 
@@ -23255,9 +23899,11 @@ type GetMyLastfmResponseObject interface {
 
 type GetMyLastfm200JSONResponse struct {
 	// Available Instance has last.fm API credentials (admin-configured)
-	Available bool    `json:"available"`
-	Connected bool    `json:"connected"`
-	Username  *string `json:"username,omitempty"`
+	Available bool `json:"available"`
+	Connected bool `json:"connected"`
+
+	// Username PII: last.fm username. Stored only while connected; removed on disconnect/profile deletion/anonymization. Never logged.
+	Username *string `json:"username,omitempty"`
 }
 
 func (response GetMyLastfm200JSONResponse) VisitGetMyLastfmResponse(w http.ResponseWriter) error {
@@ -25483,6 +26129,9 @@ type StrictServerInterface interface {
 	// Update a profile (rename, set/clear PIN, color)
 	// (PATCH /admin/api/profiles/{profileId})
 	AdminUpdateProfile(ctx context.Context, request AdminUpdateProfileRequestObject) (AdminUpdateProfileResponseObject, error)
+	// Preview or remove stored personal last.fm data for a profile
+	// (POST /admin/api/profiles/{profileId}/anonymize-data)
+	AdminAnonymizeProfileData(ctx context.Context, request AdminAnonymizeProfileDataRequestObject) (AdminAnonymizeProfileDataResponseObject, error)
 	// Admin logout
 	// (DELETE /admin/api/session)
 	AdminLogout(ctx context.Context, request AdminLogoutRequestObject) (AdminLogoutResponseObject, error)
@@ -25594,6 +26243,9 @@ type StrictServerInterface interface {
 	// Server-composed home rails (personalized to the calling profile)
 	// (GET /v1/home)
 	GetHome(ctx context.Context, request GetHomeRequestObject) (GetHomeResponseObject, error)
+	// Complete browser-based last.fm authorization
+	// (GET /v1/lastfm/callback)
+	CompleteLastfmAuth(ctx context.Context, request CompleteLastfmAuthRequestObject) (CompleteLastfmAuthResponseObject, error)
 	// Active library summary (freshness anchor)
 	// (GET /v1/library)
 	GetLibrary(ctx context.Context, request GetLibraryRequestObject) (GetLibraryResponseObject, error)
@@ -26293,6 +26945,39 @@ func (sh *strictHandler) AdminUpdateProfile(w http.ResponseWriter, r *http.Reque
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(AdminUpdateProfileResponseObject); ok {
 		if err := validResponse.VisitAdminUpdateProfileResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AdminAnonymizeProfileData operation middleware
+func (sh *strictHandler) AdminAnonymizeProfileData(w http.ResponseWriter, r *http.Request, profileId string) {
+	var request AdminAnonymizeProfileDataRequestObject
+
+	request.ProfileId = profileId
+
+	var body AdminAnonymizeProfileDataJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.AdminAnonymizeProfileData(ctx, request.(AdminAnonymizeProfileDataRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AdminAnonymizeProfileData")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(AdminAnonymizeProfileDataResponseObject); ok {
+		if err := validResponse.VisitAdminAnonymizeProfileDataResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {
@@ -27266,6 +27951,32 @@ func (sh *strictHandler) GetHome(w http.ResponseWriter, r *http.Request) {
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(GetHomeResponseObject); ok {
 		if err := validResponse.VisitGetHomeResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// CompleteLastfmAuth operation middleware
+func (sh *strictHandler) CompleteLastfmAuth(w http.ResponseWriter, r *http.Request, params CompleteLastfmAuthParams) {
+	var request CompleteLastfmAuthRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.CompleteLastfmAuth(ctx, request.(CompleteLastfmAuthRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CompleteLastfmAuth")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(CompleteLastfmAuthResponseObject); ok {
+		if err := validResponse.VisitCompleteLastfmAuthResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

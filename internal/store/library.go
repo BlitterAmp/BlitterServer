@@ -257,8 +257,8 @@ func (s *Store) AlbumsNeedingArt(ctx context.Context, limit int) ([]AlbumArtNeed
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT al.album_id, al.title, ar.name
 		FROM albums al JOIN artists ar ON ar.artist_id = al.artist_id
-		WHERE al.art_id IS NULL AND al.art_tried = 0 AND al.missing = 0
-		LIMIT ?`, limit)
+		WHERE al.art_id IS NULL AND al.missing = 0 AND (al.art_tried = 0 OR al.art_tried_at < ?)
+		LIMIT ?`, time.Now().Add(-24*time.Hour).Unix(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -279,8 +279,8 @@ func (s *Store) AlbumsNeedingArt(ctx context.Context, limit int) ([]AlbumArtNeed
 func (s *Store) ArtistsNeedingArt(ctx context.Context, limit int) ([]ArtistArtNeed, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT artist_id, name FROM artists
-		WHERE art_tried = 0 AND missing = 0
-		LIMIT ?`, limit)
+		WHERE missing = 0 AND (art_tried = 0 OR art_tried_at < ?)
+		LIMIT ?`, time.Now().Add(-24*time.Hour).Unix(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -300,24 +300,33 @@ func (s *Store) ArtistsNeedingArt(ctx context.Context, limit int) ([]ArtistArtNe
 // pick the new cover up via delta sync. seq is a fresh NextScanSeq for the run.
 func (s *Store) SetAlbumArt(ctx context.Context, albumID, artID string, seq int64) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE albums SET art_id = ?, art_tried = 1, change_seq = ? WHERE album_id = ?`, artID, seq, albumID)
+		`UPDATE albums SET art_id = ?, art_tried = 1, art_tried_at = ?, change_seq = ? WHERE album_id = ?`, artID, time.Now().Unix(), seq, albumID)
 	return err
 }
 
 func (s *Store) SetArtistArt(ctx context.Context, artistID, artID string, seq int64) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE artists SET art_id = ?, art_tried = 1, change_seq = ? WHERE artist_id = ?`, artID, seq, artistID)
+		`UPDATE artists SET art_id = ?, art_tried = 1, art_tried_at = ?, change_seq = ? WHERE artist_id = ?`, artID, time.Now().Unix(), seq, artistID)
 	return err
 }
 
 // MarkAlbumArtTried/MarkArtistArtTried record a miss so we don't re-query.
 func (s *Store) MarkAlbumArtTried(ctx context.Context, albumID string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE albums SET art_tried = 1 WHERE album_id = ?`, albumID)
+	_, err := s.db.ExecContext(ctx, `UPDATE albums SET art_tried = 1, art_tried_at = ? WHERE album_id = ?`, time.Now().Unix(), albumID)
 	return err
 }
 
 func (s *Store) MarkArtistArtTried(ctx context.Context, artistID string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE artists SET art_tried = 1 WHERE artist_id = ?`, artistID)
+	_, err := s.db.ExecContext(ctx, `UPDATE artists SET art_tried = 1, art_tried_at = ? WHERE artist_id = ?`, time.Now().Unix(), artistID)
+	return err
+}
+
+func (s *Store) ResetArtRetries(ctx context.Context, artists bool) error {
+	table := "albums"
+	if artists {
+		table = "artists"
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE `+table+` SET art_tried=0, art_tried_at=0 WHERE art_id IS NULL`)
 	return err
 }
 
