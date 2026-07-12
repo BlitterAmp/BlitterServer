@@ -22,6 +22,7 @@ const (
 	settingLidarrAllowSelfSig = "lidarr_allow_self_signed"
 	settingLastfmAPIKey       = "lastfm_api_key"
 	settingLastfmSharedSecret = "lastfm_shared_secret"
+	settingFanartAPIKey       = "fanart_api_key"
 )
 
 func (s *Server) lidarrConfigured(ctx context.Context) (baseURL, apiKey string, err error) {
@@ -162,4 +163,29 @@ func (s *Server) AdminDeleteLastfm(ctx context.Context, _ api.AdminDeleteLastfmR
 		}
 	}
 	return api.AdminDeleteLastfm204Response{}, nil
+}
+
+func (s *Server) AdminGetFanart(ctx context.Context, _ api.AdminGetFanartRequestObject) (api.AdminGetFanartResponseObject, error) {
+	key, _, err := s.st.GetSetting(ctx, settingFanartAPIKey)
+	if err != nil {
+		return nil, err
+	}
+	return api.AdminGetFanart200JSONResponse{Configured: key != ""}, nil
+}
+
+func (s *Server) AdminSetFanart(ctx context.Context, req api.AdminSetFanartRequestObject) (api.AdminSetFanartResponseObject, error) {
+	if req.Body.ApiKey == "" {
+		return nil, badRequest("api_key_required")
+	}
+	if err := s.st.SetSetting(ctx, settingFanartAPIKey, req.Body.ApiKey); err != nil {
+		return nil, err
+	}
+	return api.AdminSetFanart204Response{}, nil
+}
+
+func (s *Server) AdminDeleteFanart(ctx context.Context, _ api.AdminDeleteFanartRequestObject) (api.AdminDeleteFanartResponseObject, error) {
+	if err := s.st.SetSetting(ctx, settingFanartAPIKey, ""); err != nil {
+		return nil, err
+	}
+	return api.AdminDeleteFanart204Response{}, nil
 }

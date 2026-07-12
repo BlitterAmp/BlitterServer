@@ -238,6 +238,89 @@ func (s *Store) UpsertArt(ctx context.Context, hash, mime string, data []byte, a
 	return artID, nil
 }
 
+// ── external art enrichment ────────────────────────────────────
+
+// AlbumArtNeed / ArtistArtNeed identify entities to look up externally.
+type AlbumArtNeed struct {
+	AlbumID    string
+	Title      string
+	ArtistName string
+}
+
+type ArtistArtNeed struct {
+	ArtistID string
+	Name     string
+}
+
+// AlbumsNeedingArt lists present albums with no cover we haven't tried yet.
+func (s *Store) AlbumsNeedingArt(ctx context.Context, limit int) ([]AlbumArtNeed, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT al.album_id, al.title, ar.name
+		FROM albums al JOIN artists ar ON ar.artist_id = al.artist_id
+		WHERE al.art_id IS NULL AND al.art_tried = 0 AND al.missing = 0
+		LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AlbumArtNeed
+	for rows.Next() {
+		var a AlbumArtNeed
+		if err := rows.Scan(&a.AlbumID, &a.Title, &a.ArtistName); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// ArtistsNeedingArt lists present artists we haven't tried a real photo for
+// (even those with an album-cover fallback — fanart.tv can upgrade them).
+func (s *Store) ArtistsNeedingArt(ctx context.Context, limit int) ([]ArtistArtNeed, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT artist_id, name FROM artists
+		WHERE art_tried = 0 AND missing = 0
+		LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ArtistArtNeed
+	for rows.Next() {
+		var a ArtistArtNeed
+		if err := rows.Scan(&a.ArtistID, &a.Name); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// SetAlbumArt/SetArtistArt attach fetched art and bump change_seq so clients
+// pick the new cover up via delta sync. seq is a fresh NextScanSeq for the run.
+func (s *Store) SetAlbumArt(ctx context.Context, albumID, artID string, seq int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE albums SET art_id = ?, art_tried = 1, change_seq = ? WHERE album_id = ?`, artID, seq, albumID)
+	return err
+}
+
+func (s *Store) SetArtistArt(ctx context.Context, artistID, artID string, seq int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE artists SET art_id = ?, art_tried = 1, change_seq = ? WHERE artist_id = ?`, artID, seq, artistID)
+	return err
+}
+
+// MarkAlbumArtTried/MarkArtistArtTried record a miss so we don't re-query.
+func (s *Store) MarkAlbumArtTried(ctx context.Context, albumID string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE albums SET art_tried = 1 WHERE album_id = ?`, albumID)
+	return err
+}
+
+func (s *Store) MarkArtistArtTried(ctx context.Context, artistID string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE artists SET art_tried = 1 WHERE artist_id = ?`, artistID)
+	return err
+}
+
 // GetArt returns the on-disk location of an image.
 func (s *Store) GetArt(ctx context.Context, artID string) (path, mime string, found bool, err error) {
 	err = s.db.QueryRowContext(ctx, `SELECT path, mime FROM art WHERE art_id = ?`, artID).Scan(&path, &mime)

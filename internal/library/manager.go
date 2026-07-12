@@ -39,10 +39,16 @@ type Status struct {
 	LastScanError string
 }
 
+// Enricher fills art gaps from external sources; injected to avoid a cycle.
+type Enricher interface {
+	Run(ctx context.Context)
+}
+
 type Manager struct {
-	st      *store.Store
-	dataDir string
-	bus     *events.Bus
+	st       *store.Store
+	dataDir  string
+	bus      *events.Bus
+	enricher Enricher
 
 	mu       sync.Mutex
 	src      source.MusicSource
@@ -52,6 +58,9 @@ type Manager struct {
 // SetBus wires the event bus so completed scans publish library.changed. The
 // bus is constructed after the manager, so it's injected rather than passed in.
 func (m *Manager) SetBus(bus *events.Bus) { m.bus = bus }
+
+// SetEnricher wires external art enrichment, run after each completed scan.
+func (m *Manager) SetEnricher(e Enricher) { m.enricher = e }
 
 // NewManager restores the configured source (if any) from settings.
 func NewManager(st *store.Store, dataDir string) *Manager {
@@ -150,6 +159,12 @@ func (m *Manager) scan(src source.MusicSource) {
 				"libraryId": "lib_local", "updatedAt": sum.UpdatedAt,
 			})
 		}
+	}
+
+	// Fill any art gaps from external sources in the background; enrichment
+	// emits its own library.changed when it attaches new covers/photos.
+	if m.enricher != nil {
+		go m.enricher.Run(context.Background())
 	}
 }
 
