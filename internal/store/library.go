@@ -424,11 +424,15 @@ type ArtistArtNeed struct {
 
 // AlbumsNeedingArt lists present albums with no cover we haven't tried yet.
 func (s *Store) AlbumsNeedingArt(ctx context.Context, limit int) ([]AlbumArtNeed, error) {
+	return s.AlbumsNeedingArtAt(ctx, time.Now(), limit)
+}
+
+func (s *Store) AlbumsNeedingArtAt(ctx context.Context, now time.Time, limit int) ([]AlbumArtNeed, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT al.album_id, al.title, ar.name, COALESCE(al.musicbrainz_release_group_id,'')
 		FROM albums al JOIN artists ar ON ar.artist_id = al.artist_id
-		WHERE al.art_id IS NULL AND al.missing = 0 AND (al.art_tried = 0 OR al.art_tried_at < ?)
-		LIMIT ?`, time.Now().Add(-24*time.Hour).Unix(), limit)
+		WHERE al.art_id IS NULL AND al.missing = 0 AND al.art_next_attempt_at <= ?
+		LIMIT ?`, now.Unix(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -447,10 +451,15 @@ func (s *Store) AlbumsNeedingArt(ctx context.Context, limit int) ([]AlbumArtNeed
 // ArtistsNeedingArt lists present artists we haven't tried a real photo for
 // (even those with an album-cover fallback — fanart.tv can upgrade them).
 func (s *Store) ArtistsNeedingArt(ctx context.Context, limit int) ([]ArtistArtNeed, error) {
+	return s.ArtistsNeedingArtAt(ctx, time.Now(), limit)
+}
+
+func (s *Store) ArtistsNeedingArtAt(ctx context.Context, now time.Time, limit int) ([]ArtistArtNeed, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT artist_id, name, COALESCE(art_id, ''), COALESCE(musicbrainz_id,'') FROM artists
-		WHERE missing = 0 AND (`+primaryArtistPredicate("artists")+`) AND art_id IS NULL AND (art_tried = 0 OR art_tried_at < ?)
-		LIMIT ?`, time.Now().Add(-24*time.Hour).Unix(), limit)
+		WHERE missing = 0 AND (`+primaryArtistPredicate("artists")+`) AND art_next_attempt_at <= ?
+		  AND (art_id IS NULL OR EXISTS (SELECT 1 FROM albums al WHERE al.artist_id=artists.artist_id AND al.art_id=artists.art_id AND al.missing=0))
+		LIMIT ?`, now.Unix(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -488,15 +497,61 @@ func (s *Store) SetArtistArt(ctx context.Context, artistID, expectedArtID, artID
 	return n == 1, err
 }
 
-// MarkAlbumArtTried/MarkArtistArtTried record a miss so we don't re-query.
-func (s *Store) MarkAlbumArtTried(ctx context.Context, albumID string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE albums SET art_tried = 1, art_tried_at = ? WHERE album_id = ?`, time.Now().Unix(), albumID)
+type ArtAttemptOutcome int
+
+const (
+	ArtAttemptMiss ArtAttemptOutcome = iota
+	ArtAttemptTransient
+)
+
+func (s *Store) markArtAttempt(ctx context.Context, table, idColumn, id string, outcome ArtAttemptOutcome, now time.Time) error {
+	if outcome == ArtAttemptTransient {
+		_, err := s.db.ExecContext(ctx, `UPDATE `+table+` SET art_tried=1, art_tried_at=?, art_next_attempt_at=? WHERE `+idColumn+`=?`, now.Unix(), now.Add(24*time.Hour).Unix(), id)
+		return err
+	}
+	delay := 7 * 24 * time.Hour
+	if table == "artists" {
+		var fallback bool
+		if err := s.db.QueryRowContext(ctx, `SELECT art_id IS NOT NULL FROM artists WHERE artist_id=?`, id).Scan(&fallback); err != nil {
+			return err
+		}
+		if fallback {
+			delay = 30 * 24 * time.Hour
+		}
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE `+table+` SET art_tried=1, art_tried_at=?, art_miss_count=art_miss_count+1, art_next_attempt_at=? WHERE `+idColumn+`=?`, now.Unix(), now.Add(delay).Unix(), id)
+	if err == nil && delay == 7*24*time.Hour {
+		_, err = s.db.ExecContext(ctx, `UPDATE `+table+` SET art_next_attempt_at=? WHERE `+idColumn+`=? AND art_miss_count > 1`, now.Add(30*24*time.Hour).Unix(), id)
+	}
 	return err
 }
 
+func (s *Store) MarkAlbumArtAttempt(ctx context.Context, albumID string, outcome ArtAttemptOutcome, now time.Time) error {
+	return s.markArtAttempt(ctx, "albums", "album_id", albumID, outcome, now)
+}
+
+func (s *Store) MarkArtistArtAttempt(ctx context.Context, artistID string, outcome ArtAttemptOutcome, now time.Time) error {
+	return s.markArtAttempt(ctx, "artists", "artist_id", artistID, outcome, now)
+}
+
+func (s *Store) ArtRetryState(ctx context.Context, artist bool, id string) (int, time.Time, error) {
+	table, idColumn := "albums", "album_id"
+	if artist {
+		table, idColumn = "artists", "artist_id"
+	}
+	var misses int
+	var next int64
+	err := s.db.QueryRowContext(ctx, `SELECT art_miss_count, art_next_attempt_at FROM `+table+` WHERE `+idColumn+`=?`, id).Scan(&misses, &next)
+	return misses, time.Unix(next, 0), err
+}
+
+// MarkAlbumArtTried/MarkArtistArtTried remain compatibility miss wrappers.
+func (s *Store) MarkAlbumArtTried(ctx context.Context, albumID string) error {
+	return s.MarkAlbumArtAttempt(ctx, albumID, ArtAttemptMiss, time.Now())
+}
+
 func (s *Store) MarkArtistArtTried(ctx context.Context, artistID string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE artists SET art_tried = 1, art_tried_at = ? WHERE artist_id = ?`, time.Now().Unix(), artistID)
-	return err
+	return s.MarkArtistArtAttempt(ctx, artistID, ArtAttemptMiss, time.Now())
 }
 
 func (s *Store) ResetArtRetries(ctx context.Context, artists bool) error {
@@ -504,7 +559,11 @@ func (s *Store) ResetArtRetries(ctx context.Context, artists bool) error {
 	if artists {
 		table = "artists"
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE `+table+` SET art_tried=0, art_tried_at=0 WHERE art_id IS NULL`)
+	where := " WHERE art_id IS NULL"
+	if artists {
+		where = ""
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE `+table+` SET art_tried=0, art_tried_at=0, art_next_attempt_at=0, art_miss_count=0`+where)
 	return err
 }
 
