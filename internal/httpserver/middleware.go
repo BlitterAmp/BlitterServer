@@ -17,7 +17,7 @@ import (
 func isPublic(method, path string) bool {
 	switch {
 	case method == "GET" && path == "/v1/ping",
-		method == "GET" && path == "/v1/lastfm/callback",
+		method == "GET" && strings.HasPrefix(path, "/v1/lastfm/callback/"),
 		method == "POST" && path == "/v1/pair",
 		method == "POST" && path == "/v1/pair/claim",
 		method == "GET" && strings.HasPrefix(path, "/v1/pair/"),

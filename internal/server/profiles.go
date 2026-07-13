@@ -177,8 +177,11 @@ func (s *Server) ConnectMyLastfm(ctx context.Context, _ api.ConnectMyLastfmReque
 	if err := s.st.CreateLastfmAttempt(ctx, prf, state, time.Now().Add(15*time.Minute)); err != nil {
 		return nil, err
 	}
-	base.Path = "/v1/lastfm/callback"
-	base.RawQuery = url.Values{"state": {state}}.Encode()
+	// State rides in the PATH: last.fm appends its token as "?token=" verbatim,
+	// so any query string on the callback URL comes back mangled
+	// ("?state=x?token=y") and the parameters are unusable.
+	base.Path = "/v1/lastfm/callback/" + state
+	base.RawQuery = ""
 	base.Fragment = ""
 	callback := base.String()
 	return api.ConnectMyLastfm201JSONResponse{Url: "https://www.last.fm/api/auth/?api_key=" + url.QueryEscape(key) + "&cb=" + url.QueryEscape(callback)}, nil
@@ -201,33 +204,36 @@ func (s *Server) CompleteLastfmAuth(ctx context.Context, req api.CompleteLastfmA
 		body := "<!doctype html><title>Last.fm connection failed</title><p>This authorization is invalid or expired. Return to BlitterAmp and try again.</p>"
 		return api.CompleteLastfmAuth400TexthtmlResponse{Body: strings.NewReader(body), ContentLength: int64(len(body)), Headers: api.CompleteLastfmAuth400ResponseHeaders{CacheControl: &cache, ContentSecurityPolicy: &csp, ReferrerPolicy: &referrer}}
 	}
-	if !validLastfmToken(req.Params.Token) {
+	// A tokenless hit (browser prefetch, cancelled authorization) must fail
+	// WITHOUT claiming the attempt so a later real redirect still works.
+	if req.Params.Token == nil || !validLastfmToken(*req.Params.Token) {
 		return fail(), nil
 	}
+	token := *req.Params.Token
 	claimRaw := make([]byte, 16)
 	if _, err := rand.Read(claimRaw); err != nil {
 		return nil, err
 	}
 	claimID := base64.RawURLEncoding.EncodeToString(claimRaw)
-	prf, err := s.st.ClaimLastfmAttempt(ctx, req.Params.State, claimID)
+	prf, err := s.st.ClaimLastfmAttempt(ctx, req.State, claimID)
 	if err != nil {
 		return fail(), nil
 	}
 	completed := false
 	defer func() {
 		if !completed {
-			_ = s.st.ReleaseLastfmAttempt(context.Background(), req.Params.State, claimID)
+			_ = s.st.ReleaseLastfmAttempt(context.Background(), req.State, claimID)
 		}
 	}()
 	client, ok, err := s.lastfmClient(ctx)
 	if err != nil || !ok {
 		return fail(), nil
 	}
-	session, err := client.Exchange(ctx, req.Params.Token)
+	session, err := client.Exchange(ctx, token)
 	if err != nil || session.Key == "" || session.Username == "" {
 		return fail(), nil
 	}
-	if err := s.st.CompleteLastfmAttempt(ctx, req.Params.State, claimID, prf, store.LastfmConnection{Username: session.Username, SessionKey: session.Key}); err != nil {
+	if err := s.st.CompleteLastfmAttempt(ctx, req.State, claimID, prf, store.LastfmConnection{Username: session.Username, SessionKey: session.Key}); err != nil {
 		return nil, err
 	}
 	completed = true

@@ -315,16 +315,16 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "409": { description: Instance has no last.fm API credentials, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
 
-  /v1/lastfm/callback:
+  /v1/lastfm/callback/{state}:
     get:
       operationId: completeLastfmAuth
       tags: [profiles]
       summary: Complete browser-based last.fm authorization
-      description: Single-use callback bound to the initiating profile by an opaque, 15-minute state value. State is consumed only after successful encrypted connection persistence. Returns minimal non-cacheable HTML and never exposes the session key.
+      description: Single-use callback bound to the initiating profile by an opaque, 15-minute state value carried in the path. The callback URL must stay query-free — last.fm appends its token as `?token=`, which corrupts any pre-existing query string (a query-borne state parameter therefore never matches). State is consumed only after successful encrypted connection persistence. Returns minimal non-cacheable HTML and never exposes the session key.
       security: []
       parameters:
-        - { name: state, in: query, required: true, schema: { type: string } }
-        - { name: token, in: query, required: true, schema: { type: string } }
+        - { name: state, in: path, required: true, schema: { type: string } }
+        - { name: token, in: query, required: false, schema: { type: string } }
       responses:
         "200":
           description: Authorization completed

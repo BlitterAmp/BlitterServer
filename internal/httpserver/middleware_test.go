@@ -28,6 +28,8 @@ func TestPublicPathsBypassAuth(t *testing.T) {
 	for _, tc := range []struct{ method, path string }{
 		{"GET", "/v1/ping"}, {"POST", "/v1/pair"}, {"GET", "/v1/pair/pair_abc123"},
 		{"POST", "/v1/pair/claim"},
+		// The last.fm browser callback carries its state in the path.
+		{"GET", "/v1/lastfm/callback/c3RhdGU"},
 		{"GET", "/docs/"}, {"GET", "/api/openapi.yaml"}, {"GET", "/"},
 	} {
 		if !isPublic(tc.method, tc.path) {
@@ -37,6 +39,10 @@ func TestPublicPathsBypassAuth(t *testing.T) {
 	// Admin-realm paths are AdminAuth's business, never bearer-public.
 	if isPublic("GET", "/v1/status") || isPublic("POST", "/admin/api/setup") {
 		t.Error("authed/admin routes must not be bearer-public")
+	}
+	// The bare collection path (no state) is not a route and stays gated.
+	if isPublic("GET", "/v1/lastfm/callback") || isPublic("GET", "/v1/lastfm/callbackevil") {
+		t.Error("only state-bearing callback paths are public")
 	}
 }
 
