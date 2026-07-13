@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"github.com/BlitterAmp/BlitterServer/internal/source"
 	"testing"
 	"time"
 )
@@ -38,6 +39,10 @@ func TestArtworkAttemptMarkingMatrix(t *testing.T) {
 			id := needs[0].AlbumID
 			if tt.artist {
 				table, idColumn = "artists", "artist_id"
+				// Fanart selection requires an MBID; identify the fixture artists.
+				if _, err := s.db.ExecContext(ctx, `UPDATE artists SET musicbrainz_id='mbid-' || artist_id`); err != nil {
+					t.Fatal(err)
+				}
 				artists, err := s.ArtistsNeedingArtAt(ctx, now, 1)
 				if err != nil || len(artists) != 1 {
 					t.Fatalf("artist need: %+v, %v", artists, err)
@@ -97,6 +102,10 @@ func TestArtworkDueWindowUsesExplicitTime(t *testing.T) {
 func TestResetArtRetriesIncludesArtistAlbumFallback(t *testing.T) {
 	s := indexFixture(t)
 	ctx := context.Background()
+	// Fanart selection requires MBIDs; identify the fixture artists.
+	if _, err := s.db.ExecContext(ctx, `UPDATE artists SET musicbrainz_id='mbid-' || artist_id`); err != nil {
+		t.Fatal(err)
+	}
 	artists, err := s.ArtistsNeedingArtAt(ctx, time.Now(), 1)
 	if err != nil || len(artists) != 1 {
 		t.Fatalf("artist need: %+v, %v", artists, err)
@@ -115,5 +124,67 @@ func TestResetArtRetriesIncludesArtistAlbumFallback(t *testing.T) {
 	}
 	if misses != 0 || next != 0 {
 		t.Fatalf("forced retry left miss=%d next=%d", misses, next)
+	}
+}
+
+// A definitive art miss before identity resolution must not block the
+// post-resolution art fetch: gaining a release group resets eligibility.
+func TestMatchApplyResetsAlbumArtRetryState(t *testing.T) {
+	s, album := musicBrainzAlbumFixture(t)
+	ctx := context.Background()
+	now := time.Now()
+	if err := s.MarkAlbumArtAttempt(ctx, album.AlbumID, ArtAttemptMiss, now); err != nil {
+		t.Fatal(err)
+	}
+	if need, err := s.AlbumsNeedingArtAt(ctx, now, 10); err != nil || len(need) != 0 {
+		t.Fatalf("marked album still eligible: %v err=%v", need, err)
+	}
+	applyCanonicalRelease(t, s, album, "Local Artist", "mbid-local-artist", []source.ArtistCredit{{Name: "Local Artist", MBID: "mbid-local-artist"}})
+	need, err := s.AlbumsNeedingArtAt(ctx, now, 10)
+	if err != nil || len(need) != 1 || need[0].AlbumID != album.AlbumID {
+		t.Fatalf("album must be art-eligible again after gaining identity: %v err=%v", need, err)
+	}
+	misses, next, err := s.ArtRetryState(ctx, false, album.AlbumID)
+	if err != nil || misses != 0 || !next.Equal(time.Unix(0, 0)) {
+		t.Fatalf("retry state not reset: misses=%d next=%v err=%v", misses, next, err)
+	}
+}
+
+// Artists become fanart-eligible only once they carry an MBID; assignment
+// through match application resets any pre-identity miss schedule.
+func TestArtistMBIDAssignmentResetsArtRetryState(t *testing.T) {
+	s, album := musicBrainzAlbumFixture(t)
+	ctx := context.Background()
+	now := time.Now()
+	if err := s.MarkArtistArtAttempt(ctx, album.PrimaryArtist.ArtistID, ArtAttemptMiss, now); err != nil {
+		t.Fatal(err)
+	}
+	applyCanonicalRelease(t, s, album, "Local Artist", "mbid-local-artist", []source.ArtistCredit{{Name: "Local Artist", MBID: "mbid-local-artist"}})
+	need, err := s.ArtistsNeedingArtAt(ctx, now, 10)
+	if err != nil || len(need) != 1 || need[0].ArtistID != album.PrimaryArtist.ArtistID {
+		t.Fatalf("artist must be art-eligible after gaining an MBID: %v err=%v", need, err)
+	}
+	if need[0].MusicBrainzID == "" {
+		t.Fatal("selection must carry the MBID")
+	}
+}
+
+// Fanart.tv is MBID-keyed: artists without one are not selectable and must
+// not burn 404s or miss windows.
+func TestArtistsNeedingArtSkipsWithoutMBID(t *testing.T) {
+	s, album := musicBrainzAlbumFixture(t)
+	ctx := context.Background()
+	_ = album
+	need, err := s.ArtistsNeedingArtAt(ctx, time.Now(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range need {
+		if n.MusicBrainzID == "" {
+			t.Fatalf("artist without MBID selected for fanart: %+v", n)
+		}
+	}
+	if len(need) != 0 {
+		t.Fatalf("fixture has no identified artists; selection must be empty, got %v", need)
 	}
 }

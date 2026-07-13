@@ -2,12 +2,14 @@ package enrich
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -509,10 +511,15 @@ func TestAlbumEnrichmentDoesNotOverwriteArtAttachedDuringLookup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var attachOnce sync.Once
 	mb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		if applied, err := st.SetAlbumArt(ctx, needs[0].AlbumID, newerID, 50); err != nil || !applied {
-			t.Errorf("attach newer art applied=%v err=%v", applied, err)
-		}
+		// The art stage and the resolver both consult MusicBrainz now; the
+		// mid-lookup attach must happen exactly once.
+		attachOnce.Do(func() {
+			if applied, err := st.SetAlbumArt(ctx, needs[0].AlbumID, newerID, 50); err != nil || !applied {
+				t.Errorf("attach newer art applied=%v err=%v", applied, err)
+			}
+		})
 		_, _ = w.Write([]byte(`{"release-groups":[{"id":"rg-race","title":"Great Album"}]}`))
 	}))
 	defer mb.Close()
@@ -570,5 +577,177 @@ func TestCommittedIdentityPublishesEventWhenLaterArtWorkIsCanceled(t *testing.T)
 	case event := <-sub:
 		t.Fatalf("duplicate event %s", event.Type)
 	default:
+	}
+}
+
+func lastfmArtServer(t *testing.T, hit func()) *httptest.Server {
+	t.Helper()
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hit != nil {
+			hit()
+		}
+		if r.URL.Path == "/img.png" {
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write(pngBytes)
+			return
+		}
+		_, _ = w.Write([]byte(`{"album":{"image":[{"#text":"` + srv.URL + `/img.png","size":"extralarge"}]}}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func seedArtlessAlbums(t *testing.T, st *store.Store, ctx context.Context, n int) {
+	t.Helper()
+	seq, _ := st.NextScanSeq(ctx)
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("Band %04d", i)
+		if err := st.UpsertTrack(ctx, "filesystem", source.TrackMeta{
+			NativeID: fmt.Sprintf("bulk-%04d", i), Title: "Song", PrimaryArtist: source.ArtistReference{Name: name},
+			TrackCredits: []source.ArtistCredit{{Name: name}}, AlbumCredits: []source.ArtistCredit{{Name: name}},
+			Album: fmt.Sprintf("Album %04d", i), Container: "flac", Codec: "flac", Version: 1,
+		}, "", seq); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.FinishScan(ctx, "filesystem", seq); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A fresh library must not wait behind a full identity drain for artwork:
+// the art stage runs before the resolver in every pass.
+func TestArtFetchedBeforeIdentityResolution(t *testing.T) {
+	st, ctx := seedAlbum(t)
+	var mu sync.Mutex
+	var order []string
+	record := func(kind string) {
+		mu.Lock()
+		defer mu.Unlock()
+		order = append(order, kind)
+	}
+
+	// Second album: matched with a release group, artless -> CAA path.
+	seq, _ := st.NextScanSeq(ctx)
+	if err := st.UpsertTrack(ctx, "filesystem", source.TrackMeta{
+		NativeID: "m1", Title: "Hit", PrimaryArtist: source.ArtistReference{Name: "Matched Band"},
+		TrackCredits: []source.ArtistCredit{{Name: "Matched Band"}}, AlbumCredits: []source.ArtistCredit{{Name: "Matched Band"}},
+		Album: "Matched Album", Container: "flac", Codec: "flac", Version: 1,
+	}, "", seq); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.FinishScan(ctx, "filesystem", seq); err != nil {
+		t.Fatal(err)
+	}
+	due, err := st.DueMusicBrainzAlbums(ctx, time.Now(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, album := range due {
+		if album.Title != "Matched Album" {
+			continue
+		}
+		credits := []source.ArtistCredit{{Name: "Matched Band", MBID: "mbid-matched"}}
+		release := store.CanonicalRelease{ReleaseID: "rel-m", ReleaseGroupID: "rg-m", AlbumCredits: credits}
+		for _, track := range album.Tracks {
+			release.Tracks = append(release.Tracks, store.CanonicalTrack{Disc: track.Disc, Index: track.Index, Title: track.Title, DurationMs: track.DurationMs, RecordingID: "rec-m", Credits: credits})
+		}
+		applySeq, _ := st.NextScanSeq(ctx)
+		if _, err := st.ApplyMusicBrainzRelease(ctx, album, release, applySeq); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	mb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		record("resolve")
+		_, _ = w.Write([]byte(`{"releases":[],"release-groups":[],"artists":[]}`))
+	}))
+	defer mb.Close()
+	caa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		record("art")
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(pngBytes)
+	}))
+	defer caa.Close()
+
+	e := New(st, nil, t.TempDir(), Config{MusicBrainz: testMusicBrainzClient(t, st, mb.URL)})
+	e.CAABase = caa.URL
+	e.providerPacers = map[string]*providerPacer{}
+	e.Run(ctx)
+
+	mu.Lock()
+	defer mu.Unlock()
+	firstArt, firstResolve := -1, -1
+	for i, kind := range order {
+		if kind == "art" && firstArt == -1 {
+			firstArt = i
+		}
+		if kind == "resolve" && firstResolve == -1 {
+			firstResolve = i
+		}
+	}
+	if firstArt == -1 || (firstResolve != -1 && firstArt > firstResolve) {
+		t.Fatalf("artwork must be fetched before identity resolution: order=%v", order)
+	}
+}
+
+// One pass drains every eligible artless album, not just the first page.
+func TestAlbumArtStageDrainsBeyondPerRun(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	const albums = perRun + 10
+	seedArtlessAlbums(t, st, ctx, albums)
+	srv := lastfmArtServer(t, nil)
+	e := New(st, nil, t.TempDir(), Config{LastfmKey: func(context.Context) string { return "k" }})
+	e.LastfmBase = srv.URL
+	e.providerPacers = map[string]*providerPacer{}
+	e.Run(ctx)
+	need, err := st.AlbumsNeedingArt(ctx, albums)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(need) != 0 {
+		t.Fatalf("%d albums still artless after one pass", len(need))
+	}
+}
+
+// Long passes publish intermediate library.changed events so clients see
+// progress instead of a frozen library until the pass ends.
+func TestProgressPublishesDuringLongPasses(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	seedArtlessAlbums(t, st, ctx, 3)
+	bus := events.NewBus(st)
+	sub, cancel := bus.Subscribe("", 0)
+	defer cancel()
+	srv := lastfmArtServer(t, nil)
+	e := New(st, bus, t.TempDir(), Config{LastfmKey: func(context.Context) string { return "k" }})
+	e.LastfmBase = srv.URL
+	e.providerPacers = map[string]*providerPacer{}
+	e.ProgressInterval = 0 // publish on every progress point
+	e.Run(ctx)
+	events := 0
+	for {
+		select {
+		case ev := <-sub:
+			if ev.Type == "library.changed" {
+				events++
+			}
+			continue
+		default:
+		}
+		break
+	}
+	if events < 2 {
+		t.Fatalf("expected intermediate progress events, got %d", events)
 	}
 }
