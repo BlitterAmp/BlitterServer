@@ -420,3 +420,109 @@ func TestSearchTitleNormalization(t *testing.T) {
 		}
 	}
 }
+
+func editionRelease(id, title, artistID, rgID, date string, tracks []string, recordingPrefix string) string {
+	trackJSON := ""
+	for i, name := range tracks {
+		if i > 0 {
+			trackJSON += ","
+		}
+		trackJSON += fmt.Sprintf(`{"position":%d,"recording":{"id":"%s-%d","title":"%s","length":200000,"artist-credit":[{"name":"The Band","artist":{"id":"%s","name":"The Band"}}]}}`, i+1, recordingPrefix, i+1, name, artistID)
+	}
+	return `{"id":"` + id + `","title":"` + title + `","date":"` + date + `","release-group":{"id":"` + rgID + `"},"artist-credit":[{"name":"The Band","artist":{"id":"` + artistID + `","name":"The Band"}}],"media":[{"position":1,"tracks":[` + trackJSON + `]}]}`
+}
+
+func editionFixture(t *testing.T) (*store.Store, context.Context) {
+	t.Helper()
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	seq, _ := st.NextScanSeq(ctx)
+	for i, title := range []string{"Opening", "Closing"} {
+		meta := source.TrackMeta{NativeID: fmt.Sprintf("t%d", i), Title: title, Album: "Tied Album", Year: 2001, Index: i + 1, Disc: 1, DurationMs: 200000, PrimaryArtist: source.ArtistReference{Name: "The Band"}, AlbumCredits: []source.ArtistCredit{{Name: "The Band"}}, TrackCredits: []source.ArtistCredit{{Name: "The Band"}}, Container: "flac", Codec: "flac", Version: 1}
+		if err := st.UpsertTrack(ctx, "filesystem", meta, "", seq); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.FinishScan(ctx, "filesystem", seq); err != nil {
+		t.Fatal(err)
+	}
+	return st, ctx
+}
+
+func runEditionResolver(t *testing.T, st *store.Store, ctx context.Context, editionA, editionB string) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/release/ed-a"):
+			_, _ = w.Write([]byte(editionA))
+		case strings.HasPrefix(r.URL.Path, "/release/ed-b"):
+			_, _ = w.Write([]byte(editionB))
+		default:
+			_, _ = w.Write([]byte(`{"releases":[` + editionA + `,` + editionB + `]}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	client, _ := musicbrainz.NewClient(musicbrainz.Options{BaseURL: srv.URL, UserAgent: "BlitterServer/test (mailto:test@example.com)", Cache: musicbrainz.NewFilesystemCache(providercache.New(t.TempDir())), Interval: time.Nanosecond})
+	if _, err := New(st, client).Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Score-tied same-release-group editions: exactly one aligns with the local
+// files track-for-track, so it is the edition the files came from.
+func TestResolverBreaksEditionTiesStructurally(t *testing.T) {
+	st, ctx := editionFixture(t)
+	fits := editionRelease("ed-a", "Tied Album", "mbid-band", "rg-tied", "2001-05-01", []string{"Opening", "Closing"}, "rec")
+	misfits := editionRelease("ed-b", "Tied Album", "mbid-band", "rg-tied", "2001-05-01", []string{"Different Song", "Closing"}, "alt")
+	runEditionResolver(t, st, ctx, fits, misfits)
+	albums, _, err := st.ListAlbums(ctx, "title", "", 10)
+	if err != nil || len(albums) != 1 {
+		t.Fatalf("albums=%v err=%v", albums, err)
+	}
+	if albums[0].MusicBrainzReleaseID != "ed-a" {
+		t.Fatalf("structural fit must select the aligned edition, got %q", albums[0].MusicBrainzReleaseID)
+	}
+	tracks, err := st.ListAlbumTracks(ctx, albums[0].AlbumID)
+	if err != nil || len(tracks) != 2 || tracks[0].MusicBrainzRecordingID != "rec-1" {
+		t.Fatalf("track identity must apply: %v err=%v", tracks, err)
+	}
+}
+
+// Multiple fitting editions with identical aligned recordings are
+// interchangeable for identity; the best is applied instead of parking.
+func TestResolverAcceptsInterchangeableEditions(t *testing.T) {
+	st, ctx := editionFixture(t)
+	first := editionRelease("ed-a", "Tied Album", "mbid-band", "rg-tied", "2001-05-01", []string{"Opening", "Closing"}, "rec")
+	second := editionRelease("ed-b", "Tied Album", "mbid-band", "rg-tied", "2001-05-01", []string{"Opening", "Closing"}, "rec")
+	runEditionResolver(t, st, ctx, first, second)
+	albums, _, err := st.ListAlbums(ctx, "title", "", 10)
+	if err != nil || len(albums) != 1 {
+		t.Fatalf("albums=%v err=%v", albums, err)
+	}
+	if albums[0].MusicBrainzReleaseID == "" {
+		t.Fatal("interchangeable editions must still yield a full match")
+	}
+}
+
+// Fitting editions with different recordings stay parked; only shared
+// artist/release-group identity applies.
+func TestResolverKeepsDivergentEditionsParked(t *testing.T) {
+	st, ctx := editionFixture(t)
+	first := editionRelease("ed-a", "Tied Album", "mbid-band", "rg-tied", "2001-05-01", []string{"Opening", "Closing"}, "rec")
+	second := editionRelease("ed-b", "Tied Album", "mbid-band", "rg-tied", "2001-05-01", []string{"Opening", "Closing"}, "remaster")
+	runEditionResolver(t, st, ctx, first, second)
+	albums, _, err := st.ListAlbums(ctx, "title", "", 10)
+	if err != nil || len(albums) != 1 {
+		t.Fatalf("albums=%v err=%v", albums, err)
+	}
+	if albums[0].MusicBrainzReleaseID != "" {
+		t.Fatalf("divergent editions must not fully match, got %q", albums[0].MusicBrainzReleaseID)
+	}
+	if albums[0].MusicBrainzReleaseGroupID != "rg-tied" {
+		t.Fatalf("shared release group must still apply, got %q", albums[0].MusicBrainzReleaseGroupID)
+	}
+}

@@ -160,6 +160,17 @@ func (r *Resolver) resolve(ctx context.Context, album store.MusicBrainzAlbum) (b
 		// artists consolidate and CAA art unlocks, while the edition itself
 		// stays parked for review.
 		if state == "ambiguous" {
+			// Same-release-group editions tied on score: a unique structural
+			// fit is the edition the local files came from; multiple fits with
+			// identical aligned recordings are interchangeable for identity.
+			if full, ok := editionTiebreak(album, scored); ok {
+				seq, err := r.st.NextScanSeq(ctx)
+				if err != nil {
+					return false, err
+				}
+				release := canonical(full.release)
+				return r.st.ApplyMusicBrainzMatch(ctx, album, release, seq, full.persisted(), persist, r.now().Add(7*24*time.Hour))
+			}
 			if partial, ok := consensusIdentity(scored); ok {
 				seq, err := r.st.NextScanSeq(ctx)
 				if err != nil {
@@ -177,6 +188,74 @@ func (r *Resolver) resolve(ctx context.Context, album store.MusicBrainzAlbum) (b
 	release := canonical(best.release)
 	release.Authoritative = album.ReleaseID != ""
 	return r.st.ApplyMusicBrainzMatch(ctx, album, release, seq, best.persisted(), persist, r.now().Add(7*24*time.Hour))
+}
+
+// editionTiebreak resolves score-tied same-release-group editions. A single
+// candidate that aligns with the local files (exact track count plus strong
+// positional evidence) is the edition the files came from. Several such
+// candidates are acceptable only when their aligned recordings are identical,
+// making them interchangeable for identity purposes.
+func editionTiebreak(album store.MusicBrainzAlbum, scored []scoredRelease) (scoredRelease, bool) {
+	var plausible []scoredRelease
+	for _, c := range scored {
+		if c.score >= 60 {
+			plausible = append(plausible, c)
+		}
+	}
+	if len(plausible) < 2 {
+		return scoredRelease{}, false
+	}
+	rgID := plausible[0].release.ReleaseGroup.ID
+	if rgID == "" {
+		return scoredRelease{}, false
+	}
+	for _, c := range plausible[1:] {
+		if c.release.ReleaseGroup.ID != rgID {
+			return scoredRelease{}, false
+		}
+	}
+	var fitting []scoredRelease
+	for _, c := range plausible {
+		trackCount, _ := c.evidence["trackCount"].(string)
+		if c.score >= acceptScore && trackCount == "exact" && strongSearchMatch(album, c) {
+			fitting = append(fitting, c)
+		}
+	}
+	switch {
+	case len(fitting) == 1:
+		return fitting[0], true
+	case len(fitting) > 1:
+		reference := alignedRecordings(album, fitting[0].release)
+		for _, c := range fitting[1:] {
+			other := alignedRecordings(album, c.release)
+			if len(other) != len(reference) {
+				return scoredRelease{}, false
+			}
+			for position, recordingID := range reference {
+				if other[position] != recordingID {
+					return scoredRelease{}, false
+				}
+			}
+		}
+		return fitting[0], true
+	}
+	return scoredRelease{}, false
+}
+
+type trackPosition struct{ disc, index int }
+
+func alignedRecordings(album store.MusicBrainzAlbum, candidate release) map[trackPosition]string {
+	out := map[trackPosition]string{}
+	for _, medium := range candidate.Media {
+		for _, t := range medium.Tracks {
+			for _, lt := range album.Tracks {
+				if normalizedDisc(lt.Disc) == normalizedDisc(medium.Position) && lt.Index == t.Position {
+					out[trackPosition{normalizedDisc(medium.Position), t.Position}] = t.Recording.ID
+				}
+			}
+		}
+	}
+	return out
 }
 
 // consensusIdentity extracts identity every plausible (score >= 60) candidate
