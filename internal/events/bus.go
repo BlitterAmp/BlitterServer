@@ -135,3 +135,13 @@ func (b *Bus) Subscribe(profileID string, sinceSeq int64) (<-chan Event, func())
 	}
 	return out, cancel
 }
+
+// LatestSeq reports the newest persisted sequence so callers can subscribe
+// live-only. On store errors it returns 0 (full replay — safe, just noisy).
+func (b *Bus) LatestSeq(ctx context.Context) int64 {
+	seq, err := b.st.LatestEventSeq(ctx)
+	if err != nil {
+		return 0
+	}
+	return seq
+}

@@ -156,3 +156,68 @@ func seedOneTrack(t *testing.T, st *store.Store) {
 		t.Fatal(err)
 	}
 }
+
+// A connection WITHOUT Last-Event-ID is live-only: persisted history is never
+// replayed to it. New clients bootstrap through /v1/library and /v1/changes;
+// replaying the whole event log at every app launch produced sync storms
+// proportional to the instance's age.
+func TestContractSSEWithoutLastEventIDIsLiveOnly(t *testing.T) {
+	ts, st, tok := setup(t)
+	c, _ := api.NewClientWithResponses(ts.URL)
+	ctx := context.Background()
+	seedOneTrack(t, st)
+	tracks, err := c.ListTracksWithResponse(ctx, nil, bearer(tok))
+	if err != nil || tracks.JSON200 == nil || len(tracks.JSON200.Items) == 0 {
+		t.Fatalf("tracks: %v", err)
+	}
+	trackID := tracks.JSON200.Items[0].TrackId
+
+	// History that must NOT be replayed.
+	if love, err := c.SetLoveWithResponse(ctx, trackID, api.SetLoveJSONRequestBody{State: "loved"}, bearer(tok)); err != nil || love.JSON200 == nil {
+		t.Fatalf("pre-connect love: %v", err)
+	}
+
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+	req, _ := http.NewRequestWithContext(streamCtx, "GET", ts.URL+"/v1/events", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("sse open: %v", err)
+	}
+	defer resp.Body.Close()
+	reader := bufio.NewReader(resp.Body)
+
+	// Give any (incorrect) replay a moment to arrive, then publish live.
+	time.Sleep(150 * time.Millisecond)
+	if love, err := c.SetLoveWithResponse(ctx, trackID, api.SetLoveJSONRequestBody{State: "neutral"}, bearer(tok)); err != nil || love.JSON200 == nil {
+		t.Fatalf("live love: %v", err)
+	}
+
+	// The live change fans out as love.updated plus the Loved Tracks
+	// playlist.changed; both are fine. What must never arrive is the
+	// pre-connect history (the "loved" event or its playlist echo).
+	frames := readFrames(t, reader, 2, 5*time.Second)
+	if len(frames) == 0 {
+		t.Fatal("no live frames arrived")
+	}
+	sawLive := false
+	for _, frame := range frames {
+		if frame.Type != "love.updated" {
+			continue
+		}
+		var payload struct {
+			State string `json:"state"`
+		}
+		_ = json.Unmarshal(frame.Data, &payload)
+		if payload.State == "loved" {
+			t.Fatalf("received replayed history instead of live-only: %+v", frame)
+		}
+		if payload.State == "neutral" {
+			sawLive = true
+		}
+	}
+	if !sawLive && len(frames) < 2 {
+		t.Fatalf("live events missing: %+v", frames)
+	}
+}
