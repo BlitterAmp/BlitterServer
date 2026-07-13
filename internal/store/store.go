@@ -25,6 +25,8 @@ var migrations embed.FS
 type Store struct {
 	db              *sql.DB
 	secret          cipher.AEAD
+	dataDir         string
+	credentials     sync.Mutex
 	libraryIdentity sync.Mutex
 }
 
@@ -40,8 +42,13 @@ func Open(ctx context.Context, dataDir string) (*Store, error) {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("data dir: %w", err)
 	}
-	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_txlock=immediate",
-		filepath.Join(dataDir, "blitterserver.db"))
+	dbPath := filepath.Join(dataDir, "blitterserver.db")
+	_, statErr := os.Stat(dbPath)
+	created := errors.Is(statErr, os.ErrNotExist)
+	if statErr != nil && !created {
+		return nil, fmt.Errorf("stat sqlite database: %w", statErr)
+	}
+	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_txlock=immediate", dbPath)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
@@ -55,6 +62,10 @@ func Open(ctx context.Context, dataDir string) (*Store, error) {
 	if err := goose.UpContext(ctx, db, "migrations"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	if err := verifyMigrationHashes(ctx, db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("verify migrations: %w", err)
 	}
 	key, err := loadOrCreateLocalKey(filepath.Join(dataDir, "server-local.key"))
 	if err != nil {
@@ -71,7 +82,10 @@ func Open(ctx context.Context, dataDir string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	st := &Store{db: db, secret: aead}
+	st := &Store{db: db, secret: aead, dataDir: dataDir}
+	if created {
+		st.seedIntegrationCredentials(ctx)
+	}
 	if _, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO settings (key, value) VALUES ('library_id', ?)`, NewID("lib")); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("initialize library id: %w", err)
@@ -149,10 +163,17 @@ func (s *Store) GetSetting(ctx context.Context, key string) (string, bool, error
 }
 
 func (s *Store) SetSetting(ctx context.Context, key, value string) error {
+	if isIntegrationCredential(key) {
+		s.credentials.Lock()
+		defer s.credentials.Unlock()
+	}
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO settings (key, value) VALUES (?, ?)
 		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
-	return err
+	if err != nil || !isIntegrationCredential(key) {
+		return err
+	}
+	return s.writeCredentialSidecar(ctx)
 }
 
 // LibraryID returns the stable identity created with this database.
@@ -169,6 +190,8 @@ func (s *Store) LibraryID(ctx context.Context) (string, error) {
 
 // SetLastfmCredentials atomically persists the instance-wide provider pair.
 func (s *Store) SetLastfmCredentials(ctx context.Context, apiKey, sharedSecret string) error {
+	s.credentials.Lock()
+	defer s.credentials.Unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -180,7 +203,10 @@ func (s *Store) SetLastfmCredentials(ctx context.Context, apiKey, sharedSecret s
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return s.writeCredentialSidecar(ctx)
 }
 
 // SetupComplete reports whether first-run setup has happened: the admin

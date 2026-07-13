@@ -136,7 +136,7 @@ func handlerWithServer(st *store.Store, mgr *library.Manager, dataDir, version s
 	stream := handleStreamTrack(st, mgr)
 	sse := handleStreamEvents(bus)
 	download := handleDownloadArtifact(st, artMgr)
-	art := handleGetArt(st, dataDir)
+	art := handleGetArt(st, newArtCache(filepath.Join(dataDir, "art-cache"), defaultArtCacheBudget))
 	grants := handleCreateStreamGrant(st)
 	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {

@@ -169,8 +169,8 @@ func TestContractLibraryStreamingEndToEnd(t *testing.T) {
 	if err != nil || format != "jpeg" {
 		t.Fatalf("resized art must decode as jpeg: %v %q", err, format)
 	}
-	if img.Bounds().Dx() > 32 || img.Bounds().Dy() > 32 {
-		t.Fatalf("resize bounds: %v", img.Bounds())
+	if img.Bounds().Dx() != 96 || img.Bounds().Dy() != 96 {
+		t.Fatalf("resize must snap 32x32 up to 96x96: %v", img.Bounds())
 	}
 
 	// Stream grant: mint with the profile token, fetch with no auth at all.
