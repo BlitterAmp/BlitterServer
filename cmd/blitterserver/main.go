@@ -3,11 +3,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -39,6 +41,7 @@ func run() error {
 	pre.String("listen", "", "")
 	pre.String("data-dir", "", "")
 	pre.String("log-level", "", "")
+	pre.Bool("reset-db-on-schema-mismatch", false, "")
 	cp := pre.String("config", cfgPath, "path to blitterserver.yaml")
 	_ = pre.Parse(args)
 	cfgPath = *cp
@@ -57,7 +60,7 @@ func run() error {
 		return err
 	}
 
-	st, err := store.Open(context.Background(), cfg.DataDir)
+	st, err := openStore(context.Background(), cfg.DataDir, cfg.ResetDBOnSchemaMismatch)
 	if err != nil {
 		return err
 	}
@@ -87,4 +90,31 @@ func run() error {
 		defer cancel()
 		return srv.Shutdown(shutdownCtx)
 	}
+}
+
+func openStore(ctx context.Context, dataDir string, resetOnMismatch bool) (*store.Store, error) {
+	st, err := store.Open(ctx, dataDir)
+	var mismatch *store.MigrationMismatchError
+	if err == nil || !resetOnMismatch || !errors.As(err, &mismatch) {
+		return st, err
+	}
+	dbPath := filepath.Join(dataDir, "blitterserver.db")
+	preserved := fmt.Sprintf("%s.corrupt-%d", dbPath, time.Now().Unix())
+	for i := int64(1); ; i++ {
+		if _, statErr := os.Stat(preserved); errors.Is(statErr, os.ErrNotExist) {
+			break
+		} else if statErr != nil {
+			return nil, fmt.Errorf("check preserved database path: %w", statErr)
+		}
+		preserved = fmt.Sprintf("%s.corrupt-%d", dbPath, time.Now().Unix()+i)
+	}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		source := dbPath + suffix
+		if renameErr := os.Rename(source, preserved+suffix); renameErr != nil && !errors.Is(renameErr, os.ErrNotExist) {
+			return nil, fmt.Errorf("preserve mismatched database %s: %w", source, renameErr)
+		}
+	}
+	logging.From(ctx).Warn("moved aside database with migration mismatch",
+		"migration", mismatch.Version, "preserved_path", preserved)
+	return store.Open(ctx, dataDir)
 }

@@ -1071,6 +1071,7 @@ paths:
       operationId: getArt
       tags: [streaming]
       summary: Artwork with server-side resize + cache
+      description: Requested dimensions are rounded up independently to 96, 320, 640, or 1280 pixels while preserving aspect ratio. Requests at or above 1280 pixels, or requests without dimensions, return the original image.
       parameters:
         - { name: artId, in: path, required: true, schema: { type: string } }
         - { name: w, in: query, required: false, schema: { type: integer, maximum: 2048 } }

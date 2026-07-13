@@ -213,7 +213,7 @@ func handleDownloadArtifact(st *store.Store, artMgr *artifacts.Manager) http.Han
 
 // handleGetArt serves artwork, resizing (and caching) when w/h are given.
 // Resized output is always JPEG per the contract.
-func handleGetArt(st *store.Store, dataDir string) http.HandlerFunc {
+func handleGetArt(st *store.Store, cache *artCache) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		artID := strings.TrimPrefix(r.URL.Path, "/v1/art/")
 		path, mime, found, err := st.GetArt(r.Context(), artID)
@@ -232,6 +232,7 @@ func handleGetArt(st *store.Store, dataDir string) http.HandlerFunc {
 			WriteProblem(w, http.StatusBadRequest, "Bad Request", "bad_dimensions")
 			return
 		}
+		wQ, hQ = snapArtDimensions(wQ, hQ)
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		if wQ == 0 && hQ == 0 {
 			w.Header().Set("Content-Type", mime)
@@ -239,13 +240,13 @@ func handleGetArt(st *store.Store, dataDir string) http.HandlerFunc {
 			return
 		}
 
-		cachePath := filepath.Join(dataDir, "art-cache", fmt.Sprintf("%s_%dx%d.jpg", artID, wQ, hQ))
-		if _, err := os.Stat(cachePath); err != nil {
-			if err := resizeToCache(path, cachePath, wQ, hQ); err != nil {
-				logging.From(r.Context()).Error("art resize", "err", err)
-				WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "internal")
-				return
-			}
+		cachePath := filepath.Join(cache.root, fmt.Sprintf("%s_%dx%d.jpg", artID, wQ, hQ))
+		if err := cache.getOrCreate(r.Context(), cachePath, func(dst string) error {
+			return resizeToCache(path, dst, wQ, hQ)
+		}); err != nil {
+			logging.From(r.Context()).Error("art resize", "err", err)
+			WriteProblem(w, http.StatusInternalServerError, "Internal Server Error", "internal")
+			return
 		}
 		w.Header().Set("Content-Type", "image/jpeg")
 		http.ServeFile(w, r, cachePath)

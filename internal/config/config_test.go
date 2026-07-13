@@ -24,14 +24,17 @@ func TestDefaults(t *testing.T) {
 func TestPrecedenceFlagsBeatEnvBeatFile(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "blitterserver.yaml")
-	os.WriteFile(file, []byte("listen: \"file:1\"\nlog:\n  level: warn\n"), 0o644)
+	os.WriteFile(file, []byte("listen: \"file:1\"\nreset_db_on_schema_mismatch: false\nlog:\n  level: warn\n"), 0o644)
 	env := func(k string) string {
-		if k == "BLITTER_LISTEN" {
+		switch k {
+		case "BLITTER_LISTEN":
 			return "env:2"
+		case "BLITTER_RESET_DB_ON_SCHEMA_MISMATCH":
+			return "true"
 		}
 		return ""
 	}
-	c, err := Load(file, []string{"--listen", "flag:3"}, env)
+	c, err := Load(file, []string{"--listen", "flag:3", "--reset-db-on-schema-mismatch=false"}, env)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,6 +43,24 @@ func TestPrecedenceFlagsBeatEnvBeatFile(t *testing.T) {
 	}
 	if c.Log.Level != "warn" {
 		t.Fatalf("file value must apply when env/flag absent: %q", c.Log.Level)
+	}
+	if c.ResetDBOnSchemaMismatch {
+		t.Fatal("flag must override reset env and file values")
+	}
+}
+
+func TestResetDBOnSchemaMismatchEnvironment(t *testing.T) {
+	c, err := Load("", nil, func(k string) string {
+		if k == "BLITTER_RESET_DB_ON_SCHEMA_MISMATCH" {
+			return "true"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.ResetDBOnSchemaMismatch {
+		t.Fatal("reset flag must load from environment")
 	}
 }
 

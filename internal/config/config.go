@@ -11,22 +11,25 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"github.com/BlitterAmp/BlitterServer/internal/logging"
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	Listen  string          `yaml:"listen"`
-	DataDir string          `yaml:"data_dir"`
-	Log     logging.Options `yaml:"-"`
+	Listen                  string          `yaml:"listen"`
+	DataDir                 string          `yaml:"data_dir"`
+	ResetDBOnSchemaMismatch bool            `yaml:"reset_db_on_schema_mismatch"`
+	Log                     logging.Options `yaml:"-"`
 }
 
 // fileConfig mirrors the YAML shape (logging.Options carries no yaml tags).
 type fileConfig struct {
-	Listen  string `yaml:"listen"`
-	DataDir string `yaml:"data_dir"`
-	Log     struct {
+	Listen                  string `yaml:"listen"`
+	DataDir                 string `yaml:"data_dir"`
+	ResetDBOnSchemaMismatch *bool  `yaml:"reset_db_on_schema_mismatch"`
+	Log                     struct {
 		Level  string `yaml:"level"`
 		Format string `yaml:"format"`
 		File   struct {
@@ -79,15 +82,23 @@ func Load(path string, args []string, getenv func(string) string) (Config, error
 	if v := getenv("BLITTER_LOG_FORMAT"); v != "" {
 		c.Log.Format = v
 	}
+	if v := getenv("BLITTER_RESET_DB_ON_SCHEMA_MISMATCH"); v != "" {
+		parsed, err := strconv.ParseBool(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("BLITTER_RESET_DB_ON_SCHEMA_MISMATCH: %w", err)
+		}
+		c.ResetDBOnSchemaMismatch = parsed
+	}
 
 	fs := flag.NewFlagSet("blitterserver", flag.ContinueOnError)
 	listen := fs.String("listen", c.Listen, "address to listen on")
 	dataDir := fs.String("data-dir", c.DataDir, "state directory (sqlite, caches, logs)")
 	logLevel := fs.String("log-level", c.Log.Level, "debug|info|warn|error")
+	resetDB := fs.Bool("reset-db-on-schema-mismatch", c.ResetDBOnSchemaMismatch, "move aside and recreate a database with changed migrations")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
-	c.Listen, c.DataDir, c.Log.Level = *listen, *dataDir, *logLevel
+	c.Listen, c.DataDir, c.Log.Level, c.ResetDBOnSchemaMismatch = *listen, *dataDir, *logLevel, *resetDB
 	return c, nil
 }
 
@@ -116,6 +127,9 @@ func apply(c *Config, fc fileConfig) {
 	}
 	if fc.DataDir != "" {
 		c.DataDir = fc.DataDir
+	}
+	if fc.ResetDBOnSchemaMismatch != nil {
+		c.ResetDBOnSchemaMismatch = *fc.ResetDBOnSchemaMismatch
 	}
 	if fc.Log.Level != "" {
 		c.Log.Level = fc.Log.Level
