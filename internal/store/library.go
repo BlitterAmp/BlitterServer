@@ -389,7 +389,12 @@ func (s *Store) UpsertArt(ctx context.Context, hash, mime string, data []byte, a
 		return "", err
 	}
 	path := filepath.Join(artDir, hash)
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) || err == nil && info.Size() != int64(len(data)) {
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			return "", err
+		}
+	} else if err != nil {
 		return "", err
 	}
 	artID := NewID("img")

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/BlitterAmp/BlitterServer/internal/musicbrainz"
+	"github.com/BlitterAmp/BlitterServer/internal/providercache"
 	"github.com/BlitterAmp/BlitterServer/internal/source"
 	"github.com/BlitterAmp/BlitterServer/internal/store"
 )
@@ -80,7 +81,7 @@ func TestEmbeddedReleaseIDUsesDirectLookup(t *testing.T) {
 		_, _ = w.Write([]byte(`{"id":"embedded-release","title":"Canonical title","release-group":{"id":"group"},"artist-credit":[{"name":"Canonical","artist":{"id":"artist","name":"Canonical"}}],"media":[{"position":1,"tracks":[{"position":1,"recording":{"id":"recording","title":"Localized canonical title","length":9000,"artist-credit":[{"name":"Canonical","artist":{"id":"artist","name":"Canonical"}}]}}]}]}`))
 	}))
 	defer srv.Close()
-	client, err := musicbrainz.NewClient(musicbrainz.Options{BaseURL: srv.URL, UserAgent: "BlitterServer/test (mailto:test@example.com)", Cache: st, Interval: time.Nanosecond})
+	client, err := musicbrainz.NewClient(musicbrainz.Options{BaseURL: srv.URL, UserAgent: "BlitterServer/test (mailto:test@example.com)", Cache: musicbrainz.NewFilesystemCache(providercache.New(t.TempDir())), Interval: time.Nanosecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +138,7 @@ func TestUntaggedSearchFetchesBoundedDetailsBeforeStrongMatch(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	client, _ := musicbrainz.NewClient(musicbrainz.Options{BaseURL: srv.URL, UserAgent: "BlitterServer/test (mailto:test@example.com)", Cache: st, Interval: time.Nanosecond})
+	client, _ := musicbrainz.NewClient(musicbrainz.Options{BaseURL: srv.URL, UserAgent: "BlitterServer/test (mailto:test@example.com)", Cache: musicbrainz.NewFilesystemCache(providercache.New(t.TempDir())), Interval: time.Nanosecond})
 	r := New(st, client)
 	changed, err := r.Run(ctx)
 	if err != nil || !changed {
@@ -167,7 +168,7 @@ func TestResolverDoesNotApplyResultAfterConcurrentScanChange(t *testing.T) {
 		_, _ = w.Write([]byte(`{"id":"embedded","release-group":{"id":"group"},"artist-credit":[{"name":"Canonical","artist":{"id":"artist","name":"Canonical"}}],"media":[{"position":1,"tracks":[{"position":1,"recording":{"id":"recording","title":"Before","length":1000,"artist-credit":[{"name":"Canonical","artist":{"id":"artist","name":"Canonical"}}]}}]}]}`))
 	}))
 	defer srv.Close()
-	client, _ := musicbrainz.NewClient(musicbrainz.Options{BaseURL: srv.URL, UserAgent: "BlitterServer/test (mailto:test@example.com)", Cache: st, Interval: time.Nanosecond})
+	client, _ := musicbrainz.NewClient(musicbrainz.Options{BaseURL: srv.URL, UserAgent: "BlitterServer/test (mailto:test@example.com)", Cache: musicbrainz.NewFilesystemCache(providercache.New(t.TempDir())), Interval: time.Nanosecond})
 	result := make(chan struct {
 		changed bool
 		err     error

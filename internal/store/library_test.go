@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -674,6 +675,44 @@ func TestArtStorageAndPropagation(t *testing.T) {
 	path, mime, found, err := s.GetArt(ctx, artID)
 	if err != nil || !found || mime != "image/png" || path == "" {
 		t.Fatalf("get art: %v %v %q %q", err, found, path, mime)
+	}
+}
+
+func TestUpsertArtDoesNotRewriteExistingBlobAfterDatabaseReset(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	artDir := filepath.Join(dataDir, "art")
+	s, err := Open(ctx, dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpsertArt(ctx, "survivor", "image/png", []byte("PNGDATA"), artDir); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(artDir, "survivor")
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	if err := os.Remove(filepath.Join(dataDir, "blitterserver.db")); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(ctx, dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	time.Sleep(10 * time.Millisecond)
+	if _, err := s.UpsertArt(ctx, "survivor", "image/png", []byte("PNGDATA"), artDir); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Fatalf("blob was rewritten: before=%v after=%v", before.ModTime(), after.ModTime())
 	}
 }
 

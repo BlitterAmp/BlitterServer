@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	"github.com/BlitterAmp/BlitterServer/internal/logging"
 	"github.com/BlitterAmp/BlitterServer/internal/mbresolver"
 	"github.com/BlitterAmp/BlitterServer/internal/musicbrainz"
+	"github.com/BlitterAmp/BlitterServer/internal/providercache"
 	"github.com/BlitterAmp/BlitterServer/internal/store"
 )
 
@@ -39,6 +41,8 @@ type Config struct {
 	FanartKey func(context.Context) string
 	// UserAgent identifies us to MusicBrainz (required by their policy).
 	MusicBrainz *musicbrainz.Client
+	// ProviderCache persists public provider responses outside the library database.
+	ProviderCache *providercache.Cache
 }
 
 // Enricher runs enrichment passes. Base URLs are fields so tests can point them
@@ -51,6 +55,7 @@ type Enricher struct {
 	cfg      Config
 	resolver *mbresolver.Resolver
 	mbClient *musicbrainz.Client
+	cache    *providercache.Cache
 
 	CAABase    string
 	LastfmBase string
@@ -64,6 +69,7 @@ func New(st *store.Store, bus *events.Bus, artDir string, cfg Config) *Enricher 
 		artDir:     artDir,
 		http:       &http.Client{Timeout: 20 * time.Second},
 		cfg:        cfg,
+		cache:      cfg.ProviderCache,
 		CAABase:    "https://coverartarchive.org",
 		LastfmBase: "https://ws.audioscrobbler.com/2.0",
 		FanartBase: "https://webservice.fanart.tv/v3.2",
@@ -197,7 +203,7 @@ func (e *Enricher) albumArt(ctx context.Context, releaseGroupID, artist, album s
 }
 
 func (e *Enricher) albumArtForReleaseGroup(ctx context.Context, releaseGroupID, artist, album string) ([]byte, string) {
-	if data, mime := e.fetch(ctx, fmt.Sprintf("%s/release-group/%s/front-500", e.CAABase, releaseGroupID), ""); data != nil {
+	if data, mime := e.fetch(ctx, "caa", fmt.Sprintf("%s/release-group/%s/front-500", e.CAABase, releaseGroupID), ""); data != nil {
 		return data, mime
 	}
 	if key := e.fanartKey(ctx); key != "" {
@@ -211,7 +217,7 @@ func (e *Enricher) albumArtForReleaseGroup(ctx context.Context, releaseGroupID, 
 func (e *Enricher) lastfmAlbumArt(ctx context.Context, artist, album string) ([]byte, string) {
 	if key := e.lastfmKey(ctx); key != "" {
 		if u := e.lastfmAlbumImage(ctx, key, artist, album); u != "" {
-			return e.fetch(ctx, u, "")
+			return e.fetch(ctx, "lastfm", u, "")
 		}
 	}
 	return nil, ""
@@ -232,9 +238,10 @@ func (e *Enricher) fanartAlbumArt(ctx context.Context, key, releaseGroupID strin
 	}
 	for _, album := range body.Albums {
 		if album.ReleaseGroupID == releaseGroupID && len(album.AlbumCover) > 0 && album.AlbumCover[0].URL != "" {
-			return e.fetch(ctx, album.AlbumCover[0].URL, "")
+			return e.fetch(ctx, "fanart", album.AlbumCover[0].URL, "")
 		}
 	}
+	e.markMiss(ctx, "fanart", u)
 	return nil, ""
 }
 
@@ -252,7 +259,11 @@ func (e *Enricher) lastfmAlbumImage(ctx context.Context, key, artist, album stri
 	if !e.getJSON(ctx, u, "", &body) {
 		return ""
 	}
-	return largestImage(body.Album.Image)
+	image := largestImage(body.Album.Image)
+	if image == "" {
+		e.markMiss(ctx, "lastfm", u)
+	}
+	return image
 }
 
 // ── artist art (fanart.tv) ──
@@ -280,14 +291,28 @@ func (e *Enricher) artistArt(ctx context.Context, mbid string) ([]byte, string) 
 		pick = body.Background[0].URL
 	}
 	if pick == "" {
+		e.markMiss(ctx, "fanart", u)
 		return nil, ""
 	}
-	return e.fetch(ctx, pick, "")
+	return e.fetch(ctx, "fanart", pick, "")
 }
 
 // ── http helpers ──
 
 func (e *Enricher) getJSON(ctx context.Context, u, userAgent string, out any) bool {
+	provider := e.provider(u)
+	key, err := providercache.CanonicalKey(http.MethodGet, u)
+	if err != nil {
+		return false
+	}
+	if e.cache != nil {
+		if cached, ok := e.cache.Get(provider, key); ok && cached.Fresh(time.Now()) {
+			if cached.Kind == providercache.KindMiss || cached.Status != http.StatusOK {
+				return false
+			}
+			return json.Unmarshal(cached.Body, out) == nil
+		}
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return false
@@ -301,13 +326,38 @@ func (e *Enricher) getJSON(ctx context.Context, u, userAgent string, out any) bo
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusNotFound {
+			e.putCache(ctx, provider, key, providercache.Entry{URL: key, Status: resp.StatusCode, FetchedAt: time.Now(), FreshUntil: time.Now().Add(7 * 24 * time.Hour), Kind: providercache.KindMiss})
+		}
 		return false
 	}
-	return json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(out) == nil
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil || json.Unmarshal(body, out) != nil {
+		return false
+	}
+	e.putCache(ctx, provider, key, providercache.Entry{URL: key, Status: resp.StatusCode, MIME: resp.Header.Get("Content-Type"), FetchedAt: time.Now(), FreshUntil: time.Now().Add(30 * 24 * time.Hour), Kind: providercache.KindSuccess, Body: body})
+	return true
 }
 
 // fetch downloads binary art; returns the bytes + content type.
-func (e *Enricher) fetch(ctx context.Context, u, userAgent string) ([]byte, string) {
+func (e *Enricher) fetch(ctx context.Context, provider, u, userAgent string) ([]byte, string) {
+	key, err := providercache.CanonicalKey(http.MethodGet, u)
+	if err != nil {
+		return nil, ""
+	}
+	if e.cache != nil {
+		if cached, ok := e.cache.Get(provider, key); ok && cached.Fresh(time.Now()) {
+			if cached.Kind == providercache.KindMiss {
+				return nil, ""
+			}
+			if cached.BlobHash != "" {
+				data, err := os.ReadFile(filepath.Join(e.artDir, cached.BlobHash))
+				if err == nil {
+					return data, cached.MIME
+				}
+			}
+		}
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, ""
@@ -321,6 +371,9 @@ func (e *Enricher) fetch(ctx context.Context, u, userAgent string) ([]byte, stri
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusNotFound {
+			e.putCache(ctx, provider, key, providercache.Entry{URL: key, Status: resp.StatusCode, FetchedAt: time.Now(), FreshUntil: time.Now().Add(7 * 24 * time.Hour), Kind: providercache.KindMiss})
+		}
 		return nil, ""
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 12<<20))
@@ -331,7 +384,38 @@ func (e *Enricher) fetch(ctx context.Context, u, userAgent string) ([]byte, stri
 	if mime == "" || !strings.HasPrefix(mime, "image/") {
 		mime = "image/jpeg"
 	}
+	sum := sha256.Sum256(data)
+	e.putCache(ctx, provider, key, providercache.Entry{URL: key, Status: resp.StatusCode, MIME: mime, FetchedAt: time.Now(), FreshUntil: time.Now().Add(30 * 24 * time.Hour), Kind: providercache.KindSuccess, BlobHash: hex.EncodeToString(sum[:])})
 	return data, mime
+}
+
+func (e *Enricher) provider(u string) string {
+	switch {
+	case strings.HasPrefix(u, e.CAABase):
+		return "caa"
+	case strings.HasPrefix(u, e.FanartBase):
+		return "fanart"
+	case strings.HasPrefix(u, e.LastfmBase):
+		return "lastfm"
+	default:
+		return "images"
+	}
+}
+
+func (e *Enricher) putCache(ctx context.Context, provider, key string, entry providercache.Entry) {
+	if e.cache != nil {
+		if err := e.cache.Put(provider, key, entry); err != nil {
+			logging.From(ctx).Debug("provider cache write failed", "provider", provider, "err", err)
+		}
+	}
+}
+
+func (e *Enricher) markMiss(ctx context.Context, provider, rawURL string) {
+	key, err := providercache.CanonicalKey(http.MethodGet, rawURL)
+	if err == nil {
+		now := time.Now()
+		e.putCache(ctx, provider, key, providercache.Entry{URL: key, Status: http.StatusOK, FetchedAt: now, FreshUntil: now.Add(7 * 24 * time.Hour), Kind: providercache.KindMiss})
+	}
 }
 
 func (e *Enricher) do(req *http.Request) (*http.Response, error) {
