@@ -101,6 +101,9 @@ func TestPlaylistPermissions(t *testing.T) {
 	if len(page.Items) != 2 || page.Items[0].ItemId == "" {
 		t.Fatalf("items: %+v", page)
 	}
+	if len(page.Items[0].ArtistCredits) == 0 || page.Items[0].PrimaryArtist.Name != "Alpha" || page.Items[0].MusicBrainzRecordingId == nil {
+		t.Fatalf("playlist track identity: %+v", page.Items[0])
+	}
 	removed, err := s.RemovePlaylistTrack(ctx2, api.RemovePlaylistTrackRequestObject{
 		PlaylistId: pl.PlaylistId, ItemId: page.Items[0].ItemId})
 	if err != nil {
@@ -206,6 +209,7 @@ func TestPlaybackAndPresenceEndpoints(t *testing.T) {
 	if len(entries) != 1 || entries[0].ProfileName != "Nathan" || entries[0].Track.TrackId != tr.TrackID {
 		t.Fatalf("presence: %+v", entries)
 	}
+	assertTrackIdentity(t, entries[0].Track)
 
 	s.ReportPlaybackEvents(ctx1, api.ReportPlaybackEventsRequestObject{
 		Body: &api.ReportPlaybackEventsJSONRequestBody{Events: []api.PlaybackEvent{

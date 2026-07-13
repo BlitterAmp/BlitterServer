@@ -211,10 +211,247 @@ func TestArtistExternalArtUpgradesUnchangedAlbumFallback(t *testing.T) {
 
 func meta(native, title, artist, album, genre string, year, idx int) source.TrackMeta {
 	return source.TrackMeta{
-		NativeID: native, Title: title, Artist: artist, AlbumArtist: artist,
+		NativeID: native, Title: title, PrimaryArtist: source.ArtistReference{Name: artist}, TrackCredits: []source.ArtistCredit{{Name: artist}}, AlbumCredits: []source.ArtistCredit{{Name: artist}},
 		Album: album, Genre: genre, Year: year, Index: idx,
 		DurationMs: 2000, Container: "flac", Codec: "flac", BitrateKbps: 900,
 		SizeBytes: 123456, Version: 1,
+	}
+}
+
+func TestMusicBrainzIdentityAndStructuredCredits(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	const primaryMBID = "11111111-1111-1111-1111-111111111111"
+	const guestMBID = "22222222-2222-2222-2222-222222222222"
+	seq, _ := s.NextScanSeq(ctx)
+	credits := []source.ArtistCredit{{Name: "Jean-Michel Jarre", MBID: primaryMBID, JoinPhrase: " feat. "}, {Name: "Guest", MBID: guestMBID}}
+	first := source.TrackMeta{NativeID: "one.flac", Title: "One", Album: "Release", PrimaryArtist: source.ArtistReference{Name: "Jean-Michel Jarre", MBID: primaryMBID}, TrackCredits: credits, AlbumCredits: credits, RecordingMBID: "33333333-3333-3333-3333-333333333333", ReleaseMBID: "44444444-4444-4444-4444-444444444444", ReleaseGroupMBID: "55555555-5555-5555-5555-555555555555", Container: "flac", Codec: "flac"}
+	if err := s.UpsertTrack(ctx, "filesystem", first, "", seq); err != nil {
+		t.Fatal(err)
+	}
+	alias := first
+	alias.NativeID = "two.flac"
+	alias.Title = "Two"
+	alias.Album = "Other Release"
+	alias.PrimaryArtist.Name = "Jean Michel Jarre"
+	alias.TrackCredits = []source.ArtistCredit{{Name: "Jean Michel Jarre", MBID: primaryMBID}}
+	alias.AlbumCredits = []source.ArtistCredit{{Name: "Jean Michel Jarre", MBID: primaryMBID}}
+	alias.RecordingMBID = "99999999-9999-9999-9999-999999999999"
+	alias.ReleaseMBID = "66666666-6666-6666-6666-666666666666"
+	if err := s.UpsertTrack(ctx, "filesystem", alias, "", seq); err != nil {
+		t.Fatal(err)
+	}
+	homonym := alias
+	homonym.NativeID = "three.flac"
+	homonym.PrimaryArtist.MBID = "77777777-7777-7777-7777-777777777777"
+	homonym.TrackCredits[0].MBID = homonym.PrimaryArtist.MBID
+	homonym.AlbumCredits[0].MBID = homonym.PrimaryArtist.MBID
+	homonym.RecordingMBID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	homonym.ReleaseMBID = "88888888-8888-8888-8888-888888888888"
+	if err := s.UpsertTrack(ctx, "filesystem", homonym, "", seq); err != nil {
+		t.Fatal(err)
+	}
+
+	artists, _, err := s.ListArtists(ctx, "title", "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artists) != 3 {
+		t.Fatalf("artists=%d want primary, guest, homonym", len(artists))
+	}
+	var primary, guest ArtistRow
+	for _, a := range artists {
+		if a.MusicBrainzID == primaryMBID {
+			primary = a
+		}
+		if a.MusicBrainzID == guestMBID {
+			guest = a
+		}
+	}
+	if primary.ArtistID == "" || len(primary.Aliases) != 1 || primary.Aliases[0] != "Jean Michel Jarre" {
+		t.Fatalf("primary identity: %+v", primary)
+	}
+	tracks, err := s.ListArtistTracks(ctx, guest.ArtistID)
+	if err != nil || len(tracks) != 1 {
+		t.Fatalf("featured membership: %v %+v", err, tracks)
+	}
+	if len(tracks[0].ArtistCredits) != 2 || tracks[0].ArtistCredits[0].JoinPhrase != " feat. " {
+		t.Fatalf("credits: %+v", tracks[0].ArtistCredits)
+	}
+	if tracks[0].MusicBrainzRecordingID != first.RecordingMBID {
+		t.Fatalf("recording MBID: %+v", tracks[0])
+	}
+}
+
+func TestAlbumIdentitySeparatesTaggedReleasesAndUntaggedFallback(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	seq, _ := s.NextScanSeq(ctx)
+
+	first := meta("first.flac", "First", "Artist", "Shared Title", "", 2000, 1)
+	first.ReleaseMBID = "11111111-1111-1111-1111-111111111111"
+	second := meta("second.flac", "Second", "Artist", "Shared Title", "", 2000, 1)
+	second.ReleaseMBID = "22222222-2222-2222-2222-222222222222"
+	untagged := meta("untagged.flac", "Untagged", "Artist", "Shared Title", "", 2000, 1)
+	untaggedAgain := meta("untagged-again.flac", "Untagged Again", "Artist", "Shared Title", "", 2000, 2)
+	for _, track := range []source.TrackMeta{untagged, first, second, untaggedAgain} {
+		if err := s.UpsertTrack(ctx, "filesystem", track, "", seq); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var albums int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT album_id) FROM tracks WHERE source_kind = 'filesystem'`).Scan(&albums); err != nil {
+		t.Fatal(err)
+	}
+	if albums != 3 {
+		t.Fatalf("distinct albums=%d want 3", albums)
+	}
+	var untaggedTracks int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tracks JOIN albums USING (album_id) WHERE tracks.native_id LIKE 'untagged%' AND albums.musicbrainz_release_id IS NULL`).Scan(&untaggedTracks); err != nil {
+		t.Fatal(err)
+	}
+	if untaggedTracks != 2 {
+		t.Fatalf("untagged tracks on fallback album=%d want 2", untaggedTracks)
+	}
+}
+
+func TestRecordingMBIDAllowsMultipleSourceTracks(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	seq, _ := s.NextScanSeq(ctx)
+	const recordingMBID = "33333333-3333-3333-3333-333333333333"
+
+	first := meta("lossless.flac", "Song", "Artist", "Album", "", 2000, 1)
+	first.RecordingMBID = recordingMBID
+	second := meta("portable.m4a", "Song", "Artist", "Album", "", 2000, 1)
+	second.RecordingMBID = recordingMBID
+	second.Container = "m4a"
+	second.Codec = "aac"
+	for _, track := range []source.TrackMeta{first, second} {
+		if err := s.UpsertTrack(ctx, "filesystem", track, "", seq); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var tracks int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tracks WHERE musicbrainz_recording_id = ?`, recordingMBID).Scan(&tracks); err != nil {
+		t.Fatal(err)
+	}
+	if tracks != 2 {
+		t.Fatalf("tracks=%d want 2", tracks)
+	}
+}
+
+func TestRescanPromotesSourceLinkedFallbackIdentity(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	initial := meta("song.flac", "Song", "Local Artist", "Local Album", "", 2000, 1)
+	seq, _ := s.NextScanSeq(ctx)
+	if err := s.UpsertTrack(ctx, "filesystem", initial, "", seq); err != nil {
+		t.Fatal(err)
+	}
+	before, _, _ := s.ListTracks(ctx, "title", "", 10)
+	artistID, albumID := before[0].ArtistID, before[0].AlbumID
+
+	tagged := initial
+	tagged.PrimaryArtist.MBID = "11111111-1111-1111-1111-111111111111"
+	tagged.TrackCredits[0].MBID = tagged.PrimaryArtist.MBID
+	tagged.AlbumCredits[0].MBID = tagged.PrimaryArtist.MBID
+	tagged.ReleaseMBID = "22222222-2222-2222-2222-222222222222"
+	seq, _ = s.NextScanSeq(ctx)
+	if err := s.UpsertTrack(ctx, "filesystem", tagged, "", seq); err != nil {
+		t.Fatal(err)
+	}
+	after, _, _ := s.ListTracks(ctx, "title", "", 10)
+	if after[0].ArtistID != artistID || after[0].AlbumID != albumID {
+		t.Fatalf("opaque ids changed on promotion: before=%s/%s after=%s/%s", artistID, albumID, after[0].ArtistID, after[0].AlbumID)
+	}
+	artist, found, err := s.GetArtist(ctx, artistID)
+	if err != nil || !found || artist.MusicBrainzID != tagged.PrimaryArtist.MBID {
+		t.Fatalf("artist promotion: found=%v err=%v artist=%+v", found, err, artist)
+	}
+	album, found, err := s.GetAlbum(ctx, albumID)
+	if err != nil || !found || album.MusicBrainzReleaseID != tagged.ReleaseMBID {
+		t.Fatalf("album promotion: found=%v err=%v album=%+v", found, err, album)
+	}
+}
+
+func TestRescanUsesExistingCanonicalIdentityOnMBIDConflict(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	const artistMBID = "11111111-1111-1111-1111-111111111111"
+	const releaseMBID = "22222222-2222-2222-2222-222222222222"
+	seq, _ := s.NextScanSeq(ctx)
+	canonical := meta("canonical.flac", "Canonical", "Canonical Artist", "Canonical Album", "", 2000, 1)
+	canonical.PrimaryArtist.MBID, canonical.TrackCredits[0].MBID, canonical.AlbumCredits[0].MBID = artistMBID, artistMBID, artistMBID
+	canonical.ReleaseMBID = releaseMBID
+	if err := s.UpsertTrack(ctx, "filesystem", canonical, "", seq); err != nil {
+		t.Fatal(err)
+	}
+	fallback := meta("fallback.flac", "Fallback", "Local Artist", "Local Album", "", 2000, 1)
+	if err := s.UpsertTrack(ctx, "filesystem", fallback, "", seq); err != nil {
+		t.Fatal(err)
+	}
+	tracks, _, _ := s.ListTracks(ctx, "title", "", 10)
+	var canonicalArtistID, canonicalAlbumID, fallbackArtistID, fallbackAlbumID string
+	for _, tr := range tracks {
+		if tr.Title == "Canonical" {
+			canonicalArtistID, canonicalAlbumID = tr.ArtistID, tr.AlbumID
+		} else {
+			fallbackArtistID, fallbackAlbumID = tr.ArtistID, tr.AlbumID
+		}
+	}
+	fallback.PrimaryArtist.MBID, fallback.TrackCredits[0].MBID, fallback.AlbumCredits[0].MBID = artistMBID, artistMBID, artistMBID
+	fallback.ReleaseMBID = releaseMBID
+	seq, _ = s.NextScanSeq(ctx)
+	if err := s.UpsertTrack(ctx, "filesystem", fallback, "", seq); err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := s.GetTrack(ctx, tracks[1].TrackID)
+	if err != nil || !found {
+		t.Fatalf("fallback track: found=%v err=%v", found, err)
+	}
+	if got.ArtistID != canonicalArtistID || got.AlbumID != canonicalAlbumID {
+		t.Fatalf("conflict did not use canonical rows: %+v", got)
+	}
+	var fallbackArtistMBID, fallbackAlbumMBID *string
+	if err := s.db.QueryRowContext(ctx, `SELECT musicbrainz_id FROM artists WHERE artist_id=?`, fallbackArtistID).Scan(&fallbackArtistMBID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT musicbrainz_release_id FROM albums WHERE album_id=?`, fallbackAlbumID).Scan(&fallbackAlbumMBID); err != nil {
+		t.Fatal(err)
+	}
+	if fallbackArtistMBID != nil || fallbackAlbumMBID != nil {
+		t.Fatalf("conflicting fallback rows were destructively promoted: artist=%v album=%v", fallbackArtistMBID, fallbackAlbumMBID)
+	}
+}
+
+func TestFinishScanKeepsAlbumAndCreditedArtistsPresent(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	seq, _ := s.NextScanSeq(ctx)
+	track := meta("compilation.flac", "Song", "Various Artists", "Compilation", "", 2000, 1)
+	track.TrackCredits = []source.ArtistCredit{{Name: "Performer"}}
+	track.AlbumCredits = []source.ArtistCredit{{Name: "Various Artists"}}
+	if err := s.UpsertTrack(ctx, "filesystem", track, "", seq); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinishScan(ctx, "filesystem", seq); err != nil {
+		t.Fatal(err)
+	}
+	artists, _, err := s.ListArtists(ctx, "title", "", 10)
+	if err != nil || len(artists) != 2 {
+		t.Fatalf("compilation artists: err=%v artists=%+v", err, artists)
+	}
+	for _, artist := range artists {
+		if _, found, err := s.GetArtist(ctx, artist.ArtistID); err != nil || !found {
+			t.Fatalf("artist %q is not resolvable: found=%v err=%v", artist.Name, found, err)
+		}
+	}
+	result, err := s.SearchLibrary(ctx, "Performer")
+	if err != nil || len(result.Artists) != 1 || result.Artists[0].TrackCount != 1 {
+		t.Fatalf("credited artist search count: err=%v result=%+v", err, result.Artists)
 	}
 }
 
@@ -390,7 +627,7 @@ func TestSearchLibrary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Artists) != 1 || len(res.Tracks) != 3 || len(res.Albums) != 0 {
+	if len(res.Artists) != 1 || len(res.Tracks) != 3 || len(res.Albums) != 2 {
 		t.Fatalf("search: %+v", res)
 	}
 	res, _ = s.SearchLibrary(ctx, "album")

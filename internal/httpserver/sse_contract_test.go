@@ -146,7 +146,7 @@ func seedOneTrack(t *testing.T, st *store.Store) {
 		t.Fatal(err)
 	}
 	if err := st.UpsertTrack(ctx, "filesystem", source.TrackMeta{
-		NativeID: "x/one.flac", Title: "One", Artist: "Alpha", AlbumArtist: "Alpha",
+		NativeID: "x/one.flac", Title: "One", PrimaryArtist: source.ArtistReference{Name: "Alpha"}, TrackCredits: []source.ArtistCredit{{Name: "Alpha"}}, AlbumCredits: []source.ArtistCredit{{Name: "Alpha"}},
 		Album: "AA", Genre: "Rock", Year: 2000, Index: 1, DurationMs: 2000,
 		Container: "flac", Codec: "flac", SizeBytes: 10, Version: 1,
 	}, "", seq); err != nil {

@@ -154,7 +154,7 @@ func TestPartySkipAdvancesQueue(t *testing.T) {
 
 func trackMeta(native, title string) source.TrackMeta {
 	return source.TrackMeta{
-		NativeID: native, Title: title, Artist: "A", AlbumArtist: "A", Album: "Al",
+		NativeID: native, Title: title, PrimaryArtist: source.ArtistReference{Name: "A"}, TrackCredits: []source.ArtistCredit{{Name: "A"}}, AlbumCredits: []source.ArtistCredit{{Name: "A"}}, Album: "Al",
 		Genre: "Rock", DurationMs: 2000, Container: "flac", Codec: "flac", SizeBytes: 10, Version: 1,
 	}
 }

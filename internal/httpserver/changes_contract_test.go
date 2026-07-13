@@ -26,7 +26,7 @@ func TestContractChangesDelta(t *testing.T) {
 	// Index one track (artist + album minted with it).
 	seq, _ := st.NextScanSeq(ctx)
 	if err := st.UpsertTrack(ctx, "filesystem", source.TrackMeta{
-		NativeID: "n1", Title: "T1", Artist: "A", AlbumArtist: "A", Album: "Al",
+		NativeID: "n1", Title: "T1", PrimaryArtist: source.ArtistReference{Name: "A"}, TrackCredits: []source.ArtistCredit{{Name: "A"}}, AlbumCredits: []source.ArtistCredit{{Name: "A"}}, Album: "Al",
 		Container: "flac", Codec: "flac", DurationMs: 1000, Version: 1,
 	}, "", seq); err != nil {
 		t.Fatal(err)
@@ -49,6 +49,9 @@ func TestContractChangesDelta(t *testing.T) {
 	}
 	if len(got.RemovedTrackIds) != 0 {
 		t.Fatalf("unexpected removals %v", got.RemovedTrackIds)
+	}
+	if len(got.Tracks[0].ArtistCredits) != 1 || got.Tracks[0].ArtistCredits[0].Name != "A" || got.Tracks[0].PrimaryArtist.Name != "A" || len(got.Albums[0].ArtistCredits) != 1 {
+		t.Fatalf("structured credit JSON: track=%+v album=%+v", got.Tracks[0], got.Albums[0])
 	}
 
 	// A caught-up client (since=version) gets an empty delta.

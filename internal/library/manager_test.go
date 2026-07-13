@@ -380,12 +380,12 @@ func sequenceFixture(t *testing.T) (*store.Store, *Manager, *sequenceSource, *se
 	s, dataDir := openStore(t)
 	ctx := context.Background()
 	seq, _ := s.NextScanSeq(ctx)
-	_ = s.UpsertTrack(ctx, "filesystem", source.TrackMeta{NativeID: "old", Title: "Old", Artist: "Artist", Album: "Album", Container: "flac", Codec: "flac", Version: 1}, "", seq)
+	_ = s.UpsertTrack(ctx, "filesystem", source.TrackMeta{NativeID: "old", Title: "Old", PrimaryArtist: source.ArtistReference{Name: "Artist"}, TrackCredits: []source.ArtistCredit{{Name: "Artist"}}, AlbumCredits: []source.ArtistCredit{{Name: "Artist"}}, Album: "Album", Container: "flac", Codec: "flac", Version: 1}, "", seq)
 	_ = s.FinishScan(ctx, "filesystem", seq)
 	albums, _ := s.AlbumsNeedingArt(ctx, 1)
 	artID, _ := s.UpsertArt(ctx, "sequence-art", "image/jpeg", []byte("art"), dataDir)
 	m := NewManager(s, dataDir)
-	src := &sequenceSource{entered: make(chan struct{}), release: make(chan struct{}), meta: source.TrackMeta{NativeID: "new", Title: "New", Artist: "Artist", Album: "New Album", Container: "flac", Codec: "flac", Version: 1}}
+	src := &sequenceSource{entered: make(chan struct{}), release: make(chan struct{}), meta: source.TrackMeta{NativeID: "new", Title: "New", PrimaryArtist: source.ArtistReference{Name: "Artist"}, TrackCredits: []source.ArtistCredit{{Name: "Artist"}}, AlbumCredits: []source.ArtistCredit{{Name: "Artist"}}, Album: "New Album", Container: "flac", Codec: "flac", Version: 1}}
 	e := &sequenceEnricher{st: s, albumID: albums[0].AlbumID, artID: artID, entered: make(chan struct{}), release: make(chan struct{})}
 	m.mu.Lock()
 	m.src = src
@@ -538,7 +538,7 @@ func TestResetsWaitForStalePassAndPreserveArtistAndAlbumIntents(t *testing.T) {
 	s, dataDir := openStore(t)
 	ctx := context.Background()
 	seq, _ := s.NextScanSeq(ctx)
-	_ = s.UpsertTrack(ctx, "filesystem", source.TrackMeta{NativeID: "n1", Title: "Song", Artist: "Artist", Album: "Album", Container: "flac", Codec: "flac", Version: 1}, "", seq)
+	_ = s.UpsertTrack(ctx, "filesystem", source.TrackMeta{NativeID: "n1", Title: "Song", PrimaryArtist: source.ArtistReference{Name: "Artist"}, TrackCredits: []source.ArtistCredit{{Name: "Artist"}}, AlbumCredits: []source.ArtistCredit{{Name: "Artist"}}, Album: "Album", Container: "flac", Codec: "flac", Version: 1}, "", seq)
 	_ = s.FinishScan(ctx, "filesystem", seq)
 	album, _ := s.AlbumsNeedingArt(ctx, 1)
 	artist, _ := s.ArtistsNeedingArt(ctx, 1)

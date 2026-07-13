@@ -8,25 +8,42 @@ import (
 	"io"
 )
 
+// ArtistCredit preserves one credited artist and the text joining it to the next credit.
+type ArtistCredit struct {
+	Name       string
+	JoinPhrase string
+	MBID       string
+}
+
 // TrackMeta is one track's identity, tags, and media info as reported by a
 // source during a scan.
 type TrackMeta struct {
-	NativeID    string // stable within the source; filesystem uses the relative path
-	Title       string
-	Artist      string // track display artist
-	AlbumArtist string // grouping artist; adapters fall back to Artist
-	Album       string
-	Genre       string
-	Year        int
-	Index       int
-	Disc        int
-	DurationMs  int
-	Container   string
-	Codec       string
-	BitrateKbps int
-	SizeBytes   int64
-	Version     int64  // change marker (filesystem: mtime unix); equal ⇒ unchanged
-	ArtHash     string // sha256 hex of embedded art, "" when none
+	NativeID         string // stable within the source; filesystem uses the relative path
+	Title            string
+	PrimaryArtist    ArtistReference // grouping artist; adapters fall back to the first track credit
+	TrackCredits     []ArtistCredit
+	AlbumCredits     []ArtistCredit
+	Album            string
+	RecordingMBID    string
+	ReleaseMBID      string
+	ReleaseGroupMBID string
+	Genre            string
+	Year             int
+	Index            int
+	Disc             int
+	DurationMs       int
+	Container        string
+	Codec            string
+	BitrateKbps      int
+	SizeBytes        int64
+	Version          int64  // change marker (filesystem: mtime unix); equal ⇒ unchanged
+	ArtHash          string // sha256 hex of embedded art, "" when none
+}
+
+// ArtistReference identifies the artist used to group an album.
+type ArtistReference struct {
+	Name string
+	MBID string
 }
 
 // MusicSource is the port every library backend implements.

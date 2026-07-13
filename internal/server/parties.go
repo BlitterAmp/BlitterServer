@@ -40,9 +40,10 @@ func apiParty(p party.Party) api.Party {
 		out.Queue = append(out.Queue, api.PartyQueueItem{
 			ItemId: item.ItemID, AddedByProfileId: item.AddedBy,
 			TrackId: tr.TrackId, Title: tr.Title, Index: tr.Index, DiscNumber: tr.DiscNumber,
-			ArtistId: tr.ArtistId, ArtistName: tr.ArtistName,
+			PrimaryArtist: tr.PrimaryArtist, ArtistCredits: tr.ArtistCredits,
 			AlbumId: tr.AlbumId, AlbumTitle: tr.AlbumTitle,
 			DurationMs: tr.DurationMs, ArtId: tr.ArtId, Genres: tr.Genres, Media: tr.Media,
+			MusicBrainzRecordingId: tr.MusicBrainzRecordingId,
 		})
 	}
 	return out

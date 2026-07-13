@@ -28,40 +28,47 @@ func optInt(v int) *int {
 
 func apiArtist(a store.ArtistRow) api.Artist {
 	genres := a.Genres
+	aliases := a.Aliases
 	return api.Artist{
-		ArtistId:   a.ArtistID,
-		Name:       a.Name,
-		ArtId:      optStr(a.ArtID),
-		AlbumCount: optInt(a.AlbumCount),
-		Genres:     &genres,
+		ArtistId:      a.ArtistID,
+		Name:          a.Name,
+		ArtId:         optStr(a.ArtID),
+		AlbumCount:    optInt(a.AlbumCount),
+		Genres:        &genres,
+		Aliases:       &aliases,
+		MusicBrainzId: optStr(a.MusicBrainzID),
 	}
 }
 
 func apiAlbum(a store.AlbumRow) api.Album {
+	credits := apiCredits(a.ArtistCredits)
 	return api.Album{
-		AlbumId:    a.AlbumID,
-		Title:      a.Title,
-		ArtistId:   a.ArtistID,
-		ArtistName: a.ArtistName,
-		Year:       optInt(a.Year),
-		ArtId:      optStr(a.ArtID),
-		TrackCount: optInt(a.TrackCount),
-		UpdatedAt:  &a.UpdatedAt,
+		AlbumId:                   a.AlbumID,
+		Title:                     a.Title,
+		PrimaryArtist:             api.ArtistReference{ArtistId: a.PrimaryArtist.ArtistID, Name: a.PrimaryArtist.Name},
+		ArtistCredits:             credits,
+		MusicBrainzReleaseId:      optStr(a.MusicBrainzReleaseID),
+		MusicBrainzReleaseGroupId: optStr(a.MusicBrainzReleaseGroupID),
+		Year:                      optInt(a.Year),
+		ArtId:                     optStr(a.ArtID),
+		TrackCount:                optInt(a.TrackCount),
+		UpdatedAt:                 &a.UpdatedAt,
 	}
 }
 
 func apiTrack(t store.TrackRow) api.Track {
 	tr := api.Track{
-		TrackId:    t.TrackID,
-		Title:      t.Title,
-		Index:      optInt(t.Index),
-		DiscNumber: optInt(t.Disc),
-		ArtistId:   t.ArtistID,
-		ArtistName: t.ArtistName,
-		AlbumId:    t.AlbumID,
-		AlbumTitle: t.AlbumTitle,
-		DurationMs: t.DurationMs,
-		ArtId:      optStr(t.ArtID),
+		TrackId:                t.TrackID,
+		Title:                  t.Title,
+		Index:                  optInt(t.Index),
+		DiscNumber:             optInt(t.Disc),
+		PrimaryArtist:          api.ArtistReference{ArtistId: t.PrimaryArtist.ArtistID, Name: t.PrimaryArtist.Name},
+		ArtistCredits:          apiCredits(t.ArtistCredits),
+		MusicBrainzRecordingId: optStr(t.MusicBrainzRecordingID),
+		AlbumId:                t.AlbumID,
+		AlbumTitle:             t.AlbumTitle,
+		DurationMs:             t.DurationMs,
+		ArtId:                  optStr(t.ArtID),
 		Media: api.MediaInfo{
 			Container:   t.Container,
 			AudioCodec:  t.Codec,
@@ -76,6 +83,32 @@ func apiTrack(t store.TrackRow) api.Track {
 		tr.Genres = &g
 	}
 	return tr
+}
+
+func apiCredits(rows []store.ArtistCreditRow) []api.ArtistCredit {
+	out := make([]api.ArtistCredit, 0, len(rows))
+	for _, c := range rows {
+		out = append(out, api.ArtistCredit{ArtistId: c.ArtistID, Name: c.Name, JoinPhrase: c.JoinPhrase})
+	}
+	return out
+}
+
+func renderCredits(credits []api.ArtistCredit) string {
+	var b strings.Builder
+	for _, c := range credits {
+		b.WriteString(c.Name)
+		b.WriteString(c.JoinPhrase)
+	}
+	return b.String()
+}
+
+func renderStoreCredits(credits []store.ArtistCreditRow) string {
+	var b strings.Builder
+	for _, c := range credits {
+		b.WriteString(c.Name)
+		b.WriteString(c.JoinPhrase)
+	}
+	return b.String()
 }
 
 func apiTracks(rows []store.TrackRow) []api.Track {
@@ -218,12 +251,14 @@ func (s *Server) GetArtist(ctx context.Context, req api.GetArtistRequestObject) 
 	}
 	genres := a.Genres
 	resp := api.GetArtist200JSONResponse{
-		ArtistId:   a.ArtistID,
-		Name:       a.Name,
-		ArtId:      optStr(a.ArtID),
-		AlbumCount: optInt(a.AlbumCount),
-		TrackCount: optInt(a.TrackCount),
-		Genres:     &genres,
+		ArtistId:      a.ArtistID,
+		Name:          a.Name,
+		ArtId:         optStr(a.ArtID),
+		AlbumCount:    optInt(a.AlbumCount),
+		TrackCount:    optInt(a.TrackCount),
+		Genres:        &genres,
+		Aliases:       &a.Aliases,
+		MusicBrainzId: optStr(a.MusicBrainzID),
 	}
 	ls, err := s.loveStateFor(ctx, a.ArtistID)
 	if err != nil {

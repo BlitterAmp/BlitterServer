@@ -11,7 +11,7 @@ import (
 // content" rule. Callers append profileID three times.
 const notForMeFilter = ` AND NOT EXISTS (
 	SELECT 1 FROM loves l WHERE l.state = 'not_for_me' AND l.profile_id = ?
-	AND l.ref IN (t.track_id, t.album_id, t.artist_id))`
+	AND (l.ref IN (t.track_id, t.album_id, t.artist_id) OR EXISTS (SELECT 1 FROM track_artist_credits c WHERE c.track_id=t.track_id AND c.artist_id=l.ref)))`
 
 // RecentlyPlayedTracks returns distinct tracks by most recent completed play.
 func (s *Store) RecentlyPlayedTracks(ctx context.Context, profileID string, limit int) ([]TrackRow, error) {
@@ -40,7 +40,15 @@ func (s *Store) RecentlyAddedAlbums(ctx context.Context, limit int) ([]AlbumRow,
 		}
 		out = append(out, a)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		if err := s.hydrateAlbumCredits(ctx, &out[i]); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 // MixInfo describes one available mix for the calling profile.
@@ -60,11 +68,11 @@ func mixWhere(profileID, mixID string) (where, order string, args []any, err err
 	switch {
 	case mixID == "forYou":
 		// Artists the profile plays or loves, minus explicit rejections.
-		return `(t.artist_id IN (
-			SELECT t2.artist_id FROM playback_events e JOIN tracks t2 ON t2.track_id = e.track_id
-			WHERE e.profile_id = ? AND e.type = 'ended')
+		return `(EXISTS (SELECT 1 FROM track_artist_credits tc WHERE tc.track_id=t.track_id AND tc.artist_id IN (
+			SELECT pc.artist_id FROM playback_events e JOIN track_artist_credits pc ON pc.track_id=e.track_id
+			WHERE e.profile_id = ? AND e.type = 'ended'))
 			OR EXISTS (SELECT 1 FROM loves lv WHERE lv.profile_id = ? AND lv.state = 'loved'
-			           AND lv.ref IN (t.track_id, t.album_id, t.artist_id)))`,
+			           AND (lv.ref IN (t.track_id, t.album_id, t.artist_id) OR EXISTS (SELECT 1 FROM track_artist_credits c WHERE c.track_id=t.track_id AND c.artist_id=lv.ref))))`,
 			"random()", []any{profileID, profileID}, nil
 	case mixID == "topRated":
 		return `EXISTS (SELECT 1 FROM ratings r WHERE r.profile_id = ? AND r.item_id = t.track_id AND r.rating10 >= 8)`,
@@ -186,7 +194,7 @@ func (s *Store) RadioNext(ctx context.Context, profileID string, seedArtistIDs, 
 		}
 		seedArgs = append(seedArgs, profileID) // notForMeFilter
 		rows, err := s.listTracksWhere(ctx,
-			exclude+` AND (t.artist_id IN (`+in+`) OR t.genre IN (SELECT t2.genre FROM tracks t2 WHERE t2.artist_id IN (`+in+`)))`+
+			exclude+` AND (EXISTS (SELECT 1 FROM track_artist_credits c WHERE c.track_id=t.track_id AND c.artist_id IN (`+in+`)) OR t.genre IN (SELECT t2.genre FROM tracks t2 JOIN track_artist_credits c2 ON c2.track_id=t2.track_id WHERE c2.artist_id IN (`+in+`)))`+
 				notForMeFilter, fmt.Sprintf("random() LIMIT %d", count),
 			seedArgs...)
 		if err != nil {

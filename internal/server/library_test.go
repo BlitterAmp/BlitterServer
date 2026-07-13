@@ -20,9 +20,9 @@ func seedLibrary(t *testing.T, st *store.Store) {
 		t.Fatal(err)
 	}
 	for _, m := range []source.TrackMeta{
-		{NativeID: "a/1.flac", Title: "One", Artist: "Alpha", AlbumArtist: "Alpha", Album: "AA", Genre: "Rock", Year: 1990, Index: 1, DurationMs: 300000, Container: "flac", Codec: "flac", SizeBytes: 10, Version: 1},
-		{NativeID: "a/2.flac", Title: "Two", Artist: "Alpha", AlbumArtist: "Alpha", Album: "AA", Genre: "Rock", Year: 1990, Index: 2, DurationMs: 300000, Container: "flac", Codec: "flac", SizeBytes: 10, Version: 1},
-		{NativeID: "b/1.mp3", Title: "Three", Artist: "Beta", AlbumArtist: "Beta", Album: "BB", Genre: "Jazz", Year: 2000, Index: 1, DurationMs: 180000, Container: "mp3", Codec: "mp3", SizeBytes: 10, Version: 1},
+		{NativeID: "a/1.flac", Title: "One", PrimaryArtist: source.ArtistReference{Name: "Alpha"}, TrackCredits: []source.ArtistCredit{{Name: "Alpha", JoinPhrase: " feat. "}, {Name: "Guest"}}, AlbumCredits: []source.ArtistCredit{{Name: "Alpha"}}, RecordingMBID: "11111111-1111-1111-1111-111111111111", Album: "AA", Genre: "Rock", Year: 1990, Index: 1, DurationMs: 300000, Container: "flac", Codec: "flac", SizeBytes: 10, Version: 1},
+		{NativeID: "a/2.flac", Title: "Two", PrimaryArtist: source.ArtistReference{Name: "Alpha"}, TrackCredits: []source.ArtistCredit{{Name: "Alpha"}}, AlbumCredits: []source.ArtistCredit{{Name: "Alpha"}}, Album: "AA", Genre: "Rock", Year: 1990, Index: 2, DurationMs: 300000, Container: "flac", Codec: "flac", SizeBytes: 10, Version: 1},
+		{NativeID: "b/1.mp3", Title: "Three", PrimaryArtist: source.ArtistReference{Name: "Beta"}, TrackCredits: []source.ArtistCredit{{Name: "Beta"}}, AlbumCredits: []source.ArtistCredit{{Name: "Beta"}}, Album: "BB", Genre: "Jazz", Year: 2000, Index: 1, DurationMs: 180000, Container: "mp3", Codec: "mp3", SizeBytes: 10, Version: 1},
 	} {
 		if err := st.UpsertTrack(ctx, "filesystem", m, "", seq); err != nil {
 			t.Fatal(err)
@@ -62,7 +62,7 @@ func TestBrowseEndpoints(t *testing.T) {
 		t.Fatal(err)
 	}
 	page := arts.(api.ListArtists200JSONResponse)
-	if len(page.Items) != 2 || page.Items[0].Name != "Alpha" {
+	if len(page.Items) != 3 || page.Items[0].Name != "Alpha" {
 		t.Fatalf("artists: %+v", page)
 	}
 	alphaID := page.Items[0].ArtistId
@@ -98,6 +98,7 @@ func TestBrowseEndpoints(t *testing.T) {
 	if len(trackList) != 2 || trackList[0].Title != "One" || trackList[0].Media.Container != "flac" {
 		t.Fatalf("album tracks: %+v", trackList)
 	}
+	assertTrackIdentity(t, trackList[0])
 
 	genres, err := s.ListGenres(ctx, api.ListGenresRequestObject{})
 	if err != nil {
@@ -115,8 +116,19 @@ func TestBrowseEndpoints(t *testing.T) {
 	if len(sr.Tracks) != 1 || sr.Tracks[0].Title != "One" {
 		t.Fatalf("search: %+v", sr)
 	}
+	assertTrackIdentity(t, sr.Tracks[0])
 	if sr.External == nil || len(sr.External) != 0 {
 		t.Fatalf("external must be an empty array, not null: %+v", sr.External)
+	}
+}
+
+func assertTrackIdentity(t *testing.T, tr api.Track) {
+	t.Helper()
+	if len(tr.ArtistCredits) == 0 || tr.PrimaryArtist.ArtistId == "" || tr.PrimaryArtist.Name == "" {
+		t.Fatalf("invalid track artist identity: %+v", tr)
+	}
+	if tr.Title == "One" && tr.MusicBrainzRecordingId == nil {
+		t.Fatalf("recording identity lost: %+v", tr)
 	}
 }
 
@@ -133,7 +145,7 @@ func TestAlbumArtFallbacksReachTrackAndArtistAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := st.UpsertTrack(ctx, "filesystem", source.TrackMeta{
-		NativeID: "a/1.flac", Title: "One", Artist: "Alpha", AlbumArtist: "Alpha", Album: "AA",
+		NativeID: "a/1.flac", Title: "One", PrimaryArtist: source.ArtistReference{Name: "Alpha"}, TrackCredits: []source.ArtistCredit{{Name: "Alpha"}}, AlbumCredits: []source.ArtistCredit{{Name: "Alpha"}}, Album: "AA",
 		Genre: "Rock", Year: 1990, Index: 1, DurationMs: 300000, Container: "flac", Codec: "flac",
 		SizeBytes: 10, Version: 1,
 	}, "img_track", seq); err != nil {

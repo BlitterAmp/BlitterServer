@@ -1,5 +1,16 @@
 # BlitterServer
 
+> Development database reset: the MusicBrainz identity/structured-credit schema rewrites the pre-user library
+> baseline. Existing development data directories created before this schema must have `blitterserver.db` removed
+> explicitly and then be rescanned; startup never deletes a database automatically. This loses all local development
+> state, including profiles, playlists, loves, history, and opaque entity IDs.
+
+Filesystem metadata extraction reads Picard/MusicBrainz IDs supported by `dhowden/tag`. The dependency collapses
+repeated Vorbis values in some files, so this phase safely preserves one unsplit scalar credit for those files rather
+than guessing by splitting artist text. Richer repeated-value parsing is deferred. Tracks also remain source-file
+records in this phase, so multiple files or encodings may share a recording MBID; a later canonical recording/source
+mapping phase will normalize them.
+
 The self-hosted backend for [BlitterAmp](https://github.com/BlitterAmp/BlitterAmp). BlitterServer is the engine of your music world: it indexes your library, streams and transcodes your files, keeps taste and playback state consistent across your devices, and gives the BlitterAmp apps exactly one API to talk to — this one.
 
 It is **filesystem-first**: a directory of music files is a complete source, with metadata enriched from public sources and last.fm. Media servers (Plex, and later Jellyfin/Navidrome) are optional integrations, not dependencies. It runs standalone on a NAS or server, and is designed to also ship embedded inside the BlitterAmp desktop app as a managed engine.

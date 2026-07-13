@@ -58,6 +58,9 @@ func TestPlaylistLifecycle(t *testing.T) {
 	if err != nil || len(items) != 1 || next == "" {
 		t.Fatalf("items page1: %v %d %q", err, len(items), next)
 	}
+	if len(items[0].Track.ArtistCredits) == 0 || items[0].Track.PrimaryArtist.ArtistID != items[0].Track.ArtistID || items[0].Track.PrimaryArtist.Name != items[0].Track.ArtistName {
+		t.Fatalf("playlist track identity not hydrated: %+v", items[0].Track)
+	}
 	items2, next2, _ := s.ListPlaylistItems(ctx, pl.PlaylistID, next, 10)
 	if len(items2) != 1 || next2 != "" || items2[0].ItemID == items[0].ItemID {
 		t.Fatalf("items page2: %+v %q", items2, next2)

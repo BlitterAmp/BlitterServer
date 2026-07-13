@@ -50,6 +50,8 @@ func TestHomeMixesRadio(t *testing.T) {
 	}
 	if got := tracks.(api.ListMixTracks200JSONResponse); len(got) == 0 {
 		t.Fatalf("mix tracks: %+v", got)
+	} else {
+		assertTrackIdentity(t, got[0])
 	}
 	nf, _ := s.ListMixTracks(ctx1, api.ListMixTracksRequestObject{MixId: "bogus"})
 	if _, is404 := nf.(api.ListMixTracks404ApplicationProblemPlusJSONResponse); !is404 {
@@ -63,6 +65,8 @@ func TestHomeMixesRadio(t *testing.T) {
 	}
 	if got := radio.(api.GetRadioNext200JSONResponse); len(got) == 0 {
 		t.Fatalf("radio: %+v", got)
+	} else {
+		assertTrackIdentity(t, got[0])
 	}
 }
 
@@ -78,7 +82,7 @@ func TestDiscoveryHonestAbsence(t *testing.T) {
 	}
 
 	tr := firstTrackFromCtx(t, s, ctx1)
-	similar, err := s.ListSimilarArtists(ctx1, api.ListSimilarArtistsRequestObject{ArtistId: tr.ArtistId})
+	similar, err := s.ListSimilarArtists(ctx1, api.ListSimilarArtistsRequestObject{ArtistId: tr.PrimaryArtist.ArtistId})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,6 +171,11 @@ func TestPartyEndpoints(t *testing.T) {
 	}
 	if got := lists.(api.ListParties200JSONResponse); len(got) != 1 || len(got[0].Queue) != 1 {
 		t.Fatalf("list: %+v", got)
+	} else {
+		queued := got[0].Queue[0]
+		if len(queued.ArtistCredits) == 0 || queued.PrimaryArtist.Name != "Alpha" || queued.MusicBrainzRecordingId == nil {
+			t.Fatalf("party queue identity: %+v", queued)
+		}
 	}
 
 	ended, err := s.EndParty(ctx1, api.EndPartyRequestObject{PartyId: pty.PartyId})
