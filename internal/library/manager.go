@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"sync"
@@ -64,9 +65,12 @@ type Manager struct {
 	lifecycleCtx      context.Context
 	cancelLifecycle   context.CancelFunc
 	enrichmentWG      sync.WaitGroup
+	schedulerWG       sync.WaitGroup
 	scanWG            sync.WaitGroup
 	resetArtRetries   func(context.Context, bool) error
 	waitResetRetry    func(context.Context, int) bool
+	waitEnrichment    func(context.Context) bool
+	schedulerStarted  bool
 	operation         chan struct{}
 }
 
@@ -74,11 +78,27 @@ type Manager struct {
 // bus is constructed after the manager, so it's injected rather than passed in.
 func (m *Manager) SetBus(bus *events.Bus) { m.bus = bus }
 
-// SetEnricher wires external art enrichment, run after each completed scan.
+// SetEnricher wires external art enrichment and starts its lifecycle scheduler.
 func (m *Manager) SetEnricher(e Enricher) {
 	m.mu.Lock()
 	m.enricher = e
+	start := e != nil && !m.closed && !m.schedulerStarted
+	if start {
+		m.schedulerStarted = true
+		m.schedulerWG.Add(1)
+	}
 	m.mu.Unlock()
+	if start {
+		m.TriggerEnrichment()
+		go m.scheduleEnrichment()
+	}
+}
+
+func (m *Manager) scheduleEnrichment() {
+	defer m.schedulerWG.Done()
+	for m.waitEnrichment(m.lifecycleCtx) {
+		m.TriggerEnrichment()
+	}
 }
 
 // TriggerEnrichment queues an asynchronous enrichment pass. Triggers received
@@ -113,13 +133,12 @@ func (m *Manager) triggerEnrichment(resetArtists, resetAlbums bool) {
 		return
 	}
 	m.enriching = true
-	enricher := m.enricher
 	m.enrichmentWG.Add(1)
 	m.mu.Unlock()
-	go m.runEnrichment(enricher)
+	go m.runEnrichment()
 }
 
-func (m *Manager) runEnrichment(enricher Enricher) {
+func (m *Manager) runEnrichment() {
 	defer m.enrichmentWG.Done()
 	retryAttempt := 0
 	for {
@@ -131,7 +150,13 @@ func (m *Manager) runEnrichment(enricher Enricher) {
 		}
 		m.enrichmentPending = false
 		resetArtists, resetAlbums := m.resetArtists, m.resetAlbums
+		enricher := m.enricher
 		m.resetArtists, m.resetAlbums = false, false
+		if enricher == nil {
+			m.enriching = false
+			m.mu.Unlock()
+			return
+		}
 		m.mu.Unlock()
 		if !m.acquireOperation() {
 			m.mu.Lock()
@@ -210,6 +235,7 @@ func (m *Manager) Close() {
 	m.mu.Unlock()
 	m.scanWG.Wait()
 	m.enrichmentWG.Wait()
+	m.schedulerWG.Wait()
 }
 
 // NewManager restores the configured source (if any) from settings.
@@ -219,6 +245,7 @@ func NewManager(st *store.Store, dataDir string) *Manager {
 		st: st, dataDir: dataDir, lifecycleCtx: lifecycleCtx,
 		cancelLifecycle: cancelLifecycle, resetArtRetries: st.ResetArtRetries,
 		waitResetRetry: waitForResetRetry,
+		waitEnrichment: waitForEnrichment,
 		operation:      make(chan struct{}, 1),
 	}
 	m.operation <- struct{}{}
@@ -231,6 +258,20 @@ func NewManager(st *store.Store, dataDir string) *Manager {
 		}
 	}
 	return m
+}
+
+func waitForEnrichment(ctx context.Context) bool {
+	// Frequent staggered passes let newly overdue rows flow through while the
+	// store remains the authority on the 24-hour per-entity eligibility window.
+	delay := 4*time.Hour + time.Duration(rand.Int64N(int64(4*time.Hour)))
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // Configure points the filesystem source at path and queues the initial scan.

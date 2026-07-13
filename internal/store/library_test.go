@@ -5,9 +5,43 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/BlitterAmp/BlitterServer/internal/source"
 )
+
+func TestArtEligibilityDailyBoundaryAndExplicitArtistExclusion(t *testing.T) {
+	s := indexFixture(t)
+	ctx := context.Background()
+	artists, err := s.ArtistsNeedingArt(ctx, 10)
+	if err != nil || len(artists) == 0 {
+		t.Fatalf("initial artists: %v %v", artists, err)
+	}
+	explicitID := artists[0].ArtistID
+	if _, err := s.db.ExecContext(ctx, `UPDATE artists SET art_id='img_explicit', art_tried=1, art_tried_at=? WHERE artist_id=?`, time.Now().Add(-25*time.Hour).Unix(), explicitID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE artists SET art_tried=1, art_tried_at=? WHERE artist_id<>?`, time.Now().Add(-24*time.Hour).Unix(), explicitID); err != nil {
+		t.Fatal(err)
+	}
+	artists, err = s.ArtistsNeedingArt(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, artist := range artists {
+		if artist.ArtistID == explicitID {
+			t.Fatal("artist with explicit art remained eligible")
+		}
+	}
+
+	if _, err := s.db.ExecContext(ctx, `UPDATE artists SET art_tried_at=? WHERE art_id IS NULL`, time.Now().Add(-24*time.Hour-time.Second).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	artists, err = s.ArtistsNeedingArt(ctx, 10)
+	if err != nil || len(artists) == 0 {
+		t.Fatalf("overdue fallback-only artists: %v %v", artists, err)
+	}
+}
 
 func TestArtRetryUpgradeAndExternalArtistRace(t *testing.T) {
 	s := indexFixture(t)
