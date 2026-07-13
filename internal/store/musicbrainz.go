@@ -9,31 +9,8 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/BlitterAmp/BlitterServer/internal/musicbrainz"
 	"github.com/BlitterAmp/BlitterServer/internal/source"
 )
-
-func (s *Store) MusicBrainzCache(ctx context.Context, key string) (musicbrainz.CacheEntry, bool, error) {
-	var e musicbrainz.CacheEntry
-	var fetched, fresh, retry int64
-	err := s.db.QueryRowContext(ctx, `SELECT status,body,fetched_at,fresh_until,COALESCE(etag,''),COALESCE(last_modified,''),retry_at,error FROM musicbrainz_cache WHERE cache_key=?`, key).
-		Scan(&e.Status, &e.Body, &fetched, &fresh, &e.ETag, &e.LastModified, &retry, &e.Error)
-	if errors.Is(err, sql.ErrNoRows) {
-		return e, false, nil
-	}
-	if err != nil {
-		return e, false, err
-	}
-	e.FetchedAt, e.FreshUntil, e.RetryAt = time.Unix(fetched, 0), time.Unix(fresh, 0), time.Unix(retry, 0)
-	return e, true, nil
-}
-
-func (s *Store) PutMusicBrainzCache(ctx context.Context, key string, e musicbrainz.CacheEntry) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO musicbrainz_cache(cache_key,status,body,fetched_at,fresh_until,etag,last_modified,retry_at,error) VALUES(?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(cache_key) DO UPDATE SET status=excluded.status,body=excluded.body,fetched_at=excluded.fetched_at,fresh_until=excluded.fresh_until,etag=excluded.etag,last_modified=excluded.last_modified,retry_at=excluded.retry_at,error=excluded.error`,
-		key, e.Status, e.Body, e.FetchedAt.Unix(), e.FreshUntil.Unix(), nullStr(e.ETag), nullStr(e.LastModified), e.RetryAt.Unix(), e.Error)
-	return err
-}
 
 type MusicBrainzAlbum struct {
 	AlbumID, Title, ReleaseID, ReleaseGroupID string

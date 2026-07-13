@@ -5,19 +5,22 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/BlitterAmp/BlitterServer/internal/events"
 	"github.com/BlitterAmp/BlitterServer/internal/musicbrainz"
+	"github.com/BlitterAmp/BlitterServer/internal/providercache"
 	"github.com/BlitterAmp/BlitterServer/internal/source"
 	"github.com/BlitterAmp/BlitterServer/internal/store"
 )
 
 func testMusicBrainzClient(t *testing.T, st *store.Store, baseURL string) *musicbrainz.Client {
 	t.Helper()
-	client, err := musicbrainz.NewClient(musicbrainz.Options{BaseURL: baseURL, UserAgent: "BlitterServer/test (mailto:test@example.com)", Cache: st, Interval: time.Nanosecond})
+	client, err := musicbrainz.NewClient(musicbrainz.Options{BaseURL: baseURL, UserAgent: "BlitterServer/test (mailto:test@example.com)", Cache: musicbrainz.NewFilesystemCache(providercache.New(t.TempDir())), Interval: time.Nanosecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -286,6 +289,116 @@ func TestProvider503RetryAfterRetriesOnce(t *testing.T) {
 	}
 	if !e.getJSON(ctx, srv.URL, "", &body) || !body.OK || requests != 2 {
 		t.Fatalf("retry result ok=%v requests=%d", body.OK, requests)
+	}
+}
+
+func TestFreshProviderCacheAvoidsMetadataAndImageRequests(t *testing.T) {
+	st, ctx := seedAlbum(t)
+	requests := 0
+	var base string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		switch r.URL.Path {
+		case "/music/albums/rg-cache":
+			_, _ = w.Write([]byte(`{"albums":[{"release_group_id":"rg-cache","albumcover":[{"url":"` + base + `/image"}]}]}`))
+		case "/image":
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write(pngBytes)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	base = srv.URL
+	dataDir := t.TempDir()
+	e := New(st, nil, filepath.Join(dataDir, "art"), Config{ProviderCache: providercache.New(filepath.Join(dataDir, "provider-cache"))})
+	e.FanartBase = srv.URL
+	data, mime := e.fanartAlbumArt(ctx, "top-secret", "rg-cache")
+	if data == nil {
+		t.Fatal("first lookup missed")
+	}
+	if _, err := e.store(ctx, data, mime); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := e.fanartAlbumArt(ctx, "top-secret", "rg-cache"); data == nil || requests != 2 {
+		t.Fatalf("cached lookup data=%d requests=%d", len(data), requests)
+	}
+	if err := filepath.Walk(filepath.Join(dataDir, "provider-cache"), func(path string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() {
+			body, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return readErr
+			}
+			if strings.Contains(string(body), "top-secret") || strings.Contains(string(body), string(pngBytes)) {
+				t.Errorf("provider cache leaked credential or image bytes in %s", path)
+			}
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProviderCacheRepopulatesArtAfterDatabaseResetWithoutNetworkOrRewrite(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	seed := func() *store.Store {
+		st, err := store.Open(ctx, dataDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seq, _ := st.NextScanSeq(ctx)
+		if err := st.UpsertTrack(ctx, "filesystem", source.TrackMeta{NativeID: "n1", Title: "Song", PrimaryArtist: source.ArtistReference{Name: "The Band"}, TrackCredits: []source.ArtistCredit{{Name: "The Band"}}, AlbumCredits: []source.ArtistCredit{{Name: "The Band"}}, Album: "Great Album", Container: "flac", Codec: "flac", Version: 1}, "", seq); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.FinishScan(ctx, "filesystem", seq); err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	requests := 0
+	var base string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path == "/image" {
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write(pngBytes)
+			return
+		}
+		_, _ = w.Write([]byte(`{"album":{"image":[{"#text":"` + base + `/image","size":"large"}]}}`))
+	}))
+	base = srv.URL
+	cache := providercache.New(filepath.Join(dataDir, "provider-cache"))
+	st := seed()
+	e := New(st, nil, filepath.Join(dataDir, "art"), Config{LastfmKey: func(context.Context) string { return "secret" }, ProviderCache: cache})
+	e.LastfmBase = srv.URL
+	e.Run(ctx)
+	if requests != 2 {
+		t.Fatalf("first run requests=%d", requests)
+	}
+	entries, err := os.ReadDir(filepath.Join(dataDir, "art"))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("art entries=%d err=%v", len(entries), err)
+	}
+	artPath := filepath.Join(dataDir, "art", entries[0].Name())
+	before, _ := os.Stat(artPath)
+	st.Close()
+	if err := os.Remove(filepath.Join(dataDir, "blitterserver.db")); err != nil {
+		t.Fatal(err)
+	}
+	srv.Close()
+	st = seed()
+	t.Cleanup(func() { st.Close() })
+	e = New(st, nil, filepath.Join(dataDir, "art"), Config{LastfmKey: func(context.Context) string { return "secret" }, ProviderCache: cache})
+	e.LastfmBase = base
+	e.Run(ctx)
+	needs, err := st.AlbumsNeedingArt(ctx, 1)
+	if err != nil || len(needs) != 0 {
+		t.Fatalf("art row was not restored: needs=%d err=%v", len(needs), err)
+	}
+	after, _ := os.Stat(artPath)
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Fatalf("art blob rewritten: before=%v after=%v", before.ModTime(), after.ModTime())
 	}
 }
 
