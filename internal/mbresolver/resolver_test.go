@@ -2,6 +2,7 @@ package mbresolver
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -194,5 +195,95 @@ func TestResolverDoesNotApplyResultAfterConcurrentScanChange(t *testing.T) {
 	tracks, _, err := st.ListTracks(ctx, "title", "", 10)
 	if err != nil || len(tracks) != 1 || tracks[0].Title != "After" || tracks[0].MusicBrainzRecordingID != "" || tracks[0].ArtistName != "Local" {
 		t.Fatalf("stale identity applied after concurrent scan: tracks=%+v err=%v", tracks, err)
+	}
+}
+
+func TestResolverDrainsMoreThanFiveAlbumsAndCancelsPromptly(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		cancel bool
+	}{{"drain", false}, {"cancel", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			st, err := store.Open(ctx, t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			seq, _ := st.NextScanSeq(ctx)
+			for i := 0; i < 7; i++ {
+				name := fmt.Sprintf("Artist %d", i)
+				m := source.TrackMeta{NativeID: fmt.Sprintf("track-%d", i), Title: "Track", Album: fmt.Sprintf("Album %d", i), Index: 1, Disc: 1, DurationMs: 1000, ReleaseMBID: fmt.Sprintf("release-%d", i), PrimaryArtist: source.ArtistReference{Name: name}, AlbumCredits: []source.ArtistCredit{{Name: name}}, TrackCredits: []source.ArtistCredit{{Name: name}}, Container: "flac", Codec: "flac", Version: 1}
+				if err := st.UpsertTrack(ctx, "filesystem", m, "", seq); err != nil {
+					t.Fatal(err)
+				}
+			}
+			requests := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				requests++
+				if tc.cancel && requests == 2 {
+					cancel()
+					<-req.Context().Done()
+					return
+				}
+				id := strings.TrimPrefix(req.URL.Path, "/release/")
+				_, _ = fmt.Fprintf(w, `{"id":%q,"release-group":{"id":"group"},"artist-credit":[{"name":"Canonical","artist":{"id":"artist","name":"Canonical"}}],"media":[{"position":1,"tracks":[{"position":1,"recording":{"id":"recording","title":"Track","length":1000,"artist-credit":[{"name":"Canonical","artist":{"id":"artist","name":"Canonical"}}]}}]}]}`, id)
+			}))
+			defer srv.Close()
+			client, _ := musicbrainz.NewClient(musicbrainz.Options{BaseURL: srv.URL, UserAgent: "BlitterServer/test (mailto:test@example.com)", Cache: musicbrainz.NewFilesystemCache(providercache.New(t.TempDir())), Interval: time.Nanosecond})
+			_, err = New(st, client).Run(ctx)
+			if tc.cancel {
+				if err == nil || requests != 2 {
+					t.Fatalf("cancel err=%v requests=%d", err, requests)
+				}
+				return
+			}
+			if err != nil || requests != 7 {
+				t.Fatalf("drain err=%v requests=%d", err, requests)
+			}
+		})
+	}
+}
+
+func TestResolverDrainsPastStaleFirstBatch(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	seq, _ := st.NextScanSeq(ctx)
+	metas := make(map[string]source.TrackMeta)
+	for i := 0; i < 7; i++ {
+		name := fmt.Sprintf("Artist %d", i)
+		m := source.TrackMeta{NativeID: fmt.Sprintf("track-%d", i), Title: "Track", Album: fmt.Sprintf("Album %d", i), Index: 1, Disc: 1, DurationMs: 1000, ReleaseMBID: fmt.Sprintf("release-%d", i), PrimaryArtist: source.ArtistReference{Name: name}, AlbumCredits: []source.ArtistCredit{{Name: name}}, TrackCredits: []source.ArtistCredit{{Name: name}}, Container: "flac", Codec: "flac", Version: 1}
+		metas[m.ReleaseMBID] = m
+		if err := st.UpsertTrack(ctx, "filesystem", m, "", seq); err != nil {
+			t.Fatal(err)
+		}
+	}
+	requests := make(map[string]int)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		id := strings.TrimPrefix(req.URL.Path, "/release/")
+		requests[id]++
+		if len(requests) <= 5 {
+			m := metas[id]
+			m.Title = "Changed during lookup"
+			m.Version++
+			concurrentSeq, _ := st.NextScanSeq(req.Context())
+			if err := st.UpsertTrack(req.Context(), "filesystem", m, "", concurrentSeq); err != nil {
+				t.Errorf("change stale snapshot: %v", err)
+			}
+		}
+		_, _ = fmt.Fprintf(w, `{"id":%q,"release-group":{"id":"group"},"artist-credit":[{"name":"Canonical","artist":{"id":"artist","name":"Canonical"}}],"media":[{"position":1,"tracks":[{"position":1,"recording":{"id":"recording","title":"Track","length":1000,"artist-credit":[{"name":"Canonical","artist":{"id":"artist","name":"Canonical"}}]}}]}]}`, id)
+	}))
+	defer srv.Close()
+	client, _ := musicbrainz.NewClient(musicbrainz.Options{BaseURL: srv.URL, UserAgent: "BlitterServer/test (mailto:test@example.com)", Cache: musicbrainz.NewFilesystemCache(providercache.New(t.TempDir())), Interval: time.Nanosecond})
+	if _, err := New(st, client).Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 7 {
+		t.Fatalf("attempted %d albums, want 7: %v", len(requests), requests)
 	}
 }

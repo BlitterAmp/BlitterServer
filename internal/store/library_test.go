@@ -257,20 +257,25 @@ func TestMusicBrainzIdentityAndStructuredCredits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(artists) != 3 {
-		t.Fatalf("artists=%d want primary, guest, homonym", len(artists))
+	if len(artists) != 2 {
+		t.Fatalf("artists=%d want primary and homonym", len(artists))
 	}
-	var primary, guest ArtistRow
+	var primary ArtistRow
 	for _, a := range artists {
 		if a.MusicBrainzID == primaryMBID {
 			primary = a
 		}
-		if a.MusicBrainzID == guestMBID {
-			guest = a
-		}
 	}
 	if primary.ArtistID == "" || len(primary.Aliases) != 1 || primary.Aliases[0] != "Jean Michel Jarre" {
 		t.Fatalf("primary identity: %+v", primary)
+	}
+	search, err := s.SearchLibrary(ctx, "Guest")
+	if err != nil || len(search.Artists) != 1 || search.Artists[0].MusicBrainzID != guestMBID {
+		t.Fatalf("guest search: %v %+v", err, search.Artists)
+	}
+	guest, found, err := s.GetArtist(ctx, search.Artists[0].ArtistID)
+	if err != nil || !found || guest.MusicBrainzID != guestMBID {
+		t.Fatalf("guest detail: found=%v err=%v artist=%+v", found, err, guest)
 	}
 	tracks, err := s.ListArtistTracks(ctx, guest.ArtistID)
 	if err != nil || len(tracks) != 1 {

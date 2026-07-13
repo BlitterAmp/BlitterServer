@@ -355,8 +355,8 @@ func (s *Store) FinishScan(ctx context.Context, kind string, seq int64) error {
 		    change_seq = CASE WHEN missing != ((SELECT count(*) FROM tracks WHERE tracks.album_id = albums.album_id AND tracks.missing = 0) = 0) THEN ` + seqStr + ` ELSE change_seq END,
 		    missing = (SELECT count(*) FROM tracks WHERE tracks.album_id = albums.album_id AND tracks.missing = 0) = 0`,
 		`UPDATE artists SET
-		    change_seq = CASE WHEN missing != (NOT EXISTS (SELECT 1 FROM tracks JOIN track_artist_credits c ON c.track_id=tracks.track_id WHERE c.artist_id=artists.artist_id AND tracks.missing=0) AND NOT EXISTS (SELECT 1 FROM albums JOIN album_artist_credits c ON c.album_id=albums.album_id WHERE c.artist_id=artists.artist_id AND albums.missing=0) AND NOT EXISTS (SELECT 1 FROM albums WHERE albums.artist_id=artists.artist_id AND albums.missing=0)) THEN ` + seqStr + ` ELSE change_seq END,
-		    missing = NOT EXISTS (SELECT 1 FROM tracks JOIN track_artist_credits c ON c.track_id=tracks.track_id WHERE c.artist_id=artists.artist_id AND tracks.missing=0) AND NOT EXISTS (SELECT 1 FROM albums JOIN album_artist_credits c ON c.album_id=albums.album_id WHERE c.artist_id=artists.artist_id AND albums.missing=0) AND NOT EXISTS (SELECT 1 FROM albums WHERE albums.artist_id=artists.artist_id AND albums.missing=0)`,
+		    change_seq = CASE WHEN missing != (NOT EXISTS (SELECT 1 FROM tracks JOIN track_artist_credits c ON c.track_id=tracks.track_id WHERE c.artist_id=artists.artist_id AND tracks.missing=0) AND NOT EXISTS (SELECT 1 FROM tracks WHERE tracks.artist_id=artists.artist_id AND tracks.missing=0) AND NOT EXISTS (SELECT 1 FROM albums JOIN album_artist_credits c ON c.album_id=albums.album_id WHERE c.artist_id=artists.artist_id AND albums.missing=0) AND NOT EXISTS (SELECT 1 FROM albums WHERE albums.artist_id=artists.artist_id AND albums.missing=0)) THEN ` + seqStr + ` ELSE change_seq END,
+		    missing = NOT EXISTS (SELECT 1 FROM tracks JOIN track_artist_credits c ON c.track_id=tracks.track_id WHERE c.artist_id=artists.artist_id AND tracks.missing=0) AND NOT EXISTS (SELECT 1 FROM tracks WHERE tracks.artist_id=artists.artist_id AND tracks.missing=0) AND NOT EXISTS (SELECT 1 FROM albums JOIN album_artist_credits c ON c.album_id=albums.album_id WHERE c.artist_id=artists.artist_id AND albums.missing=0) AND NOT EXISTS (SELECT 1 FROM albums WHERE albums.artist_id=artists.artist_id AND albums.missing=0)`,
 		// Propagate art up track→album→artist; stamp rows that actually acquire art.
 		`UPDATE albums SET
 		    change_seq = CASE WHEN (SELECT t.art_id FROM tracks t WHERE t.album_id = albums.album_id AND t.art_id IS NOT NULL AND t.missing = 0 ORDER BY t.disc, t.idx LIMIT 1) IS NOT NULL THEN ` + seqStr + ` ELSE change_seq END,
@@ -449,7 +449,7 @@ func (s *Store) AlbumsNeedingArt(ctx context.Context, limit int) ([]AlbumArtNeed
 func (s *Store) ArtistsNeedingArt(ctx context.Context, limit int) ([]ArtistArtNeed, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT artist_id, name, COALESCE(art_id, ''), COALESCE(musicbrainz_id,'') FROM artists
-		WHERE missing = 0 AND art_id IS NULL AND (art_tried = 0 OR art_tried_at < ?)
+		WHERE missing = 0 AND (`+primaryArtistPredicate("artists")+`) AND art_id IS NULL AND (art_tried = 0 OR art_tried_at < ?)
 		LIMIT ?`, time.Now().Add(-24*time.Hour).Unix(), limit)
 	if err != nil {
 		return nil, err
@@ -535,7 +535,7 @@ func (s *Store) GetLibrarySummary(ctx context.Context) (LibrarySummary, error) {
 	}
 	sum.Version, _ = strconv.ParseInt(sv, 10, 64)
 	err = s.db.QueryRowContext(ctx, `
-		SELECT (SELECT count(*) FROM artists WHERE missing = 0),
+		SELECT (SELECT count(*) FROM artists WHERE missing = 0 AND (`+primaryArtistPredicate("artists")+`)),
 		       (SELECT count(*) FROM albums WHERE missing = 0),
 		       (SELECT count(*) FROM tracks WHERE missing = 0)`).
 		Scan(&sum.Artists, &sum.Albums, &sum.Tracks)
@@ -635,6 +635,12 @@ const artistArt = `COALESCE(a.art_id,
 	 WHERE al.artist_id = a.artist_id AND al.art_id IS NOT NULL AND al.missing = 0
 	 ORDER BY COALESCE(al.year, 9999), al.title, al.album_id LIMIT 1), '')`
 
+func primaryArtistPredicate(alias string) string {
+	return `EXISTS (SELECT 1 FROM albums al WHERE al.artist_id=` + alias + `.artist_id AND al.missing=0)
+		OR EXISTS (SELECT 1 FROM albums al JOIN album_artist_credits ac ON ac.album_id=al.album_id WHERE ac.artist_id=` + alias + `.artist_id AND ac.position=0 AND al.missing=0)
+		OR EXISTS (SELECT 1 FROM tracks t JOIN track_artist_credits tc ON tc.track_id=t.track_id WHERE tc.artist_id=` + alias + `.artist_id AND tc.position=0 AND t.missing=0)`
+}
+
 func (s *Store) ListArtists(ctx context.Context, sort, cur string, limit int) ([]ArtistRow, string, error) {
 	c, err := decodeCursor(cur)
 	if err != nil {
@@ -644,7 +650,7 @@ func (s *Store) ListArtists(ctx context.Context, sort, cur string, limit int) ([
 	if sort == "recentlyAdded" {
 		keyCol, desc = "cast(a.created_at as text)", true
 	}
-	where := "a.missing = 0"
+	where := "a.missing = 0 AND (" + primaryArtistPredicate("a") + ")"
 	args := []any{}
 	if c.ID != "" {
 		where += " AND " + keysetClause(keyCol, "a.artist_id", desc)

@@ -63,24 +63,34 @@ type release struct {
 }
 
 func (r *Resolver) Run(ctx context.Context) (bool, error) {
-	albums, err := r.st.DueMusicBrainzAlbums(ctx, r.now(), r.batchSize)
-	if err != nil {
-		return false, err
-	}
 	changed := false
 	var batchErr error
-	for _, album := range albums {
-		c, err := r.resolve(ctx, album)
+	var afterDueAt int64 = -1
+	var afterID string
+	for {
+		albums, err := r.st.DueMusicBrainzAlbumsPage(ctx, r.now(), afterDueAt, afterID, r.batchSize)
 		if err != nil {
-			if ctx.Err() != nil {
-				return changed, ctx.Err()
-			}
-			batchErr = err
-			continue
+			return changed, err
 		}
-		changed = changed || c
+		if len(albums) == 0 {
+			return changed, batchErr
+		}
+		for _, album := range albums {
+			afterDueAt, afterID = album.DueAt, album.AlbumID
+			if err := ctx.Err(); err != nil {
+				return changed, err
+			}
+			c, err := r.resolve(ctx, album)
+			if err != nil {
+				if ctx.Err() != nil {
+					return changed, ctx.Err()
+				}
+				batchErr = err
+				continue
+			}
+			changed = changed || c
+		}
 	}
-	return changed, batchErr
 }
 
 func (r *Resolver) resolve(ctx context.Context, album store.MusicBrainzAlbum) (bool, error) {

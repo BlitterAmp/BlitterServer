@@ -451,6 +451,7 @@ paths:
       operationId: listArtists
       tags: [library]
       summary: List artists (paged)
+      description: Lists primary artists that own a present album or hold a position-0 credit on a present album or track. Guest-only credited artists remain available through artist detail and search.
       parameters:
         - $ref: "#/components/parameters/cursor"
         - $ref: "#/components/parameters/limit"

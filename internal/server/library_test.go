@@ -62,7 +62,7 @@ func TestBrowseEndpoints(t *testing.T) {
 		t.Fatal(err)
 	}
 	page := arts.(api.ListArtists200JSONResponse)
-	if len(page.Items) != 3 || page.Items[0].Name != "Alpha" {
+	if len(page.Items) != 2 || page.Items[0].Name != "Alpha" {
 		t.Fatalf("artists: %+v", page)
 	}
 	alphaID := page.Items[0].ArtistId

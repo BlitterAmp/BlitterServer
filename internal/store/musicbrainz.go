@@ -19,6 +19,7 @@ type MusicBrainzAlbum struct {
 	PrimaryArtist                             ArtistCreditRow
 	ArtistCredits                             []ArtistCreditRow
 	Tracks                                    []TrackRow
+	DueAt                                     int64
 }
 
 type MusicBrainzCandidate struct {
@@ -28,41 +29,51 @@ type MusicBrainzCandidate struct {
 }
 
 func (s *Store) DueMusicBrainzAlbums(ctx context.Context, now time.Time, limit int) ([]MusicBrainzAlbum, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT al.album_id FROM albums al LEFT JOIN album_musicbrainz_matches m ON m.album_id=al.album_id
-		WHERE al.missing=0 AND COALESCE(m.next_attempt_at,0)<=? ORDER BY COALESCE(m.next_attempt_at,0),al.album_id LIMIT ?`, now.Unix(), limit)
+	return s.DueMusicBrainzAlbumsPage(ctx, now, -1, "", limit)
+}
+
+// DueMusicBrainzAlbumsPage returns one keyset page in retry-time and album-id order.
+func (s *Store) DueMusicBrainzAlbumsPage(ctx context.Context, now time.Time, afterDueAt int64, afterID string, limit int) ([]MusicBrainzAlbum, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT al.album_id,COALESCE(m.next_attempt_at,0) FROM albums al LEFT JOIN album_musicbrainz_matches m ON m.album_id=al.album_id
+		WHERE al.missing=0 AND COALESCE(m.next_attempt_at,0)<=? AND (COALESCE(m.next_attempt_at,0)>? OR (COALESCE(m.next_attempt_at,0)=? AND al.album_id>?))
+		ORDER BY COALESCE(m.next_attempt_at,0),al.album_id LIMIT ?`, now.Unix(), afterDueAt, afterDueAt, afterID, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var ids []string
+	type dueAlbum struct {
+		id    string
+		dueAt int64
+	}
+	var ids []dueAlbum
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var due dueAlbum
+		if err := rows.Scan(&due.id, &due.dueAt); err != nil {
 			return nil, err
 		}
-		ids = append(ids, id)
+		ids = append(ids, due)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	out := make([]MusicBrainzAlbum, 0, len(ids))
-	for _, id := range ids {
-		a, found, err := s.GetAlbum(ctx, id)
+	for _, due := range ids {
+		a, found, err := s.GetAlbum(ctx, due.id)
 		if err != nil {
 			return nil, err
 		}
 		if !found {
 			continue
 		}
-		tracks, err := s.ListAlbumTracks(ctx, id)
+		tracks, err := s.ListAlbumTracks(ctx, due.id)
 		if err != nil {
 			return nil, err
 		}
 		var version int64
-		if err := s.db.QueryRowContext(ctx, `SELECT change_seq FROM albums WHERE album_id=?`, id).Scan(&version); err != nil {
+		if err := s.db.QueryRowContext(ctx, `SELECT change_seq FROM albums WHERE album_id=?`, due.id).Scan(&version); err != nil {
 			return nil, err
 		}
-		out = append(out, MusicBrainzAlbum{AlbumID: a.AlbumID, Title: a.Title, ReleaseID: a.MusicBrainzReleaseID, ReleaseGroupID: a.MusicBrainzReleaseGroupID, Year: a.Year, TrackCount: a.TrackCount, Version: version, PrimaryArtist: a.PrimaryArtist, ArtistCredits: a.ArtistCredits, Tracks: tracks})
+		out = append(out, MusicBrainzAlbum{AlbumID: a.AlbumID, Title: a.Title, ReleaseID: a.MusicBrainzReleaseID, ReleaseGroupID: a.MusicBrainzReleaseGroupID, Year: a.Year, TrackCount: a.TrackCount, Version: version, PrimaryArtist: a.PrimaryArtist, ArtistCredits: a.ArtistCredits, Tracks: tracks, DueAt: due.dueAt})
 	}
 	return out, nil
 }
@@ -141,6 +152,10 @@ func (s *Store) applyMusicBrainzRelease(ctx context.Context, album MusicBrainzAl
 	if !sameMusicBrainzSnapshot(album, current) {
 		return false, nil
 	}
+	beforeCounts, err := albumArtistCountsTx(ctx, tx, album.AlbumID)
+	if err != nil {
+		return false, err
+	}
 	changed := false
 	res, err := tx.ExecContext(ctx, `UPDATE albums SET musicbrainz_release_id=?,musicbrainz_release_group_id=?,change_seq=CASE WHEN musicbrainz_release_id IS NOT ? OR musicbrainz_release_group_id IS NOT ? THEN ? ELSE change_seq END WHERE album_id=?`, release.ReleaseID, release.ReleaseGroupID, release.ReleaseID, release.ReleaseGroupID, seq, album.AlbumID)
 	if err != nil {
@@ -150,7 +165,7 @@ func (s *Store) applyMusicBrainzRelease(ctx context.Context, album MusicBrainzAl
 		changed = true
 	}
 	if len(release.AlbumCredits) > 0 {
-		c, err := replaceCreditsTx(ctx, tx, "album_artist_credits", "album_id", album.AlbumID, release.AlbumCredits, seq)
+		c, err := replaceCreditsTx(ctx, tx, "album_artist_credits", "album_id", album.AlbumID, album.PrimaryArtist.ArtistID, release.AlbumCredits, seq)
 		if err != nil {
 			return false, err
 		}
@@ -187,7 +202,7 @@ func (s *Store) applyMusicBrainzRelease(ctx context.Context, album MusicBrainzAl
 			return false, err
 		}
 		if len(match.Credits) > 0 {
-			c, err := replaceCreditsTx(ctx, tx, "track_artist_credits", "track_id", local.TrackID, match.Credits, seq)
+			c, err := replaceCreditsTx(ctx, tx, "track_artist_credits", "track_id", local.TrackID, local.ArtistID, match.Credits, seq)
 			if err != nil {
 				return false, err
 			}
@@ -208,6 +223,29 @@ func (s *Store) applyMusicBrainzRelease(ctx context.Context, album MusicBrainzAl
 		if _, err := tx.ExecContext(ctx, `UPDATE albums SET change_seq=? WHERE album_id=?`, seq, album.AlbumID); err != nil {
 			return false, err
 		}
+		if _, err := tx.ExecContext(ctx, `UPDATE artists SET
+			change_seq = CASE WHEN missing != (NOT EXISTS (SELECT 1 FROM tracks JOIN track_artist_credits c ON c.track_id=tracks.track_id WHERE c.artist_id=artists.artist_id AND tracks.missing=0) AND NOT EXISTS (SELECT 1 FROM tracks WHERE tracks.artist_id=artists.artist_id AND tracks.missing=0) AND NOT EXISTS (SELECT 1 FROM albums JOIN album_artist_credits c ON c.album_id=albums.album_id WHERE c.artist_id=artists.artist_id AND albums.missing=0) AND NOT EXISTS (SELECT 1 FROM albums WHERE albums.artist_id=artists.artist_id AND albums.missing=0)) THEN ? ELSE change_seq END,
+			missing = NOT EXISTS (SELECT 1 FROM tracks JOIN track_artist_credits c ON c.track_id=tracks.track_id WHERE c.artist_id=artists.artist_id AND tracks.missing=0) AND NOT EXISTS (SELECT 1 FROM tracks WHERE tracks.artist_id=artists.artist_id AND tracks.missing=0) AND NOT EXISTS (SELECT 1 FROM albums JOIN album_artist_credits c ON c.album_id=albums.album_id WHERE c.artist_id=artists.artist_id AND albums.missing=0) AND NOT EXISTS (SELECT 1 FROM albums WHERE albums.artist_id=artists.artist_id AND albums.missing=0)`, seq); err != nil {
+			return false, err
+		}
+		afterCounts, err := albumArtistCountsTx(ctx, tx, album.AlbumID)
+		if err != nil {
+			return false, err
+		}
+		for artistID, before := range beforeCounts {
+			if afterCounts[artistID] != before {
+				if _, err := tx.ExecContext(ctx, `UPDATE artists SET change_seq=? WHERE artist_id=?`, seq, artistID); err != nil {
+					return false, err
+				}
+			}
+		}
+		for artistID, after := range afterCounts {
+			if beforeCounts[artistID] != after {
+				if _, err := tx.ExecContext(ctx, `UPDATE artists SET change_seq=? WHERE artist_id=?`, seq, artistID); err != nil {
+					return false, err
+				}
+			}
+		}
 	}
 	if result != nil {
 		if err := recordMusicBrainzResultTx(ctx, tx, album.AlbumID, "matched", result.selected, result.candidates, result.next, ""); err != nil {
@@ -218,6 +256,44 @@ func (s *Store) applyMusicBrainzRelease(ctx context.Context, album MusicBrainzAl
 		return false, err
 	}
 	return changed, nil
+}
+
+type artistCounts struct {
+	albums int
+	tracks int
+}
+
+func albumArtistCountsTx(ctx context.Context, tx *sql.Tx, albumID string) (map[string]artistCounts, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT artist_id FROM albums WHERE album_id=?
+		UNION SELECT artist_id FROM album_artist_credits WHERE album_id=?
+		UNION SELECT artist_id FROM tracks WHERE album_id=?
+		UNION SELECT c.artist_id FROM track_artist_credits c JOIN tracks t ON t.track_id=c.track_id WHERE t.album_id=?`, albumID, albumID, albumID, albumID)
+	if err != nil {
+		return nil, err
+	}
+	var artistIDs []string
+	for rows.Next() {
+		var artistID string
+		if err := rows.Scan(&artistID); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		artistIDs = append(artistIDs, artistID)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	counts := make(map[string]artistCounts, len(artistIDs))
+	for _, artistID := range artistIDs {
+		var count artistCounts
+		if err := tx.QueryRowContext(ctx, `SELECT
+			(SELECT count(DISTINCT al.album_id) FROM albums al JOIN album_artist_credits c ON c.album_id=al.album_id WHERE c.artist_id=? AND al.missing=0),
+			(SELECT count(DISTINCT t.track_id) FROM tracks t JOIN track_artist_credits c ON c.track_id=t.track_id WHERE c.artist_id=? AND t.missing=0)`, artistID, artistID).Scan(&count.albums, &count.tracks); err != nil {
+			return nil, err
+		}
+		counts[artistID] = count
+	}
+	return counts, nil
 }
 
 func musicBrainzSnapshotTx(ctx context.Context, tx *sql.Tx, albumID string) (MusicBrainzAlbum, error) {
@@ -259,7 +335,7 @@ func sameMusicBrainzSnapshot(expected, current MusicBrainzAlbum) bool {
 	return true
 }
 
-func replaceCreditsTx(ctx context.Context, tx *sql.Tx, table, ownerColumn, ownerID string, credits []source.ArtistCredit, seq int64) (bool, error) {
+func replaceCreditsTx(ctx context.Context, tx *sql.Tx, table, ownerColumn, ownerID, primaryOwnerID string, credits []source.ArtistCredit, seq int64) (bool, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT COALESCE(a.musicbrainz_id,''),c.name,c.join_phrase FROM `+table+` c JOIN artists a ON a.artist_id=c.artist_id WHERE c.`+ownerColumn+`=? ORDER BY c.position`, ownerID)
 	if err != nil {
 		return false, err
@@ -294,20 +370,33 @@ func replaceCreditsTx(ctx context.Context, tx *sql.Tx, table, ownerColumn, owner
 		var artistID, name string
 		err = tx.QueryRowContext(ctx, `SELECT artist_id,name FROM artists WHERE musicbrainz_id=?`, c.MBID).Scan(&artistID, &name)
 		if errors.Is(err, sql.ErrNoRows) {
-			artistID = NewID("art")
-			_, err = tx.ExecContext(ctx, `INSERT INTO artists(artist_id,name,musicbrainz_id,created_at,change_seq) VALUES(?,?,?,?,?)`, artistID, c.Name, c.MBID, time.Now().Unix(), seq)
+			if i == 0 && primaryOwnerID != "" {
+				err = tx.QueryRowContext(ctx, `SELECT artist_id,name FROM artists WHERE artist_id=? AND musicbrainz_id IS NULL`, primaryOwnerID).Scan(&artistID, &name)
+			} else if i > 0 {
+				err = tx.QueryRowContext(ctx, `SELECT min(artist_id),min(name) FROM artists WHERE musicbrainz_id IS NULL AND name=? HAVING count(*)=1`, c.Name).Scan(&artistID, &name)
+			}
+			if errors.Is(err, sql.ErrNoRows) {
+				artistID, name = NewID("art"), ""
+				_, err = tx.ExecContext(ctx, `INSERT INTO artists(artist_id,name,musicbrainz_id,created_at,change_seq) VALUES(?,?,?,?,?)`, artistID, c.Name, c.MBID, time.Now().Unix(), seq)
+			} else if err == nil {
+				_, err = tx.ExecContext(ctx, `UPDATE artists SET musicbrainz_id=?,missing=0,change_seq=? WHERE artist_id=?`, c.MBID, seq, artistID)
+			}
 		}
 		if err != nil {
 			return false, err
 		}
 		if c.Name != name && name != "" {
-			_, _ = tx.ExecContext(ctx, `INSERT OR IGNORE INTO artist_aliases(artist_id,name) VALUES(?,?)`, artistID, name)
+			if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO artist_aliases(artist_id,name) VALUES(?,?)`, artistID, name); err != nil {
+				return false, err
+			}
 			if _, err = tx.ExecContext(ctx, `UPDATE artists SET name=?,change_seq=? WHERE artist_id=?`, c.Name, seq, artistID); err != nil {
 				return false, err
 			}
 		}
 		if i < len(existing) && existing[i].name != "" && existing[i].name != c.Name {
-			_, _ = tx.ExecContext(ctx, `INSERT OR IGNORE INTO artist_aliases(artist_id,name) VALUES(?,?)`, artistID, existing[i].name)
+			if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO artist_aliases(artist_id,name) VALUES(?,?)`, artistID, existing[i].name); err != nil {
+				return false, err
+			}
 		}
 		if _, err = tx.ExecContext(ctx, `INSERT INTO `+table+`(`+ownerColumn+`,position,artist_id,name,join_phrase) VALUES(?,?,?,?,?)`, ownerID, i, artistID, c.Name, c.JoinPhrase); err != nil {
 			return false, err
