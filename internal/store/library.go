@@ -276,7 +276,7 @@ func (s *Store) AlbumsNeedingArt(ctx context.Context, limit int) ([]AlbumArtNeed
 func (s *Store) ArtistsNeedingArt(ctx context.Context, limit int) ([]ArtistArtNeed, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT artist_id, name, COALESCE(art_id, '') FROM artists
-		WHERE missing = 0 AND (art_tried = 0 OR art_tried_at < ?)
+		WHERE missing = 0 AND art_id IS NULL AND (art_tried = 0 OR art_tried_at < ?)
 		LIMIT ?`, time.Now().Add(-24*time.Hour).Unix(), limit)
 	if err != nil {
 		return nil, err

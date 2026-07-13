@@ -27,6 +27,12 @@ func newBlockingEnricher() *blockingEnricher {
 	return &blockingEnricher{started: make(chan int, 10), release: make(chan struct{}, 10)}
 }
 
+func setEnricherWithoutStart(m *Manager, e Enricher) {
+	m.mu.Lock()
+	m.enricher = e
+	m.mu.Unlock()
+}
+
 func (e *blockingEnricher) Run(context.Context) {
 	e.mu.Lock()
 	e.runs++
@@ -168,7 +174,7 @@ func TestTriggerEnrichmentCoalescesWithoutConcurrentRuns(t *testing.T) {
 	s, dataDir := openStore(t)
 	m := NewManager(s, dataDir)
 	e := newBlockingEnricher()
-	m.SetEnricher(e)
+	setEnricherWithoutStart(m, e)
 
 	m.TriggerEnrichment()
 	if run := <-e.started; run != 1 {
@@ -188,11 +194,62 @@ func TestTriggerEnrichmentCoalescesWithoutConcurrentRuns(t *testing.T) {
 	}
 }
 
+func TestSetEnricherTriggersStartupAndPeriodicPasses(t *testing.T) {
+	s, dataDir := openStore(t)
+	m := NewManager(s, dataDir)
+	wake := make(chan struct{}, 1)
+	m.waitEnrichment = func(ctx context.Context) bool {
+		select {
+		case <-wake:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+	e := newBlockingEnricher()
+	m.SetEnricher(e)
+
+	if run := <-e.started; run != 1 {
+		t.Fatalf("startup run=%d", run)
+	}
+	e.release <- struct{}{}
+	wake <- struct{}{}
+	if run := <-e.started; run != 2 {
+		t.Fatalf("periodic run=%d", run)
+	}
+	e.release <- struct{}{}
+	m.Close()
+}
+
+func TestCloseCancelsPeriodicEnrichmentWait(t *testing.T) {
+	s, dataDir := openStore(t)
+	m := NewManager(s, dataDir)
+	waiting := make(chan struct{})
+	m.waitEnrichment = func(ctx context.Context) bool {
+		close(waiting)
+		<-ctx.Done()
+		return false
+	}
+	e := newBlockingEnricher()
+	m.SetEnricher(e)
+	<-waiting
+	<-e.started
+	e.release <- struct{}{}
+
+	done := make(chan struct{})
+	go func() { m.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("close did not cancel periodic enrichment wait")
+	}
+}
+
 func TestCompletedScanUsesEnrichmentTrigger(t *testing.T) {
 	s, dataDir := openStore(t)
 	m := NewManager(s, dataDir)
 	e := newBlockingEnricher()
-	m.SetEnricher(e)
+	setEnricherWithoutStart(m, e)
 
 	if err := m.Configure(context.Background(), musicDir(t)); err != nil {
 		t.Fatal(err)
@@ -227,7 +284,7 @@ func TestTriggerAtWorkerExitStartsFollowUp(t *testing.T) {
 	s, dataDir := openStore(t)
 	m := NewManager(s, dataDir)
 	e := &exitTriggerEnricher{manager: m, runs: make(chan int, 2)}
-	m.SetEnricher(e)
+	setEnricherWithoutStart(m, e)
 	m.TriggerEnrichment()
 	if run := <-e.runs; run != 1 {
 		t.Fatalf("first run=%d", run)
@@ -242,7 +299,7 @@ func TestCloseCancelsWaitsAndRejectsNewEnrichment(t *testing.T) {
 	s, dataDir := openStore(t)
 	m := NewManager(s, dataDir)
 	e := &cancelEnricher{started: make(chan struct{}), done: make(chan struct{})}
-	m.SetEnricher(e)
+	setEnricherWithoutStart(m, e)
 	m.TriggerEnrichment()
 	<-e.started
 
@@ -333,7 +390,7 @@ func sequenceFixture(t *testing.T) (*store.Store, *Manager, *sequenceSource, *se
 	m.mu.Lock()
 	m.src = src
 	m.mu.Unlock()
-	m.SetEnricher(e)
+	setEnricherWithoutStart(m, e)
 	return s, m, src, e, albums[0].AlbumID
 }
 
@@ -490,7 +547,7 @@ func TestResetsWaitForStalePassAndPreserveArtistAndAlbumIntents(t *testing.T) {
 
 	m := NewManager(s, dataDir)
 	e := &retryOrderingEnricher{st: s, albumID: album[0].AlbumID, artistID: artist[0].ArtistID, started: make(chan int, 2), release: make(chan struct{})}
-	m.SetEnricher(e)
+	setEnricherWithoutStart(m, e)
 	m.TriggerEnrichment()
 	<-e.started
 	m.TriggerAlbumEnrichment()
@@ -512,7 +569,7 @@ func TestFailedResetRemainsRetryableOnLaterTrigger(t *testing.T) {
 	s, dataDir := openStore(t)
 	m := NewManager(s, dataDir)
 	e := newBlockingEnricher()
-	m.SetEnricher(e)
+	setEnricherWithoutStart(m, e)
 	attempted := make(chan struct{}, 2)
 	backoff := make(chan struct{}, 1)
 	retry := make(chan struct{})
@@ -551,7 +608,7 @@ func TestFailedResetRemainsRetryableOnLaterTrigger(t *testing.T) {
 func TestCloseCancelsResetRetryBackoff(t *testing.T) {
 	s, dataDir := openStore(t)
 	m := NewManager(s, dataDir)
-	m.SetEnricher(newBlockingEnricher())
+	setEnricherWithoutStart(m, newBlockingEnricher())
 	m.resetArtRetries = func(context.Context, bool) error { return errors.New("synthetic reset failure") }
 	waiting := make(chan struct{})
 	m.waitResetRetry = func(ctx context.Context, attempt int) bool {

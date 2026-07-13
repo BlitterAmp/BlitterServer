@@ -16,7 +16,9 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/BlitterAmp/BlitterServer/internal/events"
@@ -26,6 +28,8 @@ import (
 
 // perRun caps how many entities we resolve in one pass (MusicBrainz is ~1 req/s).
 const perRun = 150
+
+var musicBrainzRateGate sync.Mutex
 
 // Config carries the credentials + identity enrichment needs. Keys are read
 // from server settings (maintained via the admin API), so they're getters.
@@ -68,7 +72,7 @@ func New(st *store.Store, bus *events.Bus, artDir string, cfg Config) *Enricher 
 		MBBase:     "https://musicbrainz.org/ws/2",
 		CAABase:    "https://coverartarchive.org",
 		LastfmBase: "https://ws.audioscrobbler.com/2.0",
-		FanartBase: "https://webservice.fanart.tv/v3",
+		FanartBase: "https://webservice.fanart.tv/v3.2",
 		mbInterval: 1100 * time.Millisecond,
 	}
 }
@@ -77,9 +81,14 @@ func New(st *store.Store, bus *events.Bus, artDir string, cfg Config) *Enricher 
 // failures just mark the entity tried and move on.
 func (e *Enricher) Run(ctx context.Context) {
 	log := logging.From(ctx).With("component", "enrich")
-	seq, err := e.st.NextScanSeq(ctx)
-	if err != nil {
-		return
+	var seq int64
+	nextSeq := func() bool {
+		if seq != 0 {
+			return true
+		}
+		var err error
+		seq, err = e.st.NextScanSeq(ctx)
+		return err == nil
 	}
 	changed := false
 
@@ -90,6 +99,9 @@ func (e *Enricher) Run(ctx context.Context) {
 		}
 		if data, mime := e.albumArt(ctx, a.ArtistName, a.Title); data != nil {
 			if id, err := e.store(ctx, data, mime); err == nil {
+				if !nextSeq() {
+					return
+				}
 				applied, err := e.st.SetAlbumArt(ctx, a.AlbumID, id, seq)
 				changed = changed || applied
 				if err != nil {
@@ -109,6 +121,9 @@ func (e *Enricher) Run(ctx context.Context) {
 			}
 			if data, mime := e.artistArt(ctx, ar.Name); data != nil {
 				if id, err := e.store(ctx, data, mime); err == nil {
+					if !nextSeq() {
+						return
+					}
 					applied, err := e.st.SetArtistArt(ctx, ar.ArtistID, ar.ArtID, id, seq)
 					changed = changed || applied
 					if err != nil {
@@ -138,13 +153,48 @@ func (e *Enricher) store(ctx context.Context, data []byte, mime string) (string,
 
 func (e *Enricher) albumArt(ctx context.Context, artist, album string) ([]byte, string) {
 	if rg := e.mbReleaseGroup(ctx, artist, album); rg != "" {
-		if data, mime := e.fetch(ctx, fmt.Sprintf("%s/release-group/%s/front-500", e.CAABase, rg), ""); data != nil {
+		return e.albumArtForReleaseGroup(ctx, rg, artist, album)
+	}
+	return e.lastfmAlbumArt(ctx, artist, album)
+}
+
+func (e *Enricher) albumArtForReleaseGroup(ctx context.Context, releaseGroupID, artist, album string) ([]byte, string) {
+	if data, mime := e.fetch(ctx, fmt.Sprintf("%s/release-group/%s/front-500", e.CAABase, releaseGroupID), ""); data != nil {
+		return data, mime
+	}
+	if key := e.fanartKey(ctx); key != "" {
+		if data, mime := e.fanartAlbumArt(ctx, key, releaseGroupID); data != nil {
 			return data, mime
 		}
 	}
+	return e.lastfmAlbumArt(ctx, artist, album)
+}
+
+func (e *Enricher) lastfmAlbumArt(ctx context.Context, artist, album string) ([]byte, string) {
 	if key := e.lastfmKey(ctx); key != "" {
 		if u := e.lastfmAlbumImage(ctx, key, artist, album); u != "" {
 			return e.fetch(ctx, u, "")
+		}
+	}
+	return nil, ""
+}
+
+func (e *Enricher) fanartAlbumArt(ctx context.Context, key, releaseGroupID string) ([]byte, string) {
+	u := fmt.Sprintf("%s/music/albums/%s?api_key=%s", e.FanartBase, url.PathEscape(releaseGroupID), url.QueryEscape(key))
+	var body struct {
+		Albums []struct {
+			ReleaseGroupID string `json:"release_group_id"`
+			AlbumCover     []struct {
+				URL string `json:"url"`
+			} `json:"albumcover"`
+		} `json:"albums"`
+	}
+	if !e.getJSON(ctx, u, "", &body) {
+		return nil, ""
+	}
+	for _, album := range body.Albums {
+		if album.ReleaseGroupID == releaseGroupID && len(album.AlbumCover) > 0 && album.AlbumCover[0].URL != "" {
+			return e.fetch(ctx, album.AlbumCover[0].URL, "")
 		}
 	}
 	return nil, ""
@@ -164,7 +214,7 @@ func (e *Enricher) mbReleaseGroup(ctx context.Context, artist, album string) str
 }
 
 func (e *Enricher) lastfmAlbumImage(ctx context.Context, key, artist, album string) string {
-	u := fmt.Sprintf("%s/?method=album.getinfo&api_key=%s&artist=%s&album=%s&format=json",
+	u := fmt.Sprintf("%s/?method=album.getinfo&api_key=%s&artist=%s&album=%s&autocorrect=1&format=json",
 		e.LastfmBase, url.QueryEscape(key), url.QueryEscape(artist), url.QueryEscape(album))
 	var body struct {
 		Album struct {
@@ -226,6 +276,8 @@ func (e *Enricher) mbArtist(ctx context.Context, name string) string {
 // ── http helpers ──
 
 func (e *Enricher) mbQuery(ctx context.Context, entity, query string, out any) bool {
+	musicBrainzRateGate.Lock()
+	defer musicBrainzRateGate.Unlock()
 	if e.mbInterval > 0 {
 		timer := time.NewTimer(e.mbInterval)
 		defer timer.Stop()
@@ -247,7 +299,7 @@ func (e *Enricher) getJSON(ctx context.Context, u, userAgent string, out any) bo
 	if userAgent != "" {
 		req.Header.Set("User-Agent", userAgent)
 	}
-	resp, err := e.http.Do(req)
+	resp, err := e.do(req)
 	if err != nil {
 		return false
 	}
@@ -267,7 +319,7 @@ func (e *Enricher) fetch(ctx context.Context, u, userAgent string) ([]byte, stri
 	if userAgent != "" {
 		req.Header.Set("User-Agent", userAgent)
 	}
-	resp, err := e.http.Do(req)
+	resp, err := e.do(req)
 	if err != nil {
 		return nil, ""
 	}
@@ -284,6 +336,36 @@ func (e *Enricher) fetch(ctx context.Context, u, userAgent string) ([]byte, stri
 		mime = "image/jpeg"
 	}
 	return data, mime
+}
+
+func (e *Enricher) do(req *http.Request) (*http.Response, error) {
+	resp, err := e.http.Do(req)
+	if err != nil || (resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode != http.StatusServiceUnavailable) {
+		return resp, err
+	}
+	delay := retryAfter(resp.Header.Get("Retry-After"), time.Now())
+	resp.Body.Close()
+	if delay <= 0 {
+		delay = time.Second
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return e.http.Do(req)
+	case <-req.Context().Done():
+		return nil, req.Context().Err()
+	}
+}
+
+func retryAfter(value string, now time.Time) time.Duration {
+	if seconds, err := strconv.Atoi(value); err == nil && seconds >= 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	if at, err := http.ParseTime(value); err == nil && at.After(now) {
+		return at.Sub(now)
+	}
+	return 0
 }
 
 func (e *Enricher) lastfmKey(ctx context.Context) string {

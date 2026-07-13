@@ -92,6 +92,7 @@ func handlerWithServer(st *store.Store, mgr *library.Manager, dataDir, version s
 	mgr.SetEnricher(enrich.New(st, bus, filepath.Join(dataDir, "art"), enrich.Config{
 		LastfmKey: func(ctx context.Context) string { v, _, _ := st.GetSetting(ctx, "lastfm_api_key"); return v },
 		FanartKey: func(ctx context.Context) string { v, _, _ := st.GetSetting(ctx, "fanart_api_key"); return v },
+		UserAgent: "BlitterServer/" + version + " (https://github.com/BlitterAmp/BlitterServer)",
 	}))
 	artMgr := artifacts.NewManager(st, mgr, bus, dataDir)
 	artMgr.Start()
