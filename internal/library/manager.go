@@ -89,7 +89,14 @@ func (m *Manager) SetEnricher(e Enricher) {
 	}
 	m.mu.Unlock()
 	if start {
-		m.TriggerEnrichment()
+		m.mu.Lock()
+		configured := m.src != nil
+		m.mu.Unlock()
+		if configured {
+			_ = m.Rescan(m.lifecycleCtx)
+		} else {
+			m.TriggerEnrichment()
+		}
 		go m.scheduleEnrichment()
 	}
 }
@@ -158,13 +165,6 @@ func (m *Manager) runEnrichment() {
 			return
 		}
 		m.mu.Unlock()
-		if !m.acquireOperation() {
-			m.mu.Lock()
-			m.enriching = false
-			m.mu.Unlock()
-			return
-		}
-
 		resetFailed := false
 		if resetArtists {
 			if err := m.resetArtRetries(m.lifecycleCtx, true); err != nil {
@@ -189,7 +189,6 @@ func (m *Manager) runEnrichment() {
 			moreResets := m.resetArtists || m.resetAlbums
 			m.mu.Unlock()
 			if moreResets {
-				m.releaseOperation()
 				continue
 			}
 		}
@@ -197,7 +196,6 @@ func (m *Manager) runEnrichment() {
 			retryAttempt = 0
 			enricher.Run(m.lifecycleCtx)
 		}
-		m.releaseOperation()
 
 		m.mu.Lock()
 		if m.closed {
@@ -416,6 +414,8 @@ func waitForResetRetry(ctx context.Context, attempt int) bool {
 }
 
 func (m *Manager) runScan(ctx context.Context, src source.MusicSource) error {
+	unlock := m.st.LockLibraryScan()
+	defer unlock()
 	seq, err := m.st.NextScanSeq(ctx)
 	if err != nil {
 		return err
