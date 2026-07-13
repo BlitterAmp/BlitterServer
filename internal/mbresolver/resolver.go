@@ -63,6 +63,12 @@ type release struct {
 }
 
 func (r *Resolver) Run(ctx context.Context) (bool, error) {
+	return r.RunWithProgress(ctx, nil)
+}
+
+// RunWithProgress invokes progress after every album whose stored identity
+// actually changed, so long drains can surface incremental updates.
+func (r *Resolver) RunWithProgress(ctx context.Context, progress func()) (bool, error) {
 	changed := false
 	var batchErr error
 	var afterDueAt int64 = -1
@@ -89,6 +95,9 @@ func (r *Resolver) Run(ctx context.Context) (bool, error) {
 				continue
 			}
 			changed = changed || c
+			if c && progress != nil {
+				progress()
+			}
 		}
 	}
 }

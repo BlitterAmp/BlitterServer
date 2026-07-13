@@ -14,6 +14,10 @@ import (
 func TestArtEligibilityDailyBoundaryAndExplicitArtistExclusion(t *testing.T) {
 	s := indexFixture(t)
 	ctx := context.Background()
+	// Fanart selection requires MBIDs; identify the fixture artists.
+	if _, err := s.db.ExecContext(ctx, `UPDATE artists SET musicbrainz_id='mbid-' || artist_id`); err != nil {
+		t.Fatal(err)
+	}
 	artists, err := s.ArtistsNeedingArt(ctx, 10)
 	if err != nil || len(artists) == 0 {
 		t.Fatalf("initial artists: %v %v", artists, err)
@@ -47,6 +51,10 @@ func TestArtEligibilityDailyBoundaryAndExplicitArtistExclusion(t *testing.T) {
 func TestArtRetryUpgradeAndExternalArtistRace(t *testing.T) {
 	s := indexFixture(t)
 	ctx := context.Background()
+	// Fanart selection requires MBIDs; identify the fixture artists.
+	if _, err := s.db.ExecContext(ctx, `UPDATE artists SET musicbrainz_id='mbid-' || artist_id`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.db.ExecContext(ctx, `UPDATE albums SET art_tried=1,art_tried_at=0; UPDATE artists SET art_tried=1,art_tried_at=0`); err != nil {
 		t.Fatal(err)
 	}
@@ -118,6 +126,10 @@ func TestNextScanSeqIsAtomic(t *testing.T) {
 func TestExternalArtDoesNotOverwriteNewerAttachedArt(t *testing.T) {
 	s := indexFixture(t)
 	ctx := context.Background()
+	// Fanart selection requires MBIDs; identify the fixture artists.
+	if _, err := s.db.ExecContext(ctx, `UPDATE artists SET musicbrainz_id='mbid-' || artist_id`); err != nil {
+		t.Fatal(err)
+	}
 	albums, _ := s.AlbumsNeedingArt(ctx, 1)
 	artists, _ := s.ArtistsNeedingArt(ctx, 1)
 	oldArtistArt := artists[0].ArtID
@@ -196,6 +208,10 @@ func TestSetAlbumArtFallsBackToTracksAndArtistWithoutOverridingExplicitArt(t *te
 func TestArtistExternalArtUpgradesUnchangedAlbumFallback(t *testing.T) {
 	s := indexFixture(t)
 	ctx := context.Background()
+	// Fanart selection requires MBIDs; identify the fixture artists.
+	if _, err := s.db.ExecContext(ctx, `UPDATE artists SET musicbrainz_id='mbid-' || artist_id`); err != nil {
+		t.Fatal(err)
+	}
 	artist := func() ArtistArtNeed {
 		rows, _ := s.ArtistsNeedingArt(ctx, 1)
 		return rows[0]

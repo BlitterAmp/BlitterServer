@@ -540,6 +540,20 @@ func TestResetsWaitForStalePassAndPreserveArtistAndAlbumIntents(t *testing.T) {
 	seq, _ := s.NextScanSeq(ctx)
 	_ = s.UpsertTrack(ctx, "filesystem", source.TrackMeta{NativeID: "n1", Title: "Song", PrimaryArtist: source.ArtistReference{Name: "Artist"}, TrackCredits: []source.ArtistCredit{{Name: "Artist"}}, AlbumCredits: []source.ArtistCredit{{Name: "Artist"}}, Album: "Album", Container: "flac", Codec: "flac", Version: 1}, "", seq)
 	_ = s.FinishScan(ctx, "filesystem", seq)
+	// Fanart selection requires an MBID; identify the artist via a match.
+	due, err := s.DueMusicBrainzAlbums(ctx, time.Now(), 1)
+	if err != nil || len(due) != 1 {
+		t.Fatalf("due albums: %v err=%v", due, err)
+	}
+	applySeq, _ := s.NextScanSeq(ctx)
+	credits := []source.ArtistCredit{{Name: "Artist", MBID: "mbid-artist"}}
+	release := store.CanonicalRelease{ReleaseID: "rel-1", ReleaseGroupID: "rg-1", AlbumCredits: credits}
+	for _, track := range due[0].Tracks {
+		release.Tracks = append(release.Tracks, store.CanonicalTrack{Disc: track.Disc, Index: track.Index, Title: track.Title, DurationMs: track.DurationMs, RecordingID: "rec-" + track.TrackID, Credits: credits})
+	}
+	if _, err := s.ApplyMusicBrainzRelease(ctx, due[0], release, applySeq); err != nil {
+		t.Fatal(err)
+	}
 	album, _ := s.AlbumsNeedingArt(ctx, 1)
 	artist, _ := s.ArtistsNeedingArt(ctx, 1)
 	_ = s.MarkAlbumArtTried(ctx, album[0].AlbumID)

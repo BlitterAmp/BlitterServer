@@ -61,6 +61,9 @@ type Enricher struct {
 	CAABase    string
 	LastfmBase string
 	FanartBase string
+	// ProgressInterval rate-limits intermediate library.changed publishes
+	// during a long pass so clients see progress without event spam.
+	ProgressInterval time.Duration
 }
 
 func New(st *store.Store, bus *events.Bus, artDir string, cfg Config) *Enricher {
@@ -74,9 +77,10 @@ func New(st *store.Store, bus *events.Bus, artDir string, cfg Config) *Enricher 
 		providerPacers: map[string]*providerPacer{
 			"caa": newProviderPacer(time.Second), "fanart": newProviderPacer(time.Second), "lastfm": newProviderPacer(time.Second),
 		},
-		CAABase:    "https://coverartarchive.org",
-		LastfmBase: "https://ws.audioscrobbler.com/2.0",
-		FanartBase: "https://webservice.fanart.tv/v3.2",
+		CAABase:          "https://coverartarchive.org",
+		LastfmBase:       "https://ws.audioscrobbler.com/2.0",
+		FanartBase:       "https://webservice.fanart.tv/v3.2",
+		ProgressInterval: 15 * time.Second,
 	}
 	e.mbClient = cfg.MusicBrainz
 	if e.mbClient != nil {
@@ -126,11 +130,15 @@ func (e *Enricher) Run(ctx context.Context) {
 
 func (e *Enricher) RunAt(ctx context.Context, now time.Time) {
 	log := logging.From(ctx).With("component", "enrich")
-	changed := false
 	stats := runSummary{}
-	defer func() {
-		log.Info("enrichment run complete", "attempted", stats.attempted, "succeeded", stats.succeeded, "missed", stats.missed, "transient", stats.transient)
-		if !changed || e.bus == nil {
+	dirty, anyChange := false, false
+	lastPublish := time.Now()
+	markDirty := func() { dirty, anyChange = true, true }
+	publish := func(force bool) {
+		if !dirty || e.bus == nil {
+			return
+		}
+		if !force && time.Since(lastPublish) < e.ProgressInterval {
 			return
 		}
 		publishCtx := context.WithoutCancel(ctx)
@@ -140,8 +148,17 @@ func (e *Enricher) RunAt(ctx context.Context, now time.Time) {
 			log.Error("read library id for enrichment event", "err", err)
 		} else if err := e.bus.Publish(publishCtx, "library.changed", "", map[string]any{"libraryId": libraryID, "updatedAt": sum.UpdatedAt}); err != nil {
 			log.Error("publish enrichment library change", "err", err)
+		} else {
+			dirty = false
+			lastPublish = time.Now()
 		}
-		log.Info("enrichment updated the library")
+	}
+	defer func() {
+		log.Info("enrichment run complete", "attempted", stats.attempted, "succeeded", stats.succeeded, "missed", stats.missed, "transient", stats.transient)
+		publish(true)
+		if anyChange {
+			log.Info("enrichment updated the library")
+		}
 	}()
 	var seq int64
 	nextSeq := func() bool {
@@ -155,105 +172,166 @@ func (e *Enricher) RunAt(ctx context.Context, now time.Time) {
 		}
 		return err == nil
 	}
-	if e.resolver != nil {
-		if resolved, err := e.resolver.Run(ctx); err != nil {
-			changed = resolved
-			log.Warn("MusicBrainz identity resolution failed", "err", err)
-		} else {
-			changed = resolved
-		}
-	}
-
-	albums, err := e.st.AlbumsNeedingArtAt(ctx, now, perRun)
-	if err != nil {
-		log.Error("list albums needing artwork", "err", err)
-		return
-	}
-	for _, a := range albums {
-		if ctx.Err() != nil {
-			return
-		}
-		stats.attempted++
-		data, mime, outcome := e.albumArtOutcome(ctx, a.ReleaseGroupID, a.ArtistName, a.Title)
-		if ctx.Err() != nil {
-			return
-		}
-		if data != nil {
-			if id, err := e.store(ctx, data, mime); err == nil {
-				if !nextSeq() {
+	albumArtStage := func() {
+		for {
+			if ctx.Err() != nil {
+				return
+			}
+			albums, err := e.st.AlbumsNeedingArtAt(ctx, now, perRun)
+			if err != nil {
+				log.Error("list albums needing artwork", "err", err)
+				return
+			}
+			if len(albums) == 0 {
+				return
+			}
+			progressed := false
+			for _, a := range albums {
+				if ctx.Err() != nil {
 					return
 				}
-				applied, err := e.st.SetAlbumArt(ctx, a.AlbumID, id, seq)
-				changed = changed || applied
-				if err != nil {
-					log.Error("attach album artwork", "album_id", a.AlbumID, "err", err)
-				} else {
-					stats.succeeded++
+				stats.attempted++
+				data, mime, outcome := e.albumArtOutcome(ctx, a.ReleaseGroupID, a.ArtistName, a.Title)
+				if ctx.Err() != nil {
+					return
 				}
-				continue
-			} else {
-				log.Error("store album artwork", "album_id", a.AlbumID, "err", err)
-				outcome = lookupTransient
+				if data != nil {
+					if id, err := e.store(ctx, data, mime); err == nil {
+						if !nextSeq() {
+							return
+						}
+						applied, err := e.st.SetAlbumArt(ctx, a.AlbumID, id, seq)
+						if applied {
+							markDirty()
+							publish(false)
+						}
+						if err != nil {
+							log.Error("attach album artwork", "album_id", a.AlbumID, "err", err)
+						} else {
+							stats.succeeded++
+							progressed = true
+						}
+						continue
+					} else {
+						log.Error("store album artwork", "album_id", a.AlbumID, "err", err)
+						outcome = lookupTransient
+					}
+				}
+				if outcome == lookupTransient {
+					stats.transient++
+					err = e.st.MarkAlbumArtAttempt(ctx, a.AlbumID, store.ArtAttemptTransient, now)
+				} else {
+					stats.missed++
+					err = e.st.MarkAlbumArtAttempt(ctx, a.AlbumID, store.ArtAttemptMiss, now)
+				}
+				if err != nil {
+					log.Error("schedule album artwork retry", "album_id", a.AlbumID, "err", err)
+				} else {
+					progressed = true
+				}
 			}
-		}
-		if outcome == lookupTransient {
-			stats.transient++
-			err = e.st.MarkAlbumArtAttempt(ctx, a.AlbumID, store.ArtAttemptTransient, now)
-		} else {
-			stats.missed++
-			err = e.st.MarkAlbumArtAttempt(ctx, a.AlbumID, store.ArtAttemptMiss, now)
-		}
-		if err != nil {
-			log.Error("schedule album artwork retry", "album_id", a.AlbumID, "err", err)
+			publish(false)
+			if !progressed {
+				log.Error("album artwork stage stalled; ending stage")
+				return
+			}
 		}
 	}
 
-	if e.fanartKey(ctx) != "" {
-		artists, err := e.st.ArtistsNeedingArtAt(ctx, now, perRun)
-		if err != nil {
-			log.Error("list artists needing artwork", "err", err)
+	artistArtStage := func() {
+		if e.fanartKey(ctx) == "" {
 			return
 		}
-		for _, ar := range artists {
+		for {
 			if ctx.Err() != nil {
 				return
 			}
-			stats.attempted++
-			data, mime, outcome := e.artistArtOutcome(ctx, ar.MusicBrainzID)
-			if ctx.Err() != nil {
+			artists, err := e.st.ArtistsNeedingArtAt(ctx, now, perRun)
+			if err != nil {
+				log.Error("list artists needing artwork", "err", err)
 				return
 			}
-			if data != nil {
-				if id, err := e.store(ctx, data, mime); err == nil {
-					if !nextSeq() {
-						return
-					}
-					applied, err := e.st.SetArtistArt(ctx, ar.ArtistID, ar.ArtID, id, seq)
-					changed = changed || applied
-					if err != nil {
-						log.Error("attach artist artwork", "artist_id", ar.ArtistID, "err", err)
+			if len(artists) == 0 {
+				return
+			}
+			progressed := false
+			for _, ar := range artists {
+				if ctx.Err() != nil {
+					return
+				}
+				stats.attempted++
+				data, mime, outcome := e.artistArtOutcome(ctx, ar.MusicBrainzID)
+				if ctx.Err() != nil {
+					return
+				}
+				if data != nil {
+					if id, err := e.store(ctx, data, mime); err == nil {
+						if !nextSeq() {
+							return
+						}
+						applied, err := e.st.SetArtistArt(ctx, ar.ArtistID, ar.ArtID, id, seq)
+						if applied {
+							markDirty()
+							publish(false)
+						}
+						if err != nil {
+							log.Error("attach artist artwork", "artist_id", ar.ArtistID, "err", err)
+						} else {
+							stats.succeeded++
+							progressed = true
+						}
+						continue
 					} else {
-						stats.succeeded++
+						log.Error("store artist artwork", "artist_id", ar.ArtistID, "err", err)
+						outcome = lookupTransient
 					}
-					continue
+				}
+				if outcome == lookupTransient {
+					stats.transient++
+					err = e.st.MarkArtistArtAttempt(ctx, ar.ArtistID, store.ArtAttemptTransient, now)
 				} else {
-					log.Error("store artist artwork", "artist_id", ar.ArtistID, "err", err)
-					outcome = lookupTransient
+					stats.missed++
+					err = e.st.MarkArtistArtAttempt(ctx, ar.ArtistID, store.ArtAttemptMiss, now)
+				}
+				if err != nil {
+					log.Error("schedule artist artwork retry", "artist_id", ar.ArtistID, "err", err)
+				} else {
+					progressed = true
 				}
 			}
-			if outcome == lookupTransient {
-				stats.transient++
-				err = e.st.MarkArtistArtAttempt(ctx, ar.ArtistID, store.ArtAttemptTransient, now)
-			} else {
-				stats.missed++
-				err = e.st.MarkArtistArtAttempt(ctx, ar.ArtistID, store.ArtAttemptMiss, now)
-			}
-			if err != nil {
-				log.Error("schedule artist artwork retry", "artist_id", ar.ArtistID, "err", err)
+			publish(false)
+			if !progressed {
+				log.Error("artist artwork stage stalled; ending stage")
+				return
 			}
 		}
 	}
 
+	// Artwork first: a fresh library must not wait behind a full identity
+	// drain to show covers. Whatever identity already exists is used (CAA);
+	// the rest falls back to name-based lookups.
+	albumArtStage()
+	artistArtStage()
+
+	if e.resolver != nil {
+		resolved, err := e.resolver.RunWithProgress(ctx, func() {
+			markDirty()
+			publish(false)
+		})
+		if resolved {
+			markDirty()
+		}
+		if err != nil {
+			log.Warn("MusicBrainz identity resolution failed", "err", err)
+		}
+	}
+	publish(false)
+
+	// Identity landed above: newly matched albums and newly identified
+	// artists had their art schedules reset, so give them their first
+	// identity-aware fetch in the same pass.
+	albumArtStage()
+	artistArtStage()
 }
 
 func (e *Enricher) store(ctx context.Context, data []byte, mime string) (string, error) {

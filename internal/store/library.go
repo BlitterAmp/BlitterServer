@@ -457,7 +457,7 @@ func (s *Store) ArtistsNeedingArt(ctx context.Context, limit int) ([]ArtistArtNe
 func (s *Store) ArtistsNeedingArtAt(ctx context.Context, now time.Time, limit int) ([]ArtistArtNeed, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT artist_id, name, COALESCE(art_id, ''), COALESCE(musicbrainz_id,'') FROM artists
-		WHERE missing = 0 AND (`+primaryArtistPredicate("artists")+`) AND art_next_attempt_at <= ?
+		WHERE missing = 0 AND COALESCE(musicbrainz_id,'') != '' AND (`+primaryArtistPredicate("artists")+`) AND art_next_attempt_at <= ?
 		  AND (art_id IS NULL OR EXISTS (SELECT 1 FROM albums al WHERE al.artist_id=artists.artist_id AND al.art_id=artists.art_id AND al.missing=0))
 		LIMIT ?`, now.Unix(), limit)
 	if err != nil {

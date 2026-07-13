@@ -163,6 +163,11 @@ func (s *Store) applyMusicBrainzRelease(ctx context.Context, album MusicBrainzAl
 	}
 	if n, _ := res.RowsAffected(); n > 0 && (album.ReleaseID != release.ReleaseID || album.ReleaseGroupID != release.ReleaseGroupID) {
 		changed = true
+		// New identity means new artwork sources (CAA is release-group-keyed):
+		// an artless album's pre-identity miss schedule must not delay them.
+		if _, err := tx.ExecContext(ctx, `UPDATE albums SET art_next_attempt_at=0,art_miss_count=0 WHERE album_id=? AND art_id IS NULL`, album.AlbumID); err != nil {
+			return false, err
+		}
 	}
 	if len(release.AlbumCredits) > 0 {
 		c, err := replaceCreditsTx(ctx, tx, "album_artist_credits", "album_id", album.AlbumID, album.PrimaryArtist.ArtistID, release.AlbumCredits, seq)
@@ -379,7 +384,9 @@ func replaceCreditsTx(ctx context.Context, tx *sql.Tx, table, ownerColumn, owner
 				artistID, name = NewID("art"), ""
 				_, err = tx.ExecContext(ctx, `INSERT INTO artists(artist_id,name,musicbrainz_id,created_at,change_seq) VALUES(?,?,?,?,?)`, artistID, c.Name, c.MBID, time.Now().Unix(), seq)
 			} else if err == nil {
-				_, err = tx.ExecContext(ctx, `UPDATE artists SET musicbrainz_id=?,missing=0,change_seq=? WHERE artist_id=?`, c.MBID, seq, artistID)
+				// Adoption grants fanart eligibility (MBID-keyed); clear any
+				// pre-identity artwork miss schedule.
+				_, err = tx.ExecContext(ctx, `UPDATE artists SET musicbrainz_id=?,missing=0,change_seq=?,art_next_attempt_at=0,art_miss_count=0 WHERE artist_id=?`, c.MBID, seq, artistID)
 			}
 		}
 		if err != nil {
