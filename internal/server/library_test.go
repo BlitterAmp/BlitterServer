@@ -2,6 +2,9 @@ package server
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/BlitterAmp/BlitterServer/internal/api"
@@ -9,6 +12,44 @@ import (
 	"github.com/BlitterAmp/BlitterServer/internal/source"
 	"github.com/BlitterAmp/BlitterServer/internal/store"
 )
+
+func TestLibraryIDIsStablePerDatabase(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	readID := func() string {
+		st, err := store.Open(ctx, dataDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mgr := library.NewManager(st, dataDir)
+		srv := NewWithLibrary(st, mgr, "test")
+		resp, err := srv.GetLibrary(ctx, api.GetLibraryRequestObject{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		mgr.Close()
+		if err := st.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return resp.(api.GetLibrary200JSONResponse).LibraryId
+	}
+
+	first := readID()
+	if !strings.HasPrefix(first, "lib_") || first == "lib_local" {
+		t.Fatalf("library id %q is not a generated lib_ id", first)
+	}
+	if reopened := readID(); reopened != first {
+		t.Fatalf("library id changed across reopen: %q -> %q", first, reopened)
+	}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := os.Remove(filepath.Join(dataDir, "blitterserver.db") + suffix); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+	}
+	if recreated := readID(); recreated == first {
+		t.Fatalf("library id survived database recreation: %q", recreated)
+	}
+}
 
 // seedLibrary pushes a tiny library straight through the store (adapter
 // parsing is covered elsewhere).

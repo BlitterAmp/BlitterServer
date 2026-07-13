@@ -138,8 +138,12 @@ func (s *Server) GetLibrary(ctx context.Context, _ api.GetLibraryRequestObject) 
 	if err != nil {
 		return nil, err
 	}
+	libraryID, err := s.st.LibraryID(ctx)
+	if err != nil {
+		return nil, err
+	}
 	resp := api.GetLibrary200JSONResponse{
-		LibraryId: "lib_local",
+		LibraryId: libraryID,
 		Title:     "Library",
 		UpdatedAt: sum.UpdatedAt,
 		Version:   sum.Version,

@@ -48,14 +48,15 @@ type Config struct {
 // Enricher runs enrichment passes. Base URLs are fields so tests can point them
 // at local servers.
 type Enricher struct {
-	st       *store.Store
-	bus      *events.Bus
-	artDir   string
-	http     *http.Client
-	cfg      Config
-	resolver *mbresolver.Resolver
-	mbClient *musicbrainz.Client
-	cache    *providercache.Cache
+	st             *store.Store
+	bus            *events.Bus
+	artDir         string
+	http           *http.Client
+	cfg            Config
+	resolver       *mbresolver.Resolver
+	mbClient       *musicbrainz.Client
+	cache          *providercache.Cache
+	providerPacers map[string]*providerPacer
 
 	CAABase    string
 	LastfmBase string
@@ -64,12 +65,15 @@ type Enricher struct {
 
 func New(st *store.Store, bus *events.Bus, artDir string, cfg Config) *Enricher {
 	e := &Enricher{
-		st:         st,
-		bus:        bus,
-		artDir:     artDir,
-		http:       &http.Client{Timeout: 20 * time.Second},
-		cfg:        cfg,
-		cache:      cfg.ProviderCache,
+		st:     st,
+		bus:    bus,
+		artDir: artDir,
+		http:   &http.Client{Timeout: 20 * time.Second},
+		cfg:    cfg,
+		cache:  cfg.ProviderCache,
+		providerPacers: map[string]*providerPacer{
+			"caa": newProviderPacer(time.Second), "fanart": newProviderPacer(time.Second), "lastfm": newProviderPacer(time.Second),
+		},
 		CAABase:    "https://coverartarchive.org",
 		LastfmBase: "https://ws.audioscrobbler.com/2.0",
 		FanartBase: "https://webservice.fanart.tv/v3.2",
@@ -106,18 +110,36 @@ func (e *Enricher) mbReleaseGroup(ctx context.Context, artist, album string) str
 	return match
 }
 
-// Run does one enrichment pass over untried albums (then artists). Best-effort:
-// failures just mark the entity tried and move on.
+type lookupOutcome int
+
+const (
+	lookupMiss lookupOutcome = iota
+	lookupSuccess
+	lookupTransient
+)
+
+type runSummary struct{ attempted, succeeded, missed, transient int }
+
 func (e *Enricher) Run(ctx context.Context) {
+	e.RunAt(ctx, time.Now())
+}
+
+func (e *Enricher) RunAt(ctx context.Context, now time.Time) {
 	log := logging.From(ctx).With("component", "enrich")
 	changed := false
+	stats := runSummary{}
 	defer func() {
+		log.Info("enrichment run complete", "attempted", stats.attempted, "succeeded", stats.succeeded, "missed", stats.missed, "transient", stats.transient)
 		if !changed || e.bus == nil {
 			return
 		}
 		publishCtx := context.WithoutCancel(ctx)
-		if sum, err := e.st.GetLibrarySummary(publishCtx); err == nil {
-			_ = e.bus.Publish(publishCtx, "library.changed", "", map[string]any{"libraryId": "lib_local", "updatedAt": sum.UpdatedAt})
+		if sum, err := e.st.GetLibrarySummary(publishCtx); err != nil {
+			log.Error("read library summary for enrichment event", "err", err)
+		} else if libraryID, err := e.st.LibraryID(publishCtx); err != nil {
+			log.Error("read library id for enrichment event", "err", err)
+		} else if err := e.bus.Publish(publishCtx, "library.changed", "", map[string]any{"libraryId": libraryID, "updatedAt": sum.UpdatedAt}); err != nil {
+			log.Error("publish enrichment library change", "err", err)
 		}
 		log.Info("enrichment updated the library")
 	}()
@@ -128,6 +150,9 @@ func (e *Enricher) Run(ctx context.Context) {
 		}
 		var err error
 		seq, err = e.st.NextScanSeq(ctx)
+		if err != nil {
+			log.Error("allocate enrichment change sequence", "err", err)
+		}
 		return err == nil
 	}
 	if e.resolver != nil {
@@ -139,12 +164,21 @@ func (e *Enricher) Run(ctx context.Context) {
 		}
 	}
 
-	albums, _ := e.st.AlbumsNeedingArt(ctx, perRun)
+	albums, err := e.st.AlbumsNeedingArtAt(ctx, now, perRun)
+	if err != nil {
+		log.Error("list albums needing artwork", "err", err)
+		return
+	}
 	for _, a := range albums {
 		if ctx.Err() != nil {
 			return
 		}
-		if data, mime := e.albumArt(ctx, a.ReleaseGroupID, a.ArtistName, a.Title); data != nil {
+		stats.attempted++
+		data, mime, outcome := e.albumArtOutcome(ctx, a.ReleaseGroupID, a.ArtistName, a.Title)
+		if ctx.Err() != nil {
+			return
+		}
+		if data != nil {
 			if id, err := e.store(ctx, data, mime); err == nil {
 				if !nextSeq() {
 					return
@@ -152,21 +186,44 @@ func (e *Enricher) Run(ctx context.Context) {
 				applied, err := e.st.SetAlbumArt(ctx, a.AlbumID, id, seq)
 				changed = changed || applied
 				if err != nil {
-					_ = e.st.MarkAlbumArtTried(ctx, a.AlbumID)
+					log.Error("attach album artwork", "album_id", a.AlbumID, "err", err)
+				} else {
+					stats.succeeded++
 				}
 				continue
+			} else {
+				log.Error("store album artwork", "album_id", a.AlbumID, "err", err)
+				outcome = lookupTransient
 			}
 		}
-		_ = e.st.MarkAlbumArtTried(ctx, a.AlbumID)
+		if outcome == lookupTransient {
+			stats.transient++
+			err = e.st.MarkAlbumArtAttempt(ctx, a.AlbumID, store.ArtAttemptTransient, now)
+		} else {
+			stats.missed++
+			err = e.st.MarkAlbumArtAttempt(ctx, a.AlbumID, store.ArtAttemptMiss, now)
+		}
+		if err != nil {
+			log.Error("schedule album artwork retry", "album_id", a.AlbumID, "err", err)
+		}
 	}
 
 	if e.fanartKey(ctx) != "" {
-		artists, _ := e.st.ArtistsNeedingArt(ctx, perRun)
+		artists, err := e.st.ArtistsNeedingArtAt(ctx, now, perRun)
+		if err != nil {
+			log.Error("list artists needing artwork", "err", err)
+			return
+		}
 		for _, ar := range artists {
 			if ctx.Err() != nil {
 				return
 			}
-			if data, mime := e.artistArt(ctx, ar.MusicBrainzID); data != nil {
+			stats.attempted++
+			data, mime, outcome := e.artistArtOutcome(ctx, ar.MusicBrainzID)
+			if ctx.Err() != nil {
+				return
+			}
+			if data != nil {
 				if id, err := e.store(ctx, data, mime); err == nil {
 					if !nextSeq() {
 						return
@@ -174,12 +231,26 @@ func (e *Enricher) Run(ctx context.Context) {
 					applied, err := e.st.SetArtistArt(ctx, ar.ArtistID, ar.ArtID, id, seq)
 					changed = changed || applied
 					if err != nil {
-						_ = e.st.MarkArtistArtTried(ctx, ar.ArtistID)
+						log.Error("attach artist artwork", "artist_id", ar.ArtistID, "err", err)
+					} else {
+						stats.succeeded++
 					}
 					continue
+				} else {
+					log.Error("store artist artwork", "artist_id", ar.ArtistID, "err", err)
+					outcome = lookupTransient
 				}
 			}
-			_ = e.st.MarkArtistArtTried(ctx, ar.ArtistID)
+			if outcome == lookupTransient {
+				stats.transient++
+				err = e.st.MarkArtistArtAttempt(ctx, ar.ArtistID, store.ArtAttemptTransient, now)
+			} else {
+				stats.missed++
+				err = e.st.MarkArtistArtAttempt(ctx, ar.ArtistID, store.ArtAttemptMiss, now)
+			}
+			if err != nil {
+				log.Error("schedule artist artwork retry", "artist_id", ar.ArtistID, "err", err)
+			}
 		}
 	}
 
@@ -193,37 +264,77 @@ func (e *Enricher) store(ctx context.Context, data []byte, mime string) (string,
 // ── album art ──
 
 func (e *Enricher) albumArt(ctx context.Context, releaseGroupID, artist, album string) ([]byte, string) {
+	data, mime, _ := e.albumArtOutcome(ctx, releaseGroupID, artist, album)
+	return data, mime
+}
+
+func (e *Enricher) albumArtOutcome(ctx context.Context, releaseGroupID, artist, album string) ([]byte, string, lookupOutcome) {
 	if releaseGroupID != "" {
-		return e.albumArtForReleaseGroup(ctx, releaseGroupID, artist, album)
+		return e.albumArtForReleaseGroupOutcome(ctx, releaseGroupID, artist, album)
 	}
 	if fallback := e.mbReleaseGroup(ctx, artist, album); fallback != "" {
-		return e.albumArtForReleaseGroup(ctx, fallback, artist, album)
+		return e.albumArtForReleaseGroupOutcome(ctx, fallback, artist, album)
 	}
-	return e.lastfmAlbumArt(ctx, artist, album)
+	data, mime, outcome := e.lastfmAlbumArtOutcome(ctx, artist, album)
+	if data == nil && outcome == lookupMiss && e.mbClient == nil && e.lastfmKey(ctx) == "" {
+		// No provider made a definitive statement: identity resolution and the
+		// only name-based fallback were unavailable, so preserve the miss tier.
+		outcome = lookupTransient
+	}
+	return data, mime, outcome
 }
 
 func (e *Enricher) albumArtForReleaseGroup(ctx context.Context, releaseGroupID, artist, album string) ([]byte, string) {
-	if data, mime := e.fetch(ctx, "caa", fmt.Sprintf("%s/release-group/%s/front-500", e.CAABase, releaseGroupID), ""); data != nil {
-		return data, mime
+	data, mime, _ := e.albumArtForReleaseGroupOutcome(ctx, releaseGroupID, artist, album)
+	return data, mime
+}
+
+func (e *Enricher) albumArtForReleaseGroupOutcome(ctx context.Context, releaseGroupID, artist, album string) ([]byte, string, lookupOutcome) {
+	transient := false
+	if data, mime, outcome := e.fetchOutcome(ctx, "caa", fmt.Sprintf("%s/release-group/%s/front-500", e.CAABase, releaseGroupID), ""); data != nil {
+		return data, mime, lookupSuccess
+	} else if outcome == lookupTransient {
+		transient = true
 	}
 	if key := e.fanartKey(ctx); key != "" {
-		if data, mime := e.fanartAlbumArt(ctx, key, releaseGroupID); data != nil {
-			return data, mime
+		if data, mime, outcome := e.fanartAlbumArtOutcome(ctx, key, releaseGroupID); data != nil {
+			return data, mime, lookupSuccess
+		} else if outcome == lookupTransient {
+			transient = true
 		}
 	}
-	return e.lastfmAlbumArt(ctx, artist, album)
+	data, mime, outcome := e.lastfmAlbumArtOutcome(ctx, artist, album)
+	if data != nil {
+		return data, mime, lookupSuccess
+	}
+	if transient || outcome == lookupTransient {
+		return nil, "", lookupTransient
+	}
+	return nil, "", lookupMiss
 }
 
 func (e *Enricher) lastfmAlbumArt(ctx context.Context, artist, album string) ([]byte, string) {
+	data, mime, _ := e.lastfmAlbumArtOutcome(ctx, artist, album)
+	return data, mime
+}
+
+func (e *Enricher) lastfmAlbumArtOutcome(ctx context.Context, artist, album string) ([]byte, string, lookupOutcome) {
 	if key := e.lastfmKey(ctx); key != "" {
-		if u := e.lastfmAlbumImage(ctx, key, artist, album); u != "" {
-			return e.fetch(ctx, "lastfm", u, "")
+		if u, outcome := e.lastfmAlbumImageOutcome(ctx, key, artist, album); u != "" {
+			return e.fetchOutcome(ctx, "lastfm", u, "")
+		} else if outcome == lookupTransient {
+			return nil, "", outcome
 		}
 	}
-	return nil, ""
+	return nil, "", lookupMiss
 }
 
 func (e *Enricher) fanartAlbumArt(ctx context.Context, key, releaseGroupID string) ([]byte, string) {
+	data, mime, _ := e.fanartAlbumArtOutcome(ctx, key, releaseGroupID)
+	return data, mime
+}
+
+func (e *Enricher) fanartAlbumArtOutcome(ctx context.Context, key, releaseGroupID string) ([]byte, string, lookupOutcome) {
 	u := fmt.Sprintf("%s/music/albums/%s?api_key=%s", e.FanartBase, url.PathEscape(releaseGroupID), url.QueryEscape(key))
 	var body struct {
 		Albums []struct {
@@ -233,19 +344,24 @@ func (e *Enricher) fanartAlbumArt(ctx context.Context, key, releaseGroupID strin
 			} `json:"albumcover"`
 		} `json:"albums"`
 	}
-	if !e.getJSON(ctx, u, "", &body) {
-		return nil, ""
+	if outcome := e.getJSONOutcome(ctx, u, "", &body); outcome != lookupSuccess {
+		return nil, "", outcome
 	}
 	for _, album := range body.Albums {
 		if album.ReleaseGroupID == releaseGroupID && len(album.AlbumCover) > 0 && album.AlbumCover[0].URL != "" {
-			return e.fetch(ctx, "fanart", album.AlbumCover[0].URL, "")
+			return e.fetchOutcome(ctx, "fanart", album.AlbumCover[0].URL, "")
 		}
 	}
 	e.markMiss(ctx, "fanart", u)
-	return nil, ""
+	return nil, "", lookupMiss
 }
 
 func (e *Enricher) lastfmAlbumImage(ctx context.Context, key, artist, album string) string {
+	image, _ := e.lastfmAlbumImageOutcome(ctx, key, artist, album)
+	return image
+}
+
+func (e *Enricher) lastfmAlbumImageOutcome(ctx context.Context, key, artist, album string) (string, lookupOutcome) {
 	u := fmt.Sprintf("%s/?method=album.getinfo&api_key=%s&artist=%s&album=%s&autocorrect=1&format=json",
 		e.LastfmBase, url.QueryEscape(key), url.QueryEscape(artist), url.QueryEscape(album))
 	var body struct {
@@ -256,21 +372,29 @@ func (e *Enricher) lastfmAlbumImage(ctx context.Context, key, artist, album stri
 			} `json:"image"`
 		} `json:"album"`
 	}
-	if !e.getJSON(ctx, u, "", &body) {
-		return ""
+	if outcome := e.getJSONOutcome(ctx, u, "", &body); outcome != lookupSuccess {
+		return "", outcome
 	}
 	image := largestImage(body.Album.Image)
 	if image == "" {
 		e.markMiss(ctx, "lastfm", u)
 	}
-	return image
+	if image == "" {
+		return "", lookupMiss
+	}
+	return image, lookupSuccess
 }
 
 // ── artist art (fanart.tv) ──
 
 func (e *Enricher) artistArt(ctx context.Context, mbid string) ([]byte, string) {
+	data, mime, _ := e.artistArtOutcome(ctx, mbid)
+	return data, mime
+}
+
+func (e *Enricher) artistArtOutcome(ctx context.Context, mbid string) ([]byte, string, lookupOutcome) {
 	if mbid == "" {
-		return nil, ""
+		return nil, "", lookupMiss
 	}
 	u := fmt.Sprintf("%s/music/%s?api_key=%s", e.FanartBase, mbid, url.QueryEscape(e.fanartKey(ctx)))
 	var body struct {
@@ -281,8 +405,8 @@ func (e *Enricher) artistArt(ctx context.Context, mbid string) ([]byte, string) 
 			URL string `json:"url"`
 		} `json:"artistbackground"`
 	}
-	if !e.getJSON(ctx, u, "", &body) {
-		return nil, ""
+	if outcome := e.getJSONOutcome(ctx, u, "", &body); outcome != lookupSuccess {
+		return nil, "", outcome
 	}
 	pick := ""
 	if len(body.Thumb) > 0 {
@@ -292,93 +416,111 @@ func (e *Enricher) artistArt(ctx context.Context, mbid string) ([]byte, string) 
 	}
 	if pick == "" {
 		e.markMiss(ctx, "fanart", u)
-		return nil, ""
+		return nil, "", lookupMiss
 	}
-	return e.fetch(ctx, "fanart", pick, "")
+	return e.fetchOutcome(ctx, "fanart", pick, "")
 }
 
 // ── http helpers ──
 
 func (e *Enricher) getJSON(ctx context.Context, u, userAgent string, out any) bool {
+	return e.getJSONOutcome(ctx, u, userAgent, out) == lookupSuccess
+}
+
+func (e *Enricher) getJSONOutcome(ctx context.Context, u, userAgent string, out any) lookupOutcome {
 	provider := e.provider(u)
 	key, err := providercache.CanonicalKey(http.MethodGet, u)
 	if err != nil {
-		return false
+		return lookupTransient
 	}
 	if e.cache != nil {
 		if cached, ok := e.cache.Get(provider, key); ok && cached.Fresh(time.Now()) {
 			if cached.Kind == providercache.KindMiss || cached.Status != http.StatusOK {
-				return false
+				return lookupMiss
 			}
-			return json.Unmarshal(cached.Body, out) == nil
+			if json.Unmarshal(cached.Body, out) != nil {
+				return lookupTransient
+			}
+			return lookupSuccess
 		}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return false
+		return lookupTransient
 	}
 	if userAgent != "" {
 		req.Header.Set("User-Agent", userAgent)
 	}
-	resp, err := e.do(req)
+	resp, err := e.do(provider, req)
 	if err != nil {
-		return false
+		return lookupTransient
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		if resp.StatusCode == http.StatusNotFound {
 			e.putCache(ctx, provider, key, providercache.Entry{URL: key, Status: resp.StatusCode, FetchedAt: time.Now(), FreshUntil: time.Now().Add(7 * 24 * time.Hour), Kind: providercache.KindMiss})
 		}
-		return false
+		if resp.StatusCode == http.StatusNotFound {
+			return lookupMiss
+		}
+		return lookupTransient
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil || json.Unmarshal(body, out) != nil {
-		return false
+		return lookupTransient
 	}
 	e.putCache(ctx, provider, key, providercache.Entry{URL: key, Status: resp.StatusCode, MIME: resp.Header.Get("Content-Type"), FetchedAt: time.Now(), FreshUntil: time.Now().Add(30 * 24 * time.Hour), Kind: providercache.KindSuccess, Body: body})
-	return true
+	return lookupSuccess
 }
 
 // fetch downloads binary art; returns the bytes + content type.
 func (e *Enricher) fetch(ctx context.Context, provider, u, userAgent string) ([]byte, string) {
+	data, mime, _ := e.fetchOutcome(ctx, provider, u, userAgent)
+	return data, mime
+}
+
+func (e *Enricher) fetchOutcome(ctx context.Context, provider, u, userAgent string) ([]byte, string, lookupOutcome) {
 	key, err := providercache.CanonicalKey(http.MethodGet, u)
 	if err != nil {
-		return nil, ""
+		return nil, "", lookupTransient
 	}
 	if e.cache != nil {
 		if cached, ok := e.cache.Get(provider, key); ok && cached.Fresh(time.Now()) {
 			if cached.Kind == providercache.KindMiss {
-				return nil, ""
+				return nil, "", lookupMiss
 			}
 			if cached.BlobHash != "" {
 				data, err := os.ReadFile(filepath.Join(e.artDir, cached.BlobHash))
 				if err == nil {
-					return data, cached.MIME
+					return data, cached.MIME, lookupSuccess
 				}
 			}
 		}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return nil, ""
+		return nil, "", lookupTransient
 	}
 	if userAgent != "" {
 		req.Header.Set("User-Agent", userAgent)
 	}
-	resp, err := e.do(req)
+	resp, err := e.do(provider, req)
 	if err != nil {
-		return nil, ""
+		return nil, "", lookupTransient
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		if resp.StatusCode == http.StatusNotFound {
 			e.putCache(ctx, provider, key, providercache.Entry{URL: key, Status: resp.StatusCode, FetchedAt: time.Now(), FreshUntil: time.Now().Add(7 * 24 * time.Hour), Kind: providercache.KindMiss})
 		}
-		return nil, ""
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, "", lookupMiss
+		}
+		return nil, "", lookupTransient
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 12<<20))
 	if err != nil || len(data) == 0 {
-		return nil, ""
+		return nil, "", lookupTransient
 	}
 	mime := resp.Header.Get("Content-Type")
 	if mime == "" || !strings.HasPrefix(mime, "image/") {
@@ -386,7 +528,7 @@ func (e *Enricher) fetch(ctx context.Context, provider, u, userAgent string) ([]
 	}
 	sum := sha256.Sum256(data)
 	e.putCache(ctx, provider, key, providercache.Entry{URL: key, Status: resp.StatusCode, MIME: mime, FetchedAt: time.Now(), FreshUntil: time.Now().Add(30 * 24 * time.Hour), Kind: providercache.KindSuccess, BlobHash: hex.EncodeToString(sum[:])})
-	return data, mime
+	return data, mime, lookupSuccess
 }
 
 func (e *Enricher) provider(u string) string {
@@ -418,7 +560,12 @@ func (e *Enricher) markMiss(ctx context.Context, provider, rawURL string) {
 	}
 }
 
-func (e *Enricher) do(req *http.Request) (*http.Response, error) {
+func (e *Enricher) do(provider string, req *http.Request) (*http.Response, error) {
+	if pacer := e.providerPacers[provider]; pacer != nil {
+		if err := pacer.Wait(req.Context()); err != nil {
+			return nil, err
+		}
+	}
 	resp, err := e.http.Do(req)
 	if err != nil || (resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode != http.StatusServiceUnavailable) {
 		return resp, err
@@ -432,6 +579,11 @@ func (e *Enricher) do(req *http.Request) (*http.Response, error) {
 	defer timer.Stop()
 	select {
 	case <-timer.C:
+		if pacer := e.providerPacers[provider]; pacer != nil {
+			if err := pacer.Wait(req.Context()); err != nil {
+				return nil, err
+			}
+		}
 		return e.http.Do(req)
 	case <-req.Context().Done():
 		return nil, req.Context().Err()

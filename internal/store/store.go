@@ -71,7 +71,12 @@ func Open(ctx context.Context, dataDir string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	return &Store{db: db, secret: aead}, nil
+	st := &Store{db: db, secret: aead}
+	if _, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO settings (key, value) VALUES ('library_id', ?)`, NewID("lib")); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("initialize library id: %w", err)
+	}
+	return st, nil
 }
 
 // loadOrCreateLocalKey uses O_EXCL so concurrent server opens cannot overwrite
@@ -148,6 +153,18 @@ func (s *Store) SetSetting(ctx context.Context, key, value string) error {
 		`INSERT INTO settings (key, value) VALUES (?, ?)
 		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
 	return err
+}
+
+// LibraryID returns the stable identity created with this database.
+func (s *Store) LibraryID(ctx context.Context) (string, error) {
+	id, ok, err := s.GetSetting(ctx, "library_id")
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", errors.New("library id is not initialized")
+	}
+	return id, nil
 }
 
 // SetLastfmCredentials atomically persists the instance-wide provider pair.

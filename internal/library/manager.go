@@ -371,10 +371,16 @@ func (m *Manager) scan(src source.MusicSource) {
 
 	// Nudge connected clients to pull the catalog delta (GET /v1/changes).
 	if m.bus != nil {
-		if sum, err := m.st.GetLibrarySummary(ctx); err == nil {
-			_ = m.bus.Publish(ctx, "library.changed", "", map[string]any{
-				"libraryId": "lib_local", "updatedAt": sum.UpdatedAt,
-			})
+		if sum, err := m.st.GetLibrarySummary(ctx); err != nil {
+			log.Error("read library summary for scan event", "err", err)
+		} else if libraryID, err := m.st.LibraryID(ctx); err != nil {
+			log.Error("read library id for scan event", "err", err)
+		} else {
+			if err := m.bus.Publish(ctx, "library.changed", "", map[string]any{
+				"libraryId": libraryID, "updatedAt": sum.UpdatedAt,
+			}); err != nil {
+				log.Error("publish scan library change", "err", err)
+			}
 		}
 	}
 

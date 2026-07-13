@@ -292,6 +292,56 @@ func TestProvider503RetryAfterRetriesOnce(t *testing.T) {
 	}
 }
 
+func TestTransient503DoesNotConsumeArtworkMissTier(t *testing.T) {
+	st, ctx := seedAlbum(t)
+	now := time.Date(2026, time.July, 12, 12, 0, 0, 0, time.UTC)
+	needs, err := st.AlbumsNeedingArtAt(ctx, now, 1)
+	if err != nil || len(needs) != 1 {
+		t.Fatalf("album need: %+v, %v", needs, err)
+	}
+	if err := st.MarkAlbumArtAttempt(ctx, needs[0].AlbumID, store.ArtAttemptMiss, now.Add(-8*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	e := New(st, nil, t.TempDir(), Config{})
+	e.CAABase = srv.URL
+	e.RunAt(ctx, now)
+	misses, next, err := st.ArtRetryState(ctx, false, needs[0].AlbumID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if misses != 1 || !next.Equal(now.Add(24*time.Hour)) {
+		t.Fatalf("503 state miss=%d next=%s", misses, next)
+	}
+}
+
+func TestFreshProviderCacheBypassesPacer(t *testing.T) {
+	st, ctx := seedAlbum(t)
+	dataDir := t.TempDir()
+	cache := providercache.New(filepath.Join(dataDir, "provider-cache"))
+	requestURL := "https://coverartarchive.org/release-group/rg/front-500"
+	key, err := providercache.CanonicalKey(http.MethodGet, requestURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := cache.Put("caa", key, providercache.Entry{URL: key, Status: http.StatusNotFound, FetchedAt: now, FreshUntil: now.Add(time.Hour), Kind: providercache.KindMiss}); err != nil {
+		t.Fatal(err)
+	}
+	e := New(st, nil, filepath.Join(dataDir, "art"), Config{ProviderCache: cache})
+	e.providerPacers["caa"] = newProviderPacer(time.Hour)
+	if data, _ := e.fetch(ctx, "caa", requestURL, ""); data != nil {
+		t.Fatal("cached miss returned art")
+	}
+	if got := e.providerPacers["caa"].WaitCount(); got != 0 {
+		t.Fatalf("cache hit entered pacer %d times", got)
+	}
+}
+
 func TestFreshProviderCacheAvoidsMetadataAndImageRequests(t *testing.T) {
 	st, ctx := seedAlbum(t)
 	requests := 0

@@ -1188,6 +1188,8 @@ type Library struct {
 		Artists *int `json:"artists,omitempty"`
 		Tracks  *int `json:"tracks,omitempty"`
 	} `json:"counts"`
+
+	// LibraryId Stable for the lifetime of this database; changes when the database is recreated.
 	LibraryId string `json:"libraryId"`
 	Title     string `json:"title"`
 

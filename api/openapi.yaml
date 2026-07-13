@@ -2262,7 +2262,10 @@ components:
       type: object
       required: [libraryId, title, updatedAt, version, counts]
       properties:
-        libraryId: { type: string, example: lib_0m1n2b }
+        libraryId:
+          type: string
+          example: lib_0m1n2b
+          description: Stable for the lifetime of this database; changes when the database is recreated.
         title: { type: string }
         updatedAt:
           type: integer
