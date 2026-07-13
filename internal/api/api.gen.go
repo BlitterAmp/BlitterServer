@@ -961,17 +961,19 @@ type AdminStateSourceKind string
 
 // Album defines model for Album.
 type Album struct {
-	AlbumId    string    `json:"albumId"`
-	ArtId      *string   `json:"artId,omitempty"`
-	ArtistId   string    `json:"artistId"`
-	ArtistName string    `json:"artistName"`
-	Genres     *[]string `json:"genres,omitempty"`
+	AlbumId       string         `json:"albumId"`
+	ArtId         *string        `json:"artId,omitempty"`
+	ArtistCredits []ArtistCredit `json:"artistCredits"`
+	Genres        *[]string      `json:"genres,omitempty"`
 
 	// LoveState Per-profile tri-state; neutral records are not persisted/listed
-	LoveState  *LoveState `json:"loveState,omitempty"`
-	Moods      *[]string  `json:"moods,omitempty"`
-	Title      string     `json:"title"`
-	TrackCount *int       `json:"trackCount,omitempty"`
+	LoveState                 *LoveState      `json:"loveState,omitempty"`
+	Moods                     *[]string       `json:"moods,omitempty"`
+	MusicBrainzReleaseGroupId *string         `json:"musicBrainzReleaseGroupId,omitempty"`
+	MusicBrainzReleaseId      *string         `json:"musicBrainzReleaseId,omitempty"`
+	PrimaryArtist             ArtistReference `json:"primaryArtist"`
+	Title                     string          `json:"title"`
+	TrackCount                *int            `json:"trackCount,omitempty"`
 
 	// UpdatedAt For client cache validators
 	UpdatedAt *int64 `json:"updatedAt,omitempty"`
@@ -1005,35 +1007,54 @@ type ArtifactStatus string
 // Artist defines model for Artist.
 type Artist struct {
 	AlbumCount *int      `json:"albumCount,omitempty"`
+	Aliases    *[]string `json:"aliases,omitempty"`
 	ArtId      *string   `json:"artId,omitempty"`
 	ArtistId   string    `json:"artistId"`
 	Genres     *[]string `json:"genres,omitempty"`
 
 	// LoveState The calling profile's tri-state; absent = neutral
-	LoveState    *LoveState `json:"loveState,omitempty"`
-	Name         string     `json:"name"`
-	UserRating10 *int       `json:"userRating10,omitempty"`
+	LoveState     *LoveState `json:"loveState,omitempty"`
+	MusicBrainzId *string    `json:"musicBrainzId,omitempty"`
+	Name          string     `json:"name"`
+	UserRating10  *int       `json:"userRating10,omitempty"`
+}
+
+// ArtistCredit defines model for ArtistCredit.
+type ArtistCredit struct {
+	ArtistId string `json:"artistId"`
+
+	// JoinPhrase Text following this credited artist; empty for the final credit
+	JoinPhrase string `json:"joinPhrase"`
+	Name       string `json:"name"`
 }
 
 // ArtistDetail defines model for ArtistDetail.
 type ArtistDetail struct {
-	AlbumCount *int    `json:"albumCount,omitempty"`
-	ArtId      *string `json:"artId,omitempty"`
-	ArtistId   string  `json:"artistId"`
+	AlbumCount *int      `json:"albumCount,omitempty"`
+	Aliases    *[]string `json:"aliases,omitempty"`
+	ArtId      *string   `json:"artId,omitempty"`
+	ArtistId   string    `json:"artistId"`
 
 	// Bio HTML-stripped, from last.fm when available
 	Bio    *string   `json:"bio,omitempty"`
 	Genres *[]string `json:"genres,omitempty"`
 
 	// LoveState The calling profile's tri-state; absent = neutral
-	LoveState *LoveState `json:"loveState,omitempty"`
-	Name      string     `json:"name"`
-	Stats     *struct {
+	LoveState     *LoveState `json:"loveState,omitempty"`
+	MusicBrainzId *string    `json:"musicBrainzId,omitempty"`
+	Name          string     `json:"name"`
+	Stats         *struct {
 		LastPlayedAt *time.Time `json:"lastPlayedAt,omitempty"`
 		Plays        *int       `json:"plays,omitempty"`
 	} `json:"stats,omitempty"`
 	TrackCount   *int `json:"trackCount,omitempty"`
 	UserRating10 *int `json:"userRating10,omitempty"`
+}
+
+// ArtistReference defines model for ArtistReference.
+type ArtistReference struct {
+	ArtistId string `json:"artistId"`
+	Name     string `json:"name"`
 }
 
 // Capabilities defines model for Capabilities.
@@ -1307,25 +1328,26 @@ type Party struct {
 
 // PartyQueueItem defines model for PartyQueueItem.
 type PartyQueueItem struct {
-	AddedByProfileId string    `json:"addedByProfileId"`
-	AlbumId          string    `json:"albumId"`
-	AlbumTitle       string    `json:"albumTitle"`
-	ArtId            *string   `json:"artId,omitempty"`
-	ArtistId         string    `json:"artistId"`
-	ArtistName       string    `json:"artistName"`
-	DiscNumber       *int      `json:"discNumber,omitempty"`
-	DurationMs       int       `json:"durationMs"`
-	Genres           *[]string `json:"genres,omitempty"`
-	Index            *int      `json:"index,omitempty"`
+	AddedByProfileId string         `json:"addedByProfileId"`
+	AlbumId          string         `json:"albumId"`
+	AlbumTitle       string         `json:"albumTitle"`
+	ArtId            *string        `json:"artId,omitempty"`
+	ArtistCredits    []ArtistCredit `json:"artistCredits"`
+	DiscNumber       *int           `json:"discNumber,omitempty"`
+	DurationMs       int            `json:"durationMs"`
+	Genres           *[]string      `json:"genres,omitempty"`
+	Index            *int           `json:"index,omitempty"`
 
 	// ItemId Queue item id
 	ItemId string `json:"itemId"`
 
 	// LoveState Per-profile tri-state; neutral records are not persisted/listed
-	LoveState *LoveState `json:"loveState,omitempty"`
-	Media     MediaInfo  `json:"media"`
-	Title     string     `json:"title"`
-	TrackId   string     `json:"trackId"`
+	LoveState              *LoveState      `json:"loveState,omitempty"`
+	Media                  MediaInfo       `json:"media"`
+	MusicBrainzRecordingId *string         `json:"musicBrainzRecordingId,omitempty"`
+	PrimaryArtist          ArtistReference `json:"primaryArtist"`
+	Title                  string          `json:"title"`
+	TrackId                string          `json:"trackId"`
 
 	// UserRating10 The calling profile's rating
 	UserRating10 *int `json:"userRating10,omitempty"`
@@ -1397,24 +1419,25 @@ type PlaylistVisibility string
 
 // PlaylistTrack defines model for PlaylistTrack.
 type PlaylistTrack struct {
-	AlbumId    string    `json:"albumId"`
-	AlbumTitle string    `json:"albumTitle"`
-	ArtId      *string   `json:"artId,omitempty"`
-	ArtistId   string    `json:"artistId"`
-	ArtistName string    `json:"artistName"`
-	DiscNumber *int      `json:"discNumber,omitempty"`
-	DurationMs int       `json:"durationMs"`
-	Genres     *[]string `json:"genres,omitempty"`
-	Index      *int      `json:"index,omitempty"`
+	AlbumId       string         `json:"albumId"`
+	AlbumTitle    string         `json:"albumTitle"`
+	ArtId         *string        `json:"artId,omitempty"`
+	ArtistCredits []ArtistCredit `json:"artistCredits"`
+	DiscNumber    *int           `json:"discNumber,omitempty"`
+	DurationMs    int            `json:"durationMs"`
+	Genres        *[]string      `json:"genres,omitempty"`
+	Index         *int           `json:"index,omitempty"`
 
 	// ItemId Playlist item id (removal handle)
 	ItemId string `json:"itemId"`
 
 	// LoveState Per-profile tri-state; neutral records are not persisted/listed
-	LoveState *LoveState `json:"loveState,omitempty"`
-	Media     MediaInfo  `json:"media"`
-	Title     string     `json:"title"`
-	TrackId   string     `json:"trackId"`
+	LoveState              *LoveState      `json:"loveState,omitempty"`
+	Media                  MediaInfo       `json:"media"`
+	MusicBrainzRecordingId *string         `json:"musicBrainzRecordingId,omitempty"`
+	PrimaryArtist          ArtistReference `json:"primaryArtist"`
+	Title                  string          `json:"title"`
+	TrackId                string          `json:"trackId"`
 
 	// UserRating10 The calling profile's rating
 	UserRating10 *int `json:"userRating10,omitempty"`
@@ -1559,21 +1582,22 @@ type TasteSnapshot struct {
 
 // Track defines model for Track.
 type Track struct {
-	AlbumId    string    `json:"albumId"`
-	AlbumTitle string    `json:"albumTitle"`
-	ArtId      *string   `json:"artId,omitempty"`
-	ArtistId   string    `json:"artistId"`
-	ArtistName string    `json:"artistName"`
-	DiscNumber *int      `json:"discNumber,omitempty"`
-	DurationMs int       `json:"durationMs"`
-	Genres     *[]string `json:"genres,omitempty"`
-	Index      *int      `json:"index,omitempty"`
+	AlbumId       string         `json:"albumId"`
+	AlbumTitle    string         `json:"albumTitle"`
+	ArtId         *string        `json:"artId,omitempty"`
+	ArtistCredits []ArtistCredit `json:"artistCredits"`
+	DiscNumber    *int           `json:"discNumber,omitempty"`
+	DurationMs    int            `json:"durationMs"`
+	Genres        *[]string      `json:"genres,omitempty"`
+	Index         *int           `json:"index,omitempty"`
 
 	// LoveState Per-profile tri-state; neutral records are not persisted/listed
-	LoveState *LoveState `json:"loveState,omitempty"`
-	Media     MediaInfo  `json:"media"`
-	Title     string     `json:"title"`
-	TrackId   string     `json:"trackId"`
+	LoveState              *LoveState      `json:"loveState,omitempty"`
+	Media                  MediaInfo       `json:"media"`
+	MusicBrainzRecordingId *string         `json:"musicBrainzRecordingId,omitempty"`
+	PrimaryArtist          ArtistReference `json:"primaryArtist"`
+	Title                  string          `json:"title"`
+	TrackId                string          `json:"trackId"`
 
 	// UserRating10 The calling profile's rating
 	UserRating10 *int `json:"userRating10,omitempty"`

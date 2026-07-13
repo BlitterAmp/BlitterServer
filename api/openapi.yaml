@@ -2321,6 +2321,10 @@ components:
       properties:
         artistId: { type: string, example: art_9f3kq2 }
         name: { type: string }
+        musicBrainzId: { type: string, nullable: true }
+        aliases:
+          type: array
+          items: { type: string }
         artId: { type: string, nullable: true, example: img_4c5d6e }
         genres:
           type: array
@@ -2347,12 +2351,17 @@ components:
 
     Album:
       type: object
-      required: [albumId, title, artistId, artistName]
+      required: [albumId, title, primaryArtist, artistCredits]
       properties:
         albumId: { type: string, example: alb_7xm1pd }
         title: { type: string }
-        artistId: { type: string, example: art_9f3kq2 }
-        artistName: { type: string }
+        primaryArtist: { $ref: "#/components/schemas/ArtistReference" }
+        artistCredits:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/ArtistCredit" }
+        musicBrainzReleaseId: { type: string, nullable: true }
+        musicBrainzReleaseGroupId: { type: string, nullable: true }
         year: { type: integer, nullable: true }
         artId: { type: string, nullable: true, example: img_4c5d6e }
         genres:
@@ -2367,14 +2376,18 @@ components:
 
     Track:
       type: object
-      required: [trackId, title, artistId, artistName, albumId, albumTitle, durationMs, media]
+      required: [trackId, title, primaryArtist, artistCredits, albumId, albumTitle, durationMs, media]
       properties:
         trackId: { type: string, example: trk_2vq8na }
         title: { type: string }
         index: { type: integer, nullable: true }
         discNumber: { type: integer, nullable: true }
-        artistId: { type: string, example: art_9f3kq2 }
-        artistName: { type: string }
+        primaryArtist: { $ref: "#/components/schemas/ArtistReference" }
+        artistCredits:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/ArtistCredit" }
+        musicBrainzRecordingId: { type: string, nullable: true }
         albumId: { type: string, example: alb_7xm1pd }
         albumTitle: { type: string }
         durationMs: { type: integer }
@@ -2385,6 +2398,21 @@ components:
           items: { type: string }
         media: { $ref: "#/components/schemas/MediaInfo" }
         loveState: { $ref: "#/components/schemas/LoveState" }
+
+    ArtistReference:
+      type: object
+      required: [artistId, name]
+      properties:
+        artistId: { type: string, example: art_9f3kq2 }
+        name: { type: string }
+
+    ArtistCredit:
+      type: object
+      required: [artistId, name, joinPhrase]
+      properties:
+        artistId: { type: string, example: art_9f3kq2 }
+        name: { type: string }
+        joinPhrase: { type: string, description: "Text following this credited artist; empty for the final credit" }
 
     MediaInfo:
       type: object

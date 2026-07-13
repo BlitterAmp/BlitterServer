@@ -15,6 +15,7 @@ import (
 
 	"github.com/BlitterAmp/BlitterServer/internal/source"
 	"github.com/dhowden/tag"
+	"github.com/dhowden/tag/mbz"
 )
 
 var audioExts = map[string]bool{
@@ -113,8 +114,16 @@ func (s *Source) read(path string) (source.TrackMeta, error) {
 		if v := strings.TrimSpace(t.Title()); v != "" {
 			meta.Title = v
 		}
-		meta.Artist = strings.TrimSpace(t.Artist())
-		meta.AlbumArtist = strings.TrimSpace(t.AlbumArtist())
+		artist := strings.TrimSpace(t.Artist())
+		albumArtist := strings.TrimSpace(t.AlbumArtist())
+		ids := mbz.Extract(t)
+		meta.RecordingMBID = validUUID(ids.Get(mbz.Recording))
+		meta.ReleaseMBID = validUUID(ids.Get(mbz.Album))
+		meta.ReleaseGroupMBID = validUUID(ids.Get(mbz.ReleaseGroup))
+		meta.TrackCredits = []source.ArtistCredit{{Name: artist, MBID: validUUID(ids.Get(mbz.Artist))}}
+		meta.AlbumCredits = []source.ArtistCredit{{Name: albumArtist, MBID: validUUID(ids.Get(mbz.AlbumArtist))}}
+		meta.PrimaryArtist.Name = albumArtist
+		meta.PrimaryArtist.MBID = validUUID(ids.Get(mbz.AlbumArtist))
 		meta.Album = strings.TrimSpace(t.Album())
 		meta.Genre = strings.TrimSpace(t.Genre())
 		meta.Year = t.Year()
@@ -126,16 +135,36 @@ func (s *Source) read(path string) (source.TrackMeta, error) {
 		}
 	}
 	// Fallbacks: pathless libraries still get sensible grouping.
-	if meta.Artist == "" {
-		meta.Artist = "Unknown Artist"
+	if len(meta.TrackCredits) == 0 || meta.TrackCredits[0].Name == "" {
+		meta.TrackCredits = []source.ArtistCredit{{Name: "Unknown Artist"}}
 	}
-	if meta.AlbumArtist == "" {
-		meta.AlbumArtist = meta.Artist
+	if meta.PrimaryArtist.Name == "" {
+		meta.PrimaryArtist.Name = meta.TrackCredits[0].Name
+		meta.PrimaryArtist.MBID = meta.TrackCredits[0].MBID
+	}
+	if len(meta.AlbumCredits) == 0 || meta.AlbumCredits[0].Name == "" {
+		meta.AlbumCredits = []source.ArtistCredit{{Name: meta.PrimaryArtist.Name, MBID: meta.PrimaryArtist.MBID}}
 	}
 	if meta.Album == "" {
 		meta.Album = "Unknown Album"
 	}
 	return meta, nil
+}
+
+func validUUID(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if len(value) != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
+		return ""
+	}
+	for i, r := range value {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			continue
+		}
+		if !strings.ContainsRune("0123456789abcdef", r) {
+			return ""
+		}
+	}
+	return value
 }
 
 func (s *Source) Open(_ context.Context, nativeID string) (io.ReadSeekCloser, error) {

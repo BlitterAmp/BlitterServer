@@ -276,10 +276,11 @@ func (s *Server) ListPlaylistTracks(ctx context.Context, req api.ListPlaylistTra
 		resp.Items[i] = api.PlaylistTrack{
 			ItemId: item.ItemID, TrackId: t.TrackId, Title: t.Title,
 			Index: t.Index, DiscNumber: t.DiscNumber,
-			ArtistId: t.ArtistId, ArtistName: t.ArtistName,
+			PrimaryArtist: t.PrimaryArtist, ArtistCredits: t.ArtistCredits,
 			AlbumId: t.AlbumId, AlbumTitle: t.AlbumTitle,
 			DurationMs: t.DurationMs, ArtId: t.ArtId, Genres: t.Genres,
 			Media: t.Media, LoveState: t.LoveState, UserRating10: t.UserRating10,
+			MusicBrainzRecordingId: t.MusicBrainzRecordingId,
 		}
 	}
 	resp.NextCursor = optStr(next)
@@ -419,7 +420,7 @@ func (s *Server) SetLove(ctx context.Context, req api.SetLoveRequestObject) (api
 			if tr, found, e := s.st.GetTrack(ctx, req.Ref); e == nil && found {
 				client, configured, _ := s.lastfmClient(ctx)
 				if configured {
-					if e := client.Love(ctx, conn.SessionKey, lastfm.Track{Artist: tr.ArtistName, Title: tr.Title, Album: tr.AlbumTitle}, rec.State == "loved"); e != nil {
+					if e := client.Love(ctx, conn.SessionKey, lastfm.Track{Artist: renderStoreCredits(tr.ArtistCredits), Title: tr.Title, Album: tr.AlbumTitle}, rec.State == "loved"); e != nil {
 						logging.From(ctx).Warn("last.fm love relay failed")
 						if providerKind(e) == lastfm.ErrorInvalidSession {
 							_, _ = s.st.DeleteLastfmData(ctx, prf)

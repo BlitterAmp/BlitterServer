@@ -25,7 +25,7 @@ func seedAlbum(t *testing.T) (*store.Store, context.Context) {
 	t.Cleanup(func() { st.Close() })
 	seq, _ := st.NextScanSeq(ctx)
 	if err := st.UpsertTrack(ctx, "filesystem", source.TrackMeta{
-		NativeID: "n1", Title: "Song", Artist: "The Band", AlbumArtist: "The Band",
+		NativeID: "n1", Title: "Song", PrimaryArtist: source.ArtistReference{Name: "The Band"}, TrackCredits: []source.ArtistCredit{{Name: "The Band"}}, AlbumCredits: []source.ArtistCredit{{Name: "The Band"}},
 		Album: "Great Album", Container: "flac", Codec: "flac", Version: 1,
 	}, "", seq); err != nil {
 		t.Fatal(err)

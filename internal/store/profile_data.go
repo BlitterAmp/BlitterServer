@@ -200,7 +200,7 @@ func (s *Store) ListPlaylistItems(ctx context.Context, playlistID, cur string, l
 			&item.Track.TrackID, &item.Track.Title, &item.Track.Index, &item.Track.Disc,
 			&item.Track.ArtistID, &item.Track.ArtistName, &item.Track.AlbumID, &item.Track.AlbumTitle,
 			&item.Track.Genre, &item.Track.DurationMs, &item.Track.ArtID,
-			&item.Track.Container, &item.Track.Codec, &item.Track.BitrateKbps, &item.Track.SizeBytes}
+			&item.Track.Container, &item.Track.Codec, &item.Track.BitrateKbps, &item.Track.SizeBytes, &item.Track.MusicBrainzRecordingID}
 		if err := rows.Scan(dest...); err != nil {
 			return nil, "", err
 		}
@@ -214,6 +214,11 @@ func (s *Store) ListPlaylistItems(ctx context.Context, playlistID, cur string, l
 	if len(out) > limit {
 		out = out[:limit]
 		next = encodeCursor(keys[limit-1], out[limit-1].ItemID)
+	}
+	for i := range out {
+		if err := s.hydrateTrackCredits(ctx, &out[i].Track); err != nil {
+			return nil, "", err
+		}
 	}
 	return out, next, nil
 }
@@ -587,7 +592,7 @@ func (s *Store) ListPresence(ctx context.Context) ([]PresenceRow, error) {
 			&e.Track.TrackID, &e.Track.Title, &e.Track.Index, &e.Track.Disc,
 			&e.Track.ArtistID, &e.Track.ArtistName, &e.Track.AlbumID, &e.Track.AlbumTitle,
 			&e.Track.Genre, &e.Track.DurationMs, &e.Track.ArtID,
-			&e.Track.Container, &e.Track.Codec, &e.Track.BitrateKbps, &e.Track.SizeBytes}
+			&e.Track.Container, &e.Track.Codec, &e.Track.BitrateKbps, &e.Track.SizeBytes, &e.Track.MusicBrainzRecordingID}
 		if err := rows.Scan(dest...); err != nil {
 			return nil, err
 		}
@@ -596,7 +601,15 @@ func (s *Store) ListPresence(ctx context.Context) ([]PresenceRow, error) {
 		}
 		out = append(out, e)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		if err := s.hydrateTrackCredits(ctx, &out[i].Track); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 // TasteSnapshotData mirrors the contract's TasteSnapshot.

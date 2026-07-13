@@ -36,6 +36,11 @@ func fixtureLibrary(t *testing.T) string {
 		"-map", "0:a", "-map", "1:v", "-disposition:v", "attached_pic",
 		"-metadata", "title=Sine Song", "-metadata", "artist=Artist One",
 		"-metadata", "album=Album A", "-metadata", "genre=Rock",
+		"-metadata", "musicbrainz_artistid=11111111-1111-1111-1111-111111111111",
+		"-metadata", "musicbrainz_albumartistid=11111111-1111-1111-1111-111111111111",
+		"-metadata", "musicbrainz_recordingid=22222222-2222-2222-2222-222222222222",
+		"-metadata", "musicbrainz_albumid=33333333-3333-3333-3333-333333333333",
+		"-metadata", "musicbrainz_releasegroupid=44444444-4444-4444-4444-444444444444",
 		"-metadata", "date=1994", "-metadata", "track=1",
 		filepath.Join(a1, "01 - Sine Song.flac"))
 	run(t, "ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=550:duration=2",
@@ -92,7 +97,7 @@ func TestScanFindsTaggedTracks(t *testing.T) {
 	if flac.NativeID != filepath.Join("Artist One", "Album A", "01 - Sine Song.flac") {
 		t.Fatalf("native id must be the relative path: %q", flac.NativeID)
 	}
-	if flac.Title != "Sine Song" || flac.Artist != "Artist One" || flac.AlbumArtist != "Artist One" ||
+	if flac.Title != "Sine Song" || flac.TrackCredits[0].Name != "Artist One" || flac.PrimaryArtist.Name != "Artist One" ||
 		flac.Album != "Album A" || flac.Genre != "Rock" || flac.Year != 1994 || flac.Index != 1 {
 		t.Fatalf("flac tags: %+v", flac)
 	}
@@ -101,6 +106,9 @@ func TestScanFindsTaggedTracks(t *testing.T) {
 	}
 	if flac.ArtHash == "" {
 		t.Fatal("flac fixture has embedded art; ArtHash must be set")
+	}
+	if flac.TrackCredits[0].MBID != "11111111-1111-1111-1111-111111111111" || flac.RecordingMBID != "22222222-2222-2222-2222-222222222222" || flac.ReleaseMBID != "33333333-3333-3333-3333-333333333333" || flac.ReleaseGroupMBID != "44444444-4444-4444-4444-444444444444" {
+		t.Fatalf("MusicBrainz tags: %+v", flac)
 	}
 
 	mp3 := tracks[1]
@@ -112,7 +120,7 @@ func TestScanFindsTaggedTracks(t *testing.T) {
 	}
 
 	m4a := tracks[2]
-	if m4a.Artist != "Artist Two" || m4a.Album != "Album B" || m4a.Genre != "Jazz" || m4a.Codec != "aac" {
+	if m4a.TrackCredits[0].Name != "Artist Two" || m4a.Album != "Album B" || m4a.Genre != "Jazz" || m4a.Codec != "aac" {
 		t.Fatalf("m4a: %+v", m4a)
 	}
 }
@@ -154,5 +162,17 @@ func TestNewRejectsMissingRoot(t *testing.T) {
 	os.WriteFile(f, []byte("x"), 0o644)
 	if _, err := New(f); err == nil {
 		t.Fatal("non-directory root must error")
+	}
+}
+
+func TestValidUUIDRejectsMalformedMusicBrainzIDs(t *testing.T) {
+	valid := "12345678-1234-1234-1234-123456789abc"
+	if got := validUUID("  " + valid + "  "); got != valid {
+		t.Fatalf("valid UUID = %q", got)
+	}
+	for _, value := range []string{"", "not-a-uuid", "12345678-1234-1234-1234-123456789abz"} {
+		if got := validUUID(value); got != "" {
+			t.Fatalf("invalid %q accepted as %q", value, got)
+		}
 	}
 }

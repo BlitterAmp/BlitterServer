@@ -20,42 +20,57 @@ import (
 // the contract's Artist/Album/Track schemas need before per-profile overlays
 // (loves, ratings) join in.
 type ArtistRow struct {
+	ArtistID      string
+	Name          string
+	ArtID         string
+	AlbumCount    int
+	TrackCount    int
+	Genres        []string
+	MusicBrainzID string
+	Aliases       []string
+}
+
+type ArtistCreditRow struct {
 	ArtistID   string
 	Name       string
-	ArtID      string
-	AlbumCount int
-	TrackCount int
-	Genres     []string
+	JoinPhrase string
 }
 
 type AlbumRow struct {
-	AlbumID    string
-	Title      string
-	ArtistID   string
-	ArtistName string
-	Year       int
-	ArtID      string
-	TrackCount int
-	Genres     []string
-	UpdatedAt  int64
+	AlbumID                   string
+	Title                     string
+	ArtistID                  string
+	ArtistName                string
+	Year                      int
+	ArtID                     string
+	TrackCount                int
+	Genres                    []string
+	UpdatedAt                 int64
+	PrimaryArtist             ArtistCreditRow
+	ArtistCredits             []ArtistCreditRow
+	MusicBrainzReleaseID      string
+	MusicBrainzReleaseGroupID string
 }
 
 type TrackRow struct {
-	TrackID     string
-	Title       string
-	Index       int
-	Disc        int
-	ArtistID    string
-	ArtistName  string
-	AlbumID     string
-	AlbumTitle  string
-	Genre       string
-	DurationMs  int
-	ArtID       string
-	Container   string
-	Codec       string
-	BitrateKbps int
-	SizeBytes   int64
+	TrackID                string
+	Title                  string
+	Index                  int
+	Disc                   int
+	ArtistID               string
+	ArtistName             string
+	AlbumID                string
+	AlbumTitle             string
+	Genre                  string
+	DurationMs             int
+	ArtID                  string
+	Container              string
+	Codec                  string
+	BitrateKbps            int
+	SizeBytes              int64
+	PrimaryArtist          ArtistCreditRow
+	ArtistCredits          []ArtistCreditRow
+	MusicBrainzRecordingID string
 }
 
 // LibrarySummary backs GET /v1/library.
@@ -102,49 +117,74 @@ func (s *Store) NextScanSeq(ctx context.Context) (int64, error) {
 	return seq, err
 }
 
-// UpsertTrack indexes one scanned track, minting canonical ids on first
-// sight: artists match by grouping-artist name, albums by (artist, title),
-// tracks by (source, native id) — ids survive rescans.
+// UpsertTrack indexes one scanned source file, minting canonical ids on first
+// sight. MusicBrainz ids identify tagged artists and releases; untagged albums
+// fall back to (artist, title), and tracks remain keyed by (source, native id).
 func (s *Store) UpsertTrack(ctx context.Context, kind string, m source.TrackMeta, artID string, seq int64) error {
 	now := time.Now().Unix()
+	var linkedArtistID, linkedAlbumID string
+	err := s.db.QueryRowContext(ctx, `SELECT artist_id,album_id FROM tracks WHERE source_kind=? AND native_id=?`, kind, m.NativeID).Scan(&linkedArtistID, &linkedAlbumID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("read source-linked identity: %w", err)
+	}
 
-	grouping := m.AlbumArtist
-	if grouping == "" {
-		grouping = m.Artist
+	grouping := m.PrimaryArtist
+	if grouping.Name == "" && len(m.TrackCredits) > 0 {
+		grouping = source.ArtistReference{Name: m.TrackCredits[0].Name, MBID: m.TrackCredits[0].MBID}
 	}
-	var artistID string
-	err := s.db.QueryRowContext(ctx,
-		`SELECT artist_id FROM artists WHERE name = ?`, grouping).Scan(&artistID)
-	if errors.Is(err, sql.ErrNoRows) {
-		artistID = NewID("art")
-		_, err = s.db.ExecContext(ctx,
-			`INSERT INTO artists (artist_id, name, created_at, change_seq) VALUES (?, ?, ?, ?)`, artistID, grouping, now, seq)
-	}
+	artistID, err := s.upsertArtist(ctx, grouping.Name, grouping.MBID, linkedArtistID, now, seq)
 	if err != nil {
 		return fmt.Errorf("upsert artist: %w", err)
 	}
 
 	var albumID string
-	err = s.db.QueryRowContext(ctx,
-		`SELECT album_id FROM albums WHERE artist_id = ? AND title = ?`, artistID, m.Album).Scan(&albumID)
+	if m.ReleaseMBID != "" {
+		err = s.db.QueryRowContext(ctx, `SELECT album_id FROM albums WHERE musicbrainz_release_id = ?`, m.ReleaseMBID).Scan(&albumID)
+		if errors.Is(err, sql.ErrNoRows) && linkedAlbumID != "" {
+			res, updateErr := s.db.ExecContext(ctx, `UPDATE albums SET musicbrainz_release_id=?, musicbrainz_release_group_id=COALESCE(?,musicbrainz_release_group_id), change_seq=? WHERE album_id=? AND musicbrainz_release_id IS NULL`, m.ReleaseMBID, nullStr(m.ReleaseGroupMBID), seq, linkedAlbumID)
+			if updateErr == nil {
+				if n, _ := res.RowsAffected(); n == 1 {
+					albumID, err = linkedAlbumID, nil
+				}
+			} else {
+				err = updateErr
+			}
+			if err != nil {
+				lookupErr := s.db.QueryRowContext(ctx, `SELECT album_id FROM albums WHERE musicbrainz_release_id = ?`, m.ReleaseMBID).Scan(&albumID)
+				if lookupErr == nil {
+					err = nil
+				} else if updateErr != nil {
+					return fmt.Errorf("promote source-linked album: %w", updateErr)
+				} else {
+					err = lookupErr
+				}
+			}
+		}
+	} else {
+		err = s.db.QueryRowContext(ctx, `SELECT album_id FROM albums WHERE artist_id = ? AND title = ? AND musicbrainz_release_id IS NULL`, artistID, m.Album).Scan(&albumID)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		albumID = NewID("alb")
 		_, err = s.db.ExecContext(ctx,
-			`INSERT INTO albums (album_id, artist_id, title, year, created_at, change_seq) VALUES (?, ?, ?, ?, ?, ?)`,
-			albumID, artistID, m.Album, nullInt(m.Year), now, seq)
+			`INSERT INTO albums (album_id, artist_id, title, year, musicbrainz_release_id, musicbrainz_release_group_id, created_at, change_seq) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			albumID, artistID, m.Album, nullInt(m.Year), nullStr(m.ReleaseMBID), nullStr(m.ReleaseGroupMBID), now, seq)
 	}
 	if err != nil {
 		return fmt.Errorf("upsert album: %w", err)
 	}
+	_, err = s.db.ExecContext(ctx, `UPDATE albums SET artist_id=?, musicbrainz_release_id=COALESCE(?,musicbrainz_release_id), musicbrainz_release_group_id=COALESCE(?,musicbrainz_release_group_id), change_seq=CASE WHEN artist_id IS NOT ? OR musicbrainz_release_id IS NOT COALESCE(?,musicbrainz_release_id) OR musicbrainz_release_group_id IS NOT COALESCE(?,musicbrainz_release_group_id) THEN ? ELSE change_seq END WHERE album_id=?`, artistID, nullStr(m.ReleaseMBID), nullStr(m.ReleaseGroupMBID), artistID, nullStr(m.ReleaseMBID), nullStr(m.ReleaseGroupMBID), seq, albumID)
+	if err != nil {
+		return fmt.Errorf("update album identity: %w", err)
+	}
 
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO tracks (track_id, album_id, artist_id, artist_name, title, idx, disc, genre,
+		INSERT INTO tracks (track_id, album_id, artist_id, artist_name, musicbrainz_recording_id, title, idx, disc, genre,
 		                    duration_ms, container, codec, bitrate_kbps, size_bytes,
 		                    source_kind, native_id, version, art_id, seen_seq, missing, created_at, change_seq)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
 		ON CONFLICT(source_kind, native_id) DO UPDATE SET
 		    album_id = excluded.album_id, artist_id = excluded.artist_id,
-		    artist_name = excluded.artist_name, title = excluded.title,
+		    artist_name = excluded.artist_name, musicbrainz_recording_id = excluded.musicbrainz_recording_id, title = excluded.title,
 		    idx = excluded.idx, disc = excluded.disc, genre = excluded.genre,
 		    duration_ms = excluded.duration_ms, container = excluded.container,
 		    codec = excluded.codec, bitrate_kbps = excluded.bitrate_kbps,
@@ -154,7 +194,8 @@ func (s *Store) UpsertTrack(ctx context.Context, kind string, m source.TrackMeta
 		    change_seq = CASE WHEN tracks.missing = 1
 		        OR tracks.album_id IS NOT excluded.album_id
 		        OR tracks.artist_id IS NOT excluded.artist_id
-		        OR tracks.artist_name IS NOT excluded.artist_name
+			OR tracks.artist_name IS NOT excluded.artist_name
+			OR tracks.musicbrainz_recording_id IS NOT excluded.musicbrainz_recording_id
 		        OR tracks.title IS NOT excluded.title
 		        OR tracks.idx IS NOT excluded.idx
 		        OR tracks.disc IS NOT excluded.disc
@@ -167,13 +208,116 @@ func (s *Store) UpsertTrack(ctx context.Context, kind string, m source.TrackMeta
 		        OR tracks.version IS NOT excluded.version
 		        OR (excluded.art_id IS NOT NULL AND excluded.art_id IS NOT tracks.art_id)
 		        THEN ? ELSE tracks.change_seq END`,
-		NewID("trk"), albumID, artistID, m.Artist, m.Title, nullInt(m.Index), nullInt(m.Disc), m.Genre,
+		NewID("trk"), albumID, artistID, creditDisplay(m.TrackCredits), nullStr(m.RecordingMBID), m.Title, nullInt(m.Index), nullInt(m.Disc), m.Genre,
 		m.DurationMs, m.Container, m.Codec, nullInt(m.BitrateKbps), m.SizeBytes,
 		kind, m.NativeID, m.Version, nullStr(artID), seq, now, seq, seq)
 	if err != nil {
 		return fmt.Errorf("upsert track: %w", err)
 	}
+	var trackID string
+	if err := s.db.QueryRowContext(ctx, `SELECT track_id FROM tracks WHERE source_kind=? AND native_id=?`, kind, m.NativeID).Scan(&trackID); err != nil {
+		return err
+	}
+	albumCreditsChanged, err := s.replaceCredits(ctx, "album_artist_credits", "album_id", albumID, m.AlbumCredits, now, seq)
+	if err != nil {
+		return err
+	}
+	trackCreditsChanged, err := s.replaceCredits(ctx, "track_artist_credits", "track_id", trackID, m.TrackCredits, now, seq)
+	if err != nil {
+		return err
+	}
+	if albumCreditsChanged {
+		_, _ = s.db.ExecContext(ctx, `UPDATE albums SET change_seq=? WHERE album_id=?`, seq, albumID)
+	}
+	if trackCreditsChanged {
+		_, _ = s.db.ExecContext(ctx, `UPDATE tracks SET change_seq=? WHERE track_id=?`, seq, trackID)
+	}
 	return nil
+}
+
+func (s *Store) upsertArtist(ctx context.Context, name, mbid, linkedID string, now, seq int64) (string, error) {
+	var id, canonical string
+	var err error
+	if mbid != "" {
+		err = s.db.QueryRowContext(ctx, `SELECT artist_id,name FROM artists WHERE musicbrainz_id=?`, mbid).Scan(&id, &canonical)
+		if errors.Is(err, sql.ErrNoRows) && linkedID != "" {
+			_, updateErr := s.db.ExecContext(ctx, `UPDATE artists SET musicbrainz_id=?,change_seq=? WHERE artist_id=? AND musicbrainz_id IS NULL`, mbid, seq, linkedID)
+			if updateErr == nil {
+				err = s.db.QueryRowContext(ctx, `SELECT artist_id,name FROM artists WHERE artist_id=? AND musicbrainz_id=?`, linkedID, mbid).Scan(&id, &canonical)
+			} else {
+				lookupErr := s.db.QueryRowContext(ctx, `SELECT artist_id,name FROM artists WHERE musicbrainz_id=?`, mbid).Scan(&id, &canonical)
+				if lookupErr != nil {
+					return "", updateErr
+				}
+				err = nil
+			}
+		}
+	} else {
+		err = s.db.QueryRowContext(ctx, `SELECT artist_id,name FROM artists WHERE musicbrainz_id IS NULL AND name=? ORDER BY created_at LIMIT 1`, name).Scan(&id, &canonical)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		id = NewID("art")
+		_, err = s.db.ExecContext(ctx, `INSERT INTO artists (artist_id,name,musicbrainz_id,created_at,change_seq) VALUES (?,?,?,?,?)`, id, name, nullStr(mbid), now, seq)
+		canonical = name
+	}
+	if err != nil {
+		return "", err
+	}
+	if name != "" && !strings.EqualFold(name, canonical) {
+		_, err = s.db.ExecContext(ctx, `INSERT OR IGNORE INTO artist_aliases (artist_id,name) VALUES (?,?)`, id, name)
+	}
+	return id, err
+}
+
+func creditDisplay(credits []source.ArtistCredit) string {
+	var b strings.Builder
+	for _, c := range credits {
+		b.WriteString(c.Name)
+		b.WriteString(c.JoinPhrase)
+	}
+	return b.String()
+}
+
+func (s *Store) replaceCredits(ctx context.Context, table, ownerColumn, ownerID string, credits []source.ArtistCredit, now, seq int64) (bool, error) {
+	if len(credits) == 0 {
+		return false, fmt.Errorf("%s requires at least one artist credit", ownerID)
+	}
+	existing, err := s.readCredits(ctx, table, ownerColumn, ownerID)
+	if err != nil {
+		return false, err
+	}
+	ids := make([]string, len(credits))
+	for i, c := range credits {
+		linkedID := ""
+		if i < len(existing) {
+			linkedID = existing[i].ArtistID
+		}
+		ids[i], err = s.upsertArtist(ctx, c.Name, c.MBID, linkedID, now, seq)
+		if err != nil {
+			return false, err
+		}
+	}
+	if len(existing) == len(credits) {
+		same := true
+		for i, c := range credits {
+			if existing[i].ArtistID != ids[i] || existing[i].Name != c.Name || existing[i].JoinPhrase != c.JoinPhrase {
+				same = false
+				break
+			}
+		}
+		if same {
+			return false, nil
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM `+table+` WHERE `+ownerColumn+`=?`, ownerID); err != nil {
+		return false, err
+	}
+	for i, c := range credits {
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO `+table+` (`+ownerColumn+`,position,artist_id,name,join_phrase) VALUES (?,?,?,?,?)`, ownerID, i, ids[i], c.Name, c.JoinPhrase); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 // FinishScan marks unseen rows missing, propagates art track→album→artist,
@@ -189,8 +333,8 @@ func (s *Store) FinishScan(ctx context.Context, kind string, seq int64) error {
 		    change_seq = CASE WHEN missing != ((SELECT count(*) FROM tracks WHERE tracks.album_id = albums.album_id AND tracks.missing = 0) = 0) THEN ` + seqStr + ` ELSE change_seq END,
 		    missing = (SELECT count(*) FROM tracks WHERE tracks.album_id = albums.album_id AND tracks.missing = 0) = 0`,
 		`UPDATE artists SET
-		    change_seq = CASE WHEN missing != ((SELECT count(*) FROM tracks WHERE tracks.artist_id = artists.artist_id AND tracks.missing = 0) = 0) THEN ` + seqStr + ` ELSE change_seq END,
-		    missing = (SELECT count(*) FROM tracks WHERE tracks.artist_id = artists.artist_id AND tracks.missing = 0) = 0`,
+		    change_seq = CASE WHEN missing != (NOT EXISTS (SELECT 1 FROM tracks JOIN track_artist_credits c ON c.track_id=tracks.track_id WHERE c.artist_id=artists.artist_id AND tracks.missing=0) AND NOT EXISTS (SELECT 1 FROM albums JOIN album_artist_credits c ON c.album_id=albums.album_id WHERE c.artist_id=artists.artist_id AND albums.missing=0) AND NOT EXISTS (SELECT 1 FROM albums WHERE albums.artist_id=artists.artist_id AND albums.missing=0)) THEN ` + seqStr + ` ELSE change_seq END,
+		    missing = NOT EXISTS (SELECT 1 FROM tracks JOIN track_artist_credits c ON c.track_id=tracks.track_id WHERE c.artist_id=artists.artist_id AND tracks.missing=0) AND NOT EXISTS (SELECT 1 FROM albums JOIN album_artist_credits c ON c.album_id=albums.album_id WHERE c.artist_id=artists.artist_id AND albums.missing=0) AND NOT EXISTS (SELECT 1 FROM albums WHERE albums.artist_id=artists.artist_id AND albums.missing=0)`,
 		// Propagate art up track→album→artist; stamp rows that actually acquire art.
 		`UPDATE albums SET
 		    change_seq = CASE WHEN (SELECT t.art_id FROM tracks t WHERE t.album_id = albums.album_id AND t.art_id IS NOT NULL AND t.missing = 0 ORDER BY t.disc, t.idx LIMIT 1) IS NOT NULL THEN ` + seqStr + ` ELSE change_seq END,
@@ -482,9 +626,9 @@ func (s *Store) ListArtists(ctx context.Context, sort, cur string, limit int) ([
 		dir = "DESC"
 	}
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT a.artist_id, a.name, %s, %s,
-		       (SELECT count(*) FROM albums al WHERE al.artist_id = a.artist_id AND al.missing = 0),
-		       (SELECT count(*) FROM tracks t WHERE t.artist_id = a.artist_id AND t.missing = 0)
+		SELECT a.artist_id, a.name, %s, %s, COALESCE(a.musicbrainz_id,''),
+		       (SELECT count(DISTINCT al.album_id) FROM albums al JOIN album_artist_credits ac ON ac.album_id=al.album_id WHERE ac.artist_id = a.artist_id AND al.missing = 0),
+		       (SELECT count(DISTINCT t.track_id) FROM tracks t JOIN track_artist_credits c ON c.track_id=t.track_id WHERE c.artist_id = a.artist_id AND t.missing = 0)
 		FROM artists a WHERE %s ORDER BY %s %s, a.artist_id LIMIT %d`,
 		artistArt, keyCol, where, keyCol, dir, limit+1), args...)
 	if err != nil {
@@ -496,7 +640,7 @@ func (s *Store) ListArtists(ctx context.Context, sort, cur string, limit int) ([
 	for rows.Next() {
 		var a ArtistRow
 		var key string
-		if err := rows.Scan(&a.ArtistID, &a.Name, &a.ArtID, &key, &a.AlbumCount, &a.TrackCount); err != nil {
+		if err := rows.Scan(&a.ArtistID, &a.Name, &a.ArtID, &key, &a.MusicBrainzID, &a.AlbumCount, &a.TrackCount); err != nil {
 			return nil, "", err
 		}
 		out = append(out, a)
@@ -516,13 +660,17 @@ func (s *Store) ListArtists(ctx context.Context, sort, cur string, limit int) ([
 			return nil, "", err
 		}
 		out[i].Genres = g
+		out[i].Aliases, err = s.artistAliases(ctx, out[i].ArtistID)
+		if err != nil {
+			return nil, "", err
+		}
 	}
 	return out, next, nil
 }
 
 func (s *Store) artistGenres(ctx context.Context, artistID string) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT genre FROM tracks WHERE artist_id = ? AND missing = 0 AND genre != ''
+		SELECT t.genre FROM tracks t JOIN track_artist_credits c ON c.track_id=t.track_id WHERE c.artist_id = ? AND t.missing = 0 AND t.genre != ''
 		GROUP BY genre ORDER BY count(*) DESC LIMIT 5`, artistID)
 	if err != nil {
 		return nil, err
@@ -542,11 +690,11 @@ func (s *Store) artistGenres(ctx context.Context, artistID string) ([]string, er
 func (s *Store) GetArtist(ctx context.Context, artistID string) (ArtistRow, bool, error) {
 	var a ArtistRow
 	err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
-		SELECT a.artist_id, a.name, %s,
-		       (SELECT count(*) FROM albums al WHERE al.artist_id = a.artist_id AND al.missing = 0),
-		       (SELECT count(*) FROM tracks t WHERE t.artist_id = a.artist_id AND t.missing = 0)
+		SELECT a.artist_id, a.name, %s, COALESCE(a.musicbrainz_id,''),
+		       (SELECT count(DISTINCT al.album_id) FROM albums al JOIN album_artist_credits ac ON ac.album_id=al.album_id WHERE ac.artist_id = a.artist_id AND al.missing = 0),
+		       (SELECT count(DISTINCT t.track_id) FROM tracks t JOIN track_artist_credits c ON c.track_id=t.track_id WHERE c.artist_id = a.artist_id AND t.missing = 0)
 		FROM artists a WHERE a.artist_id = ? AND a.missing = 0`, artistArt), artistID).
-		Scan(&a.ArtistID, &a.Name, &a.ArtID, &a.AlbumCount, &a.TrackCount)
+		Scan(&a.ArtistID, &a.Name, &a.ArtID, &a.MusicBrainzID, &a.AlbumCount, &a.TrackCount)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ArtistRow{}, false, nil
 	}
@@ -558,12 +706,34 @@ func (s *Store) GetArtist(ctx context.Context, artistID string) (ArtistRow, bool
 		return ArtistRow{}, false, err
 	}
 	a.Genres = g
+	a.Aliases, err = s.artistAliases(ctx, artistID)
+	if err != nil {
+		return ArtistRow{}, false, err
+	}
 	return a, true, nil
+}
+
+func (s *Store) artistAliases(ctx context.Context, artistID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name FROM artist_aliases WHERE artist_id=? ORDER BY name`, artistID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, name)
+	}
+	return out, rows.Err()
 }
 
 const albumCols = `al.album_id, al.title, al.artist_id, ar.name, COALESCE(al.year, 0),
 	       COALESCE(al.art_id, ''), al.created_at,
-	       (SELECT count(*) FROM tracks t WHERE t.album_id = al.album_id AND t.missing = 0)`
+	       (SELECT count(*) FROM tracks t WHERE t.album_id = al.album_id AND t.missing = 0),
+	       COALESCE(al.musicbrainz_release_id,''), COALESCE(al.musicbrainz_release_group_id,'')`
 
 const albumFrom = ` FROM albums al JOIN artists ar ON ar.artist_id = al.artist_id`
 
@@ -571,7 +741,7 @@ const albumSelect = `SELECT ` + albumCols + albumFrom
 
 func scanAlbum(scan func(...any) error) (AlbumRow, string, error) {
 	var a AlbumRow
-	err := scan(&a.AlbumID, &a.Title, &a.ArtistID, &a.ArtistName, &a.Year, &a.ArtID, &a.UpdatedAt, &a.TrackCount)
+	err := scan(&a.AlbumID, &a.Title, &a.ArtistID, &a.ArtistName, &a.Year, &a.ArtID, &a.UpdatedAt, &a.TrackCount, &a.MusicBrainzReleaseID, &a.MusicBrainzReleaseGroupID)
 	return a, "", err
 }
 
@@ -611,7 +781,7 @@ func (s *Store) ListAlbums(ctx context.Context, sort, cur string, limit int) ([]
 	for rows.Next() {
 		var a AlbumRow
 		var key string
-		if err := rows.Scan(&a.AlbumID, &a.Title, &a.ArtistID, &a.ArtistName, &a.Year, &a.ArtID, &a.UpdatedAt, &a.TrackCount, &key); err != nil {
+		if err := rows.Scan(&a.AlbumID, &a.Title, &a.ArtistID, &a.ArtistName, &a.Year, &a.ArtID, &a.UpdatedAt, &a.TrackCount, &a.MusicBrainzReleaseID, &a.MusicBrainzReleaseGroupID, &key); err != nil {
 			return nil, "", err
 		}
 		out = append(out, a)
@@ -625,6 +795,11 @@ func (s *Store) ListAlbums(ctx context.Context, sort, cur string, limit int) ([]
 		out = out[:limit]
 		next = encodeCursor(keys[limit-1], out[limit-1].AlbumID)
 	}
+	for i := range out {
+		if err := s.hydrateAlbumCredits(ctx, &out[i]); err != nil {
+			return nil, "", err
+		}
+	}
 	return out, next, nil
 }
 
@@ -637,12 +812,15 @@ func (s *Store) GetAlbum(ctx context.Context, albumID string) (AlbumRow, bool, e
 	if err != nil {
 		return AlbumRow{}, false, err
 	}
+	if err := s.hydrateAlbumCredits(ctx, &a); err != nil {
+		return AlbumRow{}, false, err
+	}
 	return a, true, nil
 }
 
 func (s *Store) ListArtistAlbums(ctx context.Context, artistID string) ([]AlbumRow, error) {
 	rows, err := s.db.QueryContext(ctx,
-		albumSelect+` WHERE al.artist_id = ? AND al.missing = 0 ORDER BY COALESCE(al.year, 9999), al.title`, artistID)
+		albumSelect+` WHERE al.missing = 0 AND EXISTS (SELECT 1 FROM album_artist_credits c WHERE c.album_id=al.album_id AND c.artist_id=?) ORDER BY COALESCE(al.year, 9999), al.title`, artistID)
 	if err != nil {
 		return nil, err
 	}
@@ -655,15 +833,23 @@ func (s *Store) ListArtistAlbums(ctx context.Context, artistID string) ([]AlbumR
 		}
 		out = append(out, a)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		if err := s.hydrateAlbumCredits(ctx, &out[i]); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 const trackCols = `t.track_id, t.title, COALESCE(t.idx, 0), COALESCE(t.disc, 0),
-	       t.artist_id, t.artist_name, t.album_id, al.title, t.genre,
+	       t.artist_id, ar.name, t.album_id, al.title, t.genre,
 	       t.duration_ms, COALESCE(t.art_id, al.art_id, ''), t.container, t.codec,
-	       COALESCE(t.bitrate_kbps, 0), COALESCE(t.size_bytes, 0)`
+	       COALESCE(t.bitrate_kbps, 0), COALESCE(t.size_bytes, 0), COALESCE(t.musicbrainz_recording_id,'')`
 
-const trackFrom = ` FROM tracks t JOIN albums al ON al.album_id = t.album_id`
+const trackFrom = ` FROM tracks t JOIN albums al ON al.album_id = t.album_id JOIN artists ar ON ar.artist_id = t.artist_id`
 
 const trackSelect = `SELECT ` + trackCols + trackFrom
 
@@ -671,7 +857,7 @@ func scanTrack(scan func(...any) error) (TrackRow, error) {
 	var tr TrackRow
 	err := scan(&tr.TrackID, &tr.Title, &tr.Index, &tr.Disc, &tr.ArtistID, &tr.ArtistName,
 		&tr.AlbumID, &tr.AlbumTitle, &tr.Genre, &tr.DurationMs, &tr.ArtID,
-		&tr.Container, &tr.Codec, &tr.BitrateKbps, &tr.SizeBytes)
+		&tr.Container, &tr.Codec, &tr.BitrateKbps, &tr.SizeBytes, &tr.MusicBrainzRecordingID)
 	return tr, err
 }
 
@@ -689,7 +875,15 @@ func (s *Store) listTracksWhere(ctx context.Context, where, order string, args .
 		}
 		out = append(out, tr)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		if err := s.hydrateTrackCredits(ctx, &out[i]); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 func (s *Store) ListTracks(ctx context.Context, sort, cur string, limit int) ([]TrackRow, string, error) {
@@ -728,7 +922,7 @@ func (s *Store) ListTracks(ctx context.Context, sort, cur string, limit int) ([]
 		var key string
 		if err := rows.Scan(&tr.TrackID, &tr.Title, &tr.Index, &tr.Disc, &tr.ArtistID, &tr.ArtistName,
 			&tr.AlbumID, &tr.AlbumTitle, &tr.Genre, &tr.DurationMs, &tr.ArtID,
-			&tr.Container, &tr.Codec, &tr.BitrateKbps, &tr.SizeBytes, &key); err != nil {
+			&tr.Container, &tr.Codec, &tr.BitrateKbps, &tr.SizeBytes, &tr.MusicBrainzRecordingID, &key); err != nil {
 			return nil, "", err
 		}
 		out = append(out, tr)
@@ -742,6 +936,11 @@ func (s *Store) ListTracks(ctx context.Context, sort, cur string, limit int) ([]
 		out = out[:limit]
 		next = encodeCursor(keys[limit-1], out[limit-1].TrackID)
 	}
+	for i := range out {
+		if err := s.hydrateTrackCredits(ctx, &out[i]); err != nil {
+			return nil, "", err
+		}
+	}
 	return out, next, nil
 }
 
@@ -754,7 +953,50 @@ func (s *Store) GetTrack(ctx context.Context, trackID string) (TrackRow, bool, e
 	if err != nil {
 		return TrackRow{}, false, err
 	}
+	if err := s.hydrateTrackCredits(ctx, &tr); err != nil {
+		return TrackRow{}, false, err
+	}
 	return tr, true, nil
+}
+
+func (s *Store) hydrateAlbumCredits(ctx context.Context, album *AlbumRow) error {
+	credits, err := s.readCredits(ctx, "album_artist_credits", "album_id", album.AlbumID)
+	if err != nil {
+		return err
+	}
+	album.ArtistCredits = credits
+	album.PrimaryArtist = ArtistCreditRow{ArtistID: album.ArtistID, Name: album.ArtistName}
+	return nil
+}
+
+func (s *Store) hydrateTrackCredits(ctx context.Context, track *TrackRow) error {
+	credits, err := s.readCredits(ctx, "track_artist_credits", "track_id", track.TrackID)
+	if err != nil {
+		return err
+	}
+	track.ArtistCredits = credits
+	track.PrimaryArtist = ArtistCreditRow{ArtistID: track.ArtistID, Name: track.ArtistName}
+	if len(track.ArtistCredits) == 0 {
+		return fmt.Errorf("track %s has no artist credits", track.TrackID)
+	}
+	return nil
+}
+
+func (s *Store) readCredits(ctx context.Context, table, ownerColumn, ownerID string) ([]ArtistCreditRow, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT artist_id,name,join_phrase FROM `+table+` WHERE `+ownerColumn+`=? ORDER BY position`, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ArtistCreditRow
+	for rows.Next() {
+		var c ArtistCreditRow
+		if err := rows.Scan(&c.ArtistID, &c.Name, &c.JoinPhrase); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) ListAlbumTracks(ctx context.Context, albumID string) ([]TrackRow, error) {
@@ -762,7 +1004,7 @@ func (s *Store) ListAlbumTracks(ctx context.Context, albumID string) ([]TrackRow
 }
 
 func (s *Store) ListArtistTracks(ctx context.Context, artistID string) ([]TrackRow, error) {
-	return s.listTracksWhere(ctx, "t.artist_id = ?", "al.title, COALESCE(t.disc,1), COALESCE(t.idx,0)", artistID)
+	return s.listTracksWhere(ctx, "EXISTS (SELECT 1 FROM track_artist_credits c WHERE c.track_id=t.track_id AND c.artist_id=?)", "al.title, COALESCE(t.disc,1), COALESCE(t.idx,0)", artistID)
 }
 
 func (s *Store) ListGenreTracks(ctx context.Context, genre string) ([]TrackRow, error) {
@@ -805,17 +1047,17 @@ func (s *Store) SearchLibrary(ctx context.Context, q string) (LibrarySearch, err
 	pattern := "%" + strings.ReplaceAll(strings.ReplaceAll(q, "%", `\%`), "_", `\_`) + "%"
 
 	arows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT a.artist_id, a.name, %s,
-		       (SELECT count(*) FROM albums al WHERE al.artist_id = a.artist_id AND al.missing = 0),
-		       (SELECT count(*) FROM tracks t WHERE t.artist_id = a.artist_id AND t.missing = 0)
-		FROM artists a WHERE a.missing = 0 AND a.name LIKE ? ESCAPE '\' ORDER BY a.name LIMIT 25`, artistArt), pattern)
+		SELECT a.artist_id, a.name, %s, COALESCE(a.musicbrainz_id,''),
+		       (SELECT count(DISTINCT al.album_id) FROM albums al JOIN album_artist_credits ac ON ac.album_id=al.album_id WHERE ac.artist_id = a.artist_id AND al.missing = 0),
+		       (SELECT count(DISTINCT t.track_id) FROM tracks t JOIN track_artist_credits c ON c.track_id=t.track_id WHERE c.artist_id=a.artist_id AND t.missing=0)
+		FROM artists a WHERE a.missing = 0 AND (a.name LIKE ? ESCAPE '\' OR EXISTS (SELECT 1 FROM artist_aliases aa WHERE aa.artist_id=a.artist_id AND aa.name LIKE ? ESCAPE '\')) ORDER BY a.name LIMIT 25`, artistArt), pattern, pattern)
 	if err != nil {
 		return res, err
 	}
 	defer arows.Close()
 	for arows.Next() {
 		var a ArtistRow
-		if err := arows.Scan(&a.ArtistID, &a.Name, &a.ArtID, &a.AlbumCount, &a.TrackCount); err != nil {
+		if err := arows.Scan(&a.ArtistID, &a.Name, &a.ArtID, &a.MusicBrainzID, &a.AlbumCount, &a.TrackCount); err != nil {
 			return res, err
 		}
 		res.Artists = append(res.Artists, a)
@@ -825,7 +1067,7 @@ func (s *Store) SearchLibrary(ctx context.Context, q string) (LibrarySearch, err
 	}
 
 	brows, err := s.db.QueryContext(ctx,
-		albumSelect+` WHERE al.missing = 0 AND al.title LIKE ? ESCAPE '\' ORDER BY al.title LIMIT 25`, pattern)
+		albumSelect+` WHERE al.missing = 0 AND (al.title LIKE ? ESCAPE '\' OR EXISTS (SELECT 1 FROM album_artist_credits c WHERE c.album_id=al.album_id AND c.name LIKE ? ESCAPE '\')) ORDER BY al.title LIMIT 25`, pattern, pattern)
 	if err != nil {
 		return res, err
 	}
@@ -840,8 +1082,13 @@ func (s *Store) SearchLibrary(ctx context.Context, q string) (LibrarySearch, err
 	if err := brows.Err(); err != nil {
 		return res, err
 	}
+	for i := range res.Albums {
+		if err := s.hydrateAlbumCredits(ctx, &res.Albums[i]); err != nil {
+			return res, err
+		}
+	}
 
-	tracks, err := s.listTracksWhere(ctx, `t.title LIKE ? ESCAPE '\'`, "t.title LIMIT 50", pattern)
+	tracks, err := s.listTracksWhere(ctx, `(t.title LIKE ? ESCAPE '\' OR EXISTS (SELECT 1 FROM track_artist_credits c WHERE c.track_id=t.track_id AND c.name LIKE ? ESCAPE '\'))`, "t.title LIMIT 50", pattern, pattern)
 	if err != nil {
 		return res, err
 	}
