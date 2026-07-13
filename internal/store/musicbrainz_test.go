@@ -2,11 +2,28 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 
 	"github.com/BlitterAmp/BlitterServer/internal/source"
 )
+
+func applyCanonicalRelease(t *testing.T, s *Store, album MusicBrainzAlbum, artistName, artistMBID string, credits []source.ArtistCredit) int64 {
+	t.Helper()
+	seq, err := s.NextScanSeq(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := CanonicalRelease{ReleaseID: "release-" + album.AlbumID, ReleaseGroupID: "group-" + album.AlbumID, AlbumCredits: []source.ArtistCredit{{Name: artistName, MBID: artistMBID}}}
+	for _, track := range album.Tracks {
+		release.Tracks = append(release.Tracks, CanonicalTrack{Disc: track.Disc, Index: track.Index, Title: track.Title, DurationMs: track.DurationMs, RecordingID: "recording-" + track.TrackID, Credits: credits})
+	}
+	if _, err := s.ApplyMusicBrainzRelease(context.Background(), album, release, seq); err != nil {
+		t.Fatal(err)
+	}
+	return seq
+}
 
 func musicBrainzAlbumFixture(t *testing.T) (*Store, MusicBrainzAlbum) {
 	t.Helper()
@@ -177,5 +194,170 @@ func TestApplyMusicBrainzMatchRejectsStaleSnapshot(t *testing.T) {
 	}
 	if matched != 0 {
 		t.Fatal("stale resolver result was marked matched")
+	}
+}
+
+func TestApplyMusicBrainzReleaseAdoptsPrimaryOwnerAndIsIdempotent(t *testing.T) {
+	s, album := musicBrainzAlbumFixture(t)
+	ctx := context.Background()
+	ownerID := album.PrimaryArtist.ArtistID
+	seq := applyCanonicalRelease(t, s, album, "Canonical Artist", "mbid-owner", []source.ArtistCredit{{Name: "Canonical Artist", MBID: "mbid-owner"}})
+	artist, found, err := s.GetArtist(ctx, ownerID)
+	if err != nil || !found || artist.MusicBrainzID != "mbid-owner" || artist.Name != "Canonical Artist" {
+		t.Fatalf("owner adoption: found=%v err=%v artist=%+v", found, err, artist)
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM artists`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("artist count=%d err=%v", count, err)
+	}
+	var aliases int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM artist_aliases WHERE artist_id=? AND name='Local Artist'`, ownerID).Scan(&aliases); err != nil || aliases != 1 {
+		t.Fatalf("aliases=%d err=%v", aliases, err)
+	}
+	var before int64
+	if err := s.db.QueryRowContext(ctx, `SELECT change_seq FROM artists WHERE artist_id=?`, ownerID).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := s.ApplyMusicBrainzRelease(ctx, album, CanonicalRelease{ReleaseID: "release-" + album.AlbumID, ReleaseGroupID: "group-" + album.AlbumID, AlbumCredits: []source.ArtistCredit{{Name: "Canonical Artist", MBID: "mbid-owner"}}, Tracks: []CanonicalTrack{{Disc: 1, Index: 1, Title: "First", DurationMs: 180000, RecordingID: "recording-" + album.Tracks[0].TrackID, Credits: []source.ArtistCredit{{Name: "Canonical Artist", MBID: "mbid-owner"}}}}}, seq+1)
+	if err != nil || changed {
+		t.Fatalf("second apply changed=%v err=%v", changed, err)
+	}
+	var after int64
+	_ = s.db.QueryRowContext(ctx, `SELECT change_seq FROM artists WHERE artist_id=?`, ownerID).Scan(&after)
+	if after != before {
+		t.Fatalf("change_seq churned: %d -> %d", before, after)
+	}
+}
+
+func TestApplyMusicBrainzReleaseGuestAdoptionRules(t *testing.T) {
+	for _, tc := range []struct {
+		name, guest string
+		rows        int
+		wantAdopt   bool
+	}{{"unique exact", "Guest", 1, true}, {"ambiguous exact", "Guest", 2, false}, {"no exact match", "Canonical Guest", 1, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, album := musicBrainzAlbumFixture(t)
+			ctx := context.Background()
+			var ids []string
+			for i := 0; i < tc.rows; i++ {
+				id := NewID("art")
+				name := "Guest"
+				if tc.name == "no exact match" {
+					name = "Local Guest"
+				}
+				if _, err := s.db.ExecContext(ctx, `INSERT INTO artists(artist_id,name,created_at,change_seq) VALUES(?,?,?,?)`, id, name, time.Now().Unix(), album.Version); err != nil {
+					t.Fatal(err)
+				}
+				ids = append(ids, id)
+			}
+			applyCanonicalRelease(t, s, album, "Owner", "mbid-owner", []source.ArtistCredit{{Name: "Owner", MBID: "mbid-owner", JoinPhrase: " feat. "}, {Name: tc.guest, MBID: "mbid-guest"}})
+			var got string
+			if err := s.db.QueryRowContext(ctx, `SELECT artist_id FROM artists WHERE musicbrainz_id='mbid-guest'`).Scan(&got); err != nil {
+				t.Fatal(err)
+			}
+			adopted := len(ids) > 0 && got == ids[0]
+			if adopted != tc.wantAdopt {
+				t.Fatalf("guest id=%s candidates=%v adopted=%v", got, ids, adopted)
+			}
+		})
+	}
+}
+
+func TestCanonicalConvergenceMarksDrainedArtistMissingAndRemoved(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	seq, _ := s.NextScanSeq(ctx)
+	for i, name := range []string{"Jean Michel Jarre", "Jean-Michel Jarre"} {
+		m := meta(name, "Track", name, "Album "+name, "", 2000+i, 1)
+		if err := s.UpsertTrack(ctx, "filesystem", m, "", seq); err != nil {
+			t.Fatal(err)
+		}
+	}
+	albums, _ := s.DueMusicBrainzAlbums(ctx, time.Now(), 10)
+	firstOwner, secondOwner := albums[0].PrimaryArtist.ArtistID, albums[1].PrimaryArtist.ArtistID
+	firstSeq := applyCanonicalRelease(t, s, albums[0], "Jean-Michel Jarre", "jarre-mbid", []source.ArtistCredit{{Name: "Jean-Michel Jarre", MBID: "jarre-mbid"}})
+	var survivingBefore int64
+	if err := s.db.QueryRowContext(ctx, `SELECT change_seq FROM artists WHERE artist_id=?`, firstOwner).Scan(&survivingBefore); err != nil {
+		t.Fatal(err)
+	}
+	secondSeq := applyCanonicalRelease(t, s, albums[1], "Jean-Michel Jarre", "jarre-mbid", []source.ArtistCredit{{Name: "Jean-Michel Jarre", MBID: "jarre-mbid"}})
+	artists, _, _ := s.ListArtists(ctx, "title", "", 10)
+	if len(artists) != 1 || artists[0].ArtistID != firstOwner || artists[0].AlbumCount != 2 {
+		t.Fatalf("artists=%+v owners=%s/%s", artists, firstOwner, secondOwner)
+	}
+	var missing int
+	if err := s.db.QueryRowContext(ctx, `SELECT missing FROM artists WHERE artist_id=?`, secondOwner).Scan(&missing); err != nil || missing != 1 {
+		t.Fatalf("drained missing=%d err=%v", missing, err)
+	}
+	changes, _, err := s.ChangesSince(ctx, firstSeq, "", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundRemoved, foundSurviving := false, false
+	for _, change := range changes {
+		foundRemoved = foundRemoved || change.ID == secondOwner && change.Missing && change.ChangeSeq == secondSeq
+		foundSurviving = foundSurviving || change.ID == firstOwner && !change.Missing && change.ChangeSeq == secondSeq
+	}
+	if !foundRemoved || !foundSurviving {
+		t.Fatalf("convergence changes removed=%v surviving=%v: %+v", foundRemoved, foundSurviving, changes)
+	}
+	if survivingBefore >= secondSeq {
+		t.Fatalf("surviving artist did not advance: before=%d convergence=%d", survivingBefore, secondSeq)
+	}
+	changed, err := s.ApplyMusicBrainzRelease(ctx, albums[1], CanonicalRelease{ReleaseID: "release-" + albums[1].AlbumID, ReleaseGroupID: "group-" + albums[1].AlbumID, AlbumCredits: []source.ArtistCredit{{Name: "Jean-Michel Jarre", MBID: "jarre-mbid"}}, Tracks: []CanonicalTrack{{Disc: albums[1].Tracks[0].Disc, Index: albums[1].Tracks[0].Index, Title: albums[1].Tracks[0].Title, DurationMs: albums[1].Tracks[0].DurationMs, RecordingID: "recording-" + albums[1].Tracks[0].TrackID, Credits: []source.ArtistCredit{{Name: "Jean-Michel Jarre", MBID: "jarre-mbid"}}}}}, secondSeq+1)
+	if err != nil || changed {
+		t.Fatalf("identical reapply changed=%v err=%v", changed, err)
+	}
+	var survivingAfter int64
+	if err := s.db.QueryRowContext(ctx, `SELECT change_seq FROM artists WHERE artist_id=?`, firstOwner).Scan(&survivingAfter); err != nil {
+		t.Fatal(err)
+	}
+	if survivingAfter != secondSeq {
+		t.Fatalf("identical reapply churned surviving artist: %d -> %d", secondSeq, survivingAfter)
+	}
+}
+
+func TestCombinedNameDissolvesAndGuestsRemainSearchableOnly(t *testing.T) {
+	s, album := musicBrainzAlbumFixture(t)
+	ctx := context.Background()
+	combinedID := album.PrimaryArtist.ArtistID
+	if _, err := s.db.ExecContext(ctx, `UPDATE artists SET name='X with Y' WHERE artist_id=?`, combinedID); err != nil {
+		t.Fatal(err)
+	}
+	primaryID := NewID("art")
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO artists(artist_id,name,musicbrainz_id,created_at,change_seq) VALUES(?,?,?,?,?)`, primaryID, "X", "x-mbid", time.Now().Unix(), album.Version); err != nil {
+		t.Fatal(err)
+	}
+	applyCanonicalRelease(t, s, album, "X", "x-mbid", []source.ArtistCredit{{Name: "X", MBID: "x-mbid", JoinPhrase: " with "}, {Name: "Y", MBID: "y-mbid"}})
+	artists, _, _ := s.ListArtists(ctx, "title", "", 10)
+	if len(artists) != 1 || artists[0].ArtistID != primaryID {
+		t.Fatalf("browse artists=%+v", artists)
+	}
+	var guestID string
+	if err := s.db.QueryRowContext(ctx, `SELECT artist_id FROM artists WHERE musicbrainz_id='y-mbid'`).Scan(&guestID); err != nil {
+		t.Fatal(err)
+	}
+	if guest, found, err := s.GetArtist(ctx, guestID); err != nil || !found || guest.Name != "Y" {
+		t.Fatalf("guest detail: found=%v err=%v guest=%+v", found, err, guest)
+	}
+	search, err := s.SearchLibrary(ctx, "Y")
+	foundGuest := false
+	for _, artist := range search.Artists {
+		foundGuest = foundGuest || artist.ArtistID == guestID
+	}
+	if err != nil || !foundGuest {
+		t.Fatalf("guest search=%+v err=%v", search.Artists, err)
+	}
+	needs, err := s.ArtistsNeedingArt(ctx, 10)
+	if err != nil || len(needs) != 1 || needs[0].Name != "X" {
+		t.Fatalf("art needs=%+v err=%v", needs, err)
+	}
+	summary, err := s.GetLibrarySummary(ctx)
+	if err != nil || summary.Artists != len(artists) {
+		t.Fatalf("summary=%+v browse=%d err=%v", summary, len(artists), err)
+	}
+	var missing sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, `SELECT missing FROM artists WHERE artist_id=?`, combinedID).Scan(&missing); err != nil || !missing.Valid || missing.Int64 != 1 {
+		t.Fatalf("combined row missing=%v err=%v", missing, err)
 	}
 }

@@ -4,9 +4,11 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/BlitterAmp/BlitterServer/internal/api"
 	"github.com/BlitterAmp/BlitterServer/internal/source"
+	"github.com/BlitterAmp/BlitterServer/internal/store"
 )
 
 func TestContractChangesDelta(t *testing.T) {
@@ -68,5 +70,43 @@ func TestContractChangesDelta(t *testing.T) {
 	unauth, _ := c.ListChangesWithResponse(ctx, &api.ListChangesParams{})
 	if unauth.StatusCode() != http.StatusUnauthorized {
 		t.Fatalf("unauth status=%d want 401", unauth.StatusCode())
+	}
+}
+
+func TestContractChangesReportsArtistRemovedByCanonicalConsolidation(t *testing.T) {
+	ts, st, tok := setup(t)
+	ctx := context.Background()
+	c, _ := api.NewClientWithResponses(ts.URL)
+	seq, _ := st.NextScanSeq(ctx)
+	for i, name := range []string{"Jean Michel Jarre", "Jean-Michel Jarre"} {
+		if err := st.UpsertTrack(ctx, "filesystem", source.TrackMeta{NativeID: name, Title: "Track", PrimaryArtist: source.ArtistReference{Name: name}, TrackCredits: []source.ArtistCredit{{Name: name}}, AlbumCredits: []source.ArtistCredit{{Name: name}}, Album: "Album " + name, Year: 2000 + i, Index: 1, DurationMs: 1000, Container: "flac", Codec: "flac", Version: 1}, "", seq); err != nil {
+			t.Fatal(err)
+		}
+	}
+	albums, err := st.DueMusicBrainzAlbums(ctx, time.Now(), 10)
+	if err != nil || len(albums) != 2 {
+		t.Fatalf("due albums=%d err=%v", len(albums), err)
+	}
+	apply := func(album store.MusicBrainzAlbum) int64 {
+		t.Helper()
+		changeSeq, err := st.NextScanSeq(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		release := store.CanonicalRelease{ReleaseID: "release-" + album.AlbumID, ReleaseGroupID: "group-" + album.AlbumID, AlbumCredits: []source.ArtistCredit{{Name: "Jean-Michel Jarre", MBID: "jarre-mbid"}}, Tracks: []store.CanonicalTrack{{Disc: album.Tracks[0].Disc, Index: album.Tracks[0].Index, Title: album.Tracks[0].Title, DurationMs: album.Tracks[0].DurationMs, RecordingID: "recording-" + album.Tracks[0].TrackID, Credits: []source.ArtistCredit{{Name: "Jean-Michel Jarre", MBID: "jarre-mbid"}}}}}
+		if _, err := st.ApplyMusicBrainzRelease(ctx, album, release, changeSeq); err != nil {
+			t.Fatal(err)
+		}
+		return changeSeq
+	}
+	since := apply(albums[0])
+	drainedID := albums[1].PrimaryArtist.ArtistID
+	apply(albums[1])
+	resp, err := c.ListChangesWithResponse(ctx, &api.ListChangesParams{Since: &since}, bearer(tok))
+	if err != nil || resp.JSON200 == nil {
+		t.Fatalf("changes: err=%v status=%d", err, resp.StatusCode())
+	}
+	if len(resp.JSON200.RemovedArtistIds) != 1 || resp.JSON200.RemovedArtistIds[0] != drainedID {
+		t.Fatalf("removedArtistIds=%v want [%s]", resp.JSON200.RemovedArtistIds, drainedID)
 	}
 }
