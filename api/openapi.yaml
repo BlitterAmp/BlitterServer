@@ -1522,7 +1522,10 @@ paths:
       description: |
         SSE (`text/event-stream`), authenticated with a profile token. Each
         message's `id:` field is a monotonic sequence number; reconnect with
-        `Last-Event-ID` to resume without loss. `data:` is an Event envelope
+        `Last-Event-ID` to resume without loss. Without `Last-Event-ID` the
+        stream is live-only from the moment of connection — bootstrap state
+        through `/v1/library` and `/v1/changes` instead of expecting history
+        replay. `data:` is an Event envelope
         (`{type, at, data}`). Clients MUST ignore unknown types.
 
         | type | data | scope |

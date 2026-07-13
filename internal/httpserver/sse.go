@@ -24,7 +24,11 @@ func handleStreamEvents(bus *events.Bus) http.HandlerFunc {
 			WriteProblem(w, http.StatusForbidden, "Forbidden", "profile_token_required")
 			return
 		}
-		since := int64(0)
+		// Live-only by default: a fresh client bootstraps state through
+		// /v1/library + /v1/changes, and replaying the whole event log at
+		// connect turned every app launch into a sync storm that grew with
+		// the instance's age. Explicit Last-Event-ID still resumes losslessly.
+		since := bus.LatestSeq(r.Context())
 		if v := r.Header.Get("Last-Event-ID"); v != "" {
 			if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 				since = n

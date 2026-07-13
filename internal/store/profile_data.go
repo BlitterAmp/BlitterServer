@@ -884,3 +884,11 @@ func (s *Store) PruneEvents(ctx context.Context, keep int64) error {
 		DELETE FROM events WHERE seq <= (SELECT COALESCE(max(seq), 0) FROM events) - ?`, keep)
 	return err
 }
+
+// LatestEventSeq returns the newest persisted event sequence (0 when empty),
+// so live-only SSE subscriptions can start at the present.
+func (s *Store) LatestEventSeq(ctx context.Context) (int64, error) {
+	var seq int64
+	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq), 0) FROM events`).Scan(&seq)
+	return seq, err
+}
