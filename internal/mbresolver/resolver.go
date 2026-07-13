@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -112,7 +113,7 @@ func (r *Resolver) resolve(ctx context.Context, album store.MusicBrainzAlbum) (b
 		}
 		candidates = []release{direct}
 	} else {
-		query := fmt.Sprintf(`release:"%s" AND artist:"%s"`, escape(album.Title), escape(album.PrimaryArtist.Name))
+		query := fmt.Sprintf(`release:"%s" AND artist:"%s"`, escape(searchTitle(album.Title)), escape(album.PrimaryArtist.Name))
 		var body struct {
 			Releases []release `json:"releases"`
 		}
@@ -153,6 +154,20 @@ func (r *Resolver) resolve(ctx context.Context, album store.MusicBrainzAlbum) (b
 		if best.score >= 60 {
 			state = "ambiguous"
 		}
+		// Edition ambiguity often hides unambiguous identity: when every
+		// plausible candidate agrees on the artist (and usually the release
+		// group — many editions of one album), apply that shared identity so
+		// artists consolidate and CAA art unlocks, while the edition itself
+		// stays parked for review.
+		if state == "ambiguous" {
+			if partial, ok := consensusIdentity(scored); ok {
+				seq, err := r.st.NextScanSeq(ctx)
+				if err != nil {
+					return false, err
+				}
+				return r.st.ApplyMusicBrainzConsensus(ctx, album, partial, seq, best.persisted(), persist, r.now().Add(30*24*time.Hour))
+			}
+		}
 		return false, r.st.RecordMusicBrainzResult(ctx, album.AlbumID, state, best.persisted(), persist, r.now().Add(30*24*time.Hour), "")
 	}
 	seq, err := r.st.NextScanSeq(ctx)
@@ -162,6 +177,72 @@ func (r *Resolver) resolve(ctx context.Context, album store.MusicBrainzAlbum) (b
 	release := canonical(best.release)
 	release.Authoritative = album.ReleaseID != ""
 	return r.st.ApplyMusicBrainzMatch(ctx, album, release, seq, best.persisted(), persist, r.now().Add(7*24*time.Hour))
+}
+
+// consensusIdentity extracts identity every plausible (score >= 60) candidate
+// agrees on: the primary artist MBID always, the release group when shared.
+// Any disagreement or missing artist id yields no partial identity.
+func consensusIdentity(scored []scoredRelease) (store.CanonicalRelease, bool) {
+	var plausible []scoredRelease
+	for _, c := range scored {
+		if c.score >= 60 {
+			plausible = append(plausible, c)
+		}
+	}
+	if len(plausible) == 0 {
+		return store.CanonicalRelease{}, false
+	}
+	artistID := ""
+	for _, c := range plausible {
+		if len(c.release.Credits) == 0 || c.release.Credits[0].Artist.ID == "" {
+			return store.CanonicalRelease{}, false
+		}
+		id := c.release.Credits[0].Artist.ID
+		if artistID == "" {
+			artistID = id
+		} else if artistID != id {
+			return store.CanonicalRelease{}, false
+		}
+	}
+	rgID := plausible[0].release.ReleaseGroup.ID
+	for _, c := range plausible[1:] {
+		if c.release.ReleaseGroup.ID != rgID {
+			rgID = ""
+			break
+		}
+	}
+	partial := store.CanonicalRelease{ReleaseGroupID: rgID, AlbumCredits: canonical(plausible[0].release).AlbumCredits}
+	return partial, true
+}
+
+var searchTitleSuffixes = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)\s*\[[^\]]*\]\s*$`),
+	regexp.MustCompile(`(?i)\s*\((?:disc|cd)\s*\d+\)\s*$`),
+	regexp.MustCompile(`(?i)\s*(?:-\s*)?(?:disc|cd)\s*\d+\s*$`),
+	regexp.MustCompile(`(?i)\s*\((?:\d{4}\s+)?remaster(?:ed)?(?:\s+\d{4})?\)\s*$`),
+}
+
+// searchTitle strips disc, catalog, and remaster designators that make local
+// album titles miss otherwise-obvious MusicBrainz search results. Identity
+// scoring still uses the untouched local title.
+func searchTitle(title string) string {
+	out := strings.TrimSpace(title)
+	for changed := true; changed; {
+		changed = false
+		for _, suffix := range searchTitleSuffixes {
+			next := strings.TrimSpace(suffix.ReplaceAllString(out, ""))
+			if next != out {
+				out, changed = next, next != ""
+				if next == "" {
+					return strings.TrimSpace(title)
+				}
+			}
+		}
+	}
+	if out == "" {
+		return strings.TrimSpace(title)
+	}
+	return out
 }
 
 func scoreCandidates(album store.MusicBrainzAlbum, candidates []release) []scoredRelease {

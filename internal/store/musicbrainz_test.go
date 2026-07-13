@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"testing"
 	"time"
 
@@ -359,5 +360,91 @@ func TestCombinedNameDissolvesAndGuestsRemainSearchableOnly(t *testing.T) {
 	var missing sql.NullInt64
 	if err := s.db.QueryRowContext(ctx, `SELECT missing FROM artists WHERE artist_id=?`, combinedID).Scan(&missing); err != nil || !missing.Valid || missing.Int64 != 1 {
 		t.Fatalf("combined row missing=%v err=%v", missing, err)
+	}
+}
+
+// Edition-ambiguous albums still yield unambiguous artist/release-group
+// identity when every candidate agrees; consensus application must keep the
+// match reviewable and must not collide on the unique release-id column.
+func TestApplyConsensusKeepsAmbiguousStateAndNullReleaseIDs(t *testing.T) {
+	s, first := musicBrainzAlbumFixture(t)
+	ctx := context.Background()
+	seq, _ := s.NextScanSeq(ctx)
+	// Re-upsert the fixture's track too: FinishScan marks unseen tracks missing.
+	one := source.TrackMeta{NativeID: "one.flac", Title: "First", Album: "Local Album", Year: 2020, Index: 1, Disc: 1, DurationMs: 180000, PrimaryArtist: source.ArtistReference{Name: "Local Artist"}, AlbumCredits: []source.ArtistCredit{{Name: "Local Artist"}}, TrackCredits: []source.ArtistCredit{{Name: "Local Artist"}}, Container: "flac", Codec: "flac", Version: 1}
+	meta := source.TrackMeta{NativeID: "two.flac", Title: "Second", Album: "Other Album", Year: 2021, Index: 1, Disc: 1, DurationMs: 170000, PrimaryArtist: source.ArtistReference{Name: "Other Artist"}, AlbumCredits: []source.ArtistCredit{{Name: "Other Artist"}}, TrackCredits: []source.ArtistCredit{{Name: "Other Artist"}}, Container: "flac", Codec: "flac", Version: 1}
+	for _, m := range []source.TrackMeta{one, meta} {
+		if err := s.UpsertTrack(ctx, "filesystem", m, "", seq); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.FinishScan(ctx, "filesystem", seq); err != nil {
+		t.Fatal(err)
+	}
+	due, err := s.DueMusicBrainzAlbums(ctx, time.Now(), 10)
+	if err != nil || len(due) != 2 {
+		t.Fatalf("due=%v err=%v", due, err)
+	}
+	next := time.Now().Add(30 * 24 * time.Hour)
+	for i, album := range due {
+		credits := []source.ArtistCredit{{Name: album.PrimaryArtist.Name, MBID: fmt.Sprintf("mbid-consensus-%d", i)}}
+		release := CanonicalRelease{ReleaseGroupID: fmt.Sprintf("rg-consensus-%d", i), AlbumCredits: credits}
+		applySeq, _ := s.NextScanSeq(ctx)
+		changed, err := s.ApplyMusicBrainzConsensus(ctx, album, release, applySeq, MusicBrainzCandidate{ReleaseID: "cand", Title: album.Title}, nil, next)
+		if err != nil {
+			t.Fatalf("consensus %d: %v", i, err)
+		}
+		if !changed {
+			t.Fatalf("consensus %d reported no change", i)
+		}
+	}
+	_ = first
+	rows, err := s.db.QueryContext(ctx, `SELECT al.album_id, al.musicbrainz_release_id IS NULL, COALESCE(al.musicbrainz_release_group_id,''), m.state, a.musicbrainz_id IS NOT NULL FROM albums al JOIN album_musicbrainz_matches m ON m.album_id=al.album_id JOIN artists a ON a.artist_id=al.artist_id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var albumID, rg, state string
+		var nullRelease, artistIdentified bool
+		if err := rows.Scan(&albumID, &nullRelease, &rg, &state, &artistIdentified); err != nil {
+			t.Fatal(err)
+		}
+		count++
+		if !nullRelease || rg == "" || state != "ambiguous" || !artistIdentified {
+			t.Fatalf("album %s: nullRelease=%v rg=%q state=%q artistIdentified=%v", albumID, nullRelease, rg, state, artistIdentified)
+		}
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 consensus albums, got %d", count)
+	}
+}
+
+// A later consensus without release-group agreement must not erase an
+// earlier consensus release group.
+func TestApplyConsensusPreservesExistingReleaseGroup(t *testing.T) {
+	s, album := musicBrainzAlbumFixture(t)
+	ctx := context.Background()
+	next := time.Now().Add(30 * 24 * time.Hour)
+	credits := []source.ArtistCredit{{Name: album.PrimaryArtist.Name, MBID: "mbid-keep"}}
+	applySeq, _ := s.NextScanSeq(ctx)
+	if _, err := s.ApplyMusicBrainzConsensus(ctx, album, CanonicalRelease{ReleaseGroupID: "rg-keep", AlbumCredits: credits}, applySeq, MusicBrainzCandidate{}, nil, next); err != nil {
+		t.Fatal(err)
+	}
+	refreshed, err := s.DueMusicBrainzAlbumsPage(ctx, time.Now().Add(31*24*time.Hour), -1, "", 10)
+	if err != nil || len(refreshed) != 1 {
+		t.Fatalf("refreshed=%v err=%v", refreshed, err)
+	}
+	applySeq, _ = s.NextScanSeq(ctx)
+	if _, err := s.ApplyMusicBrainzConsensus(ctx, refreshed[0], CanonicalRelease{AlbumCredits: credits}, applySeq, MusicBrainzCandidate{}, nil, next); err != nil {
+		t.Fatal(err)
+	}
+	var rg string
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(musicbrainz_release_group_id,'') FROM albums WHERE album_id=?`, album.AlbumID).Scan(&rg); err != nil {
+		t.Fatal(err)
+	}
+	if rg != "rg-keep" {
+		t.Fatalf("release group erased: %q", rg)
 	}
 }
