@@ -749,3 +749,32 @@ func TestResolveTrackNative(t *testing.T) {
 		t.Fatal("unknown track must not resolve")
 	}
 }
+
+// Incremental scans skip probing unchanged files: the store supplies known
+// versions and marks skipped files seen so FinishScan keeps them alive.
+func TestKnownVersionsAndMarkSeenSurviveFinishScan(t *testing.T) {
+	s := indexFixture(t)
+	ctx := context.Background()
+	known, err := s.KnownTrackVersions(ctx, "filesystem")
+	if err != nil || len(known) == 0 {
+		t.Fatalf("known=%v err=%v", known, err)
+	}
+	seq, _ := s.NextScanSeq(ctx)
+	ids := make([]string, 0, len(known))
+	for id := range known {
+		ids = append(ids, id)
+	}
+	if err := s.MarkTracksSeen(ctx, "filesystem", ids, seq); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinishScan(ctx, "filesystem", seq); err != nil {
+		t.Fatal(err)
+	}
+	var missing int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM tracks WHERE missing=1`).Scan(&missing); err != nil {
+		t.Fatal(err)
+	}
+	if missing != 0 {
+		t.Fatalf("unchanged tracks marked missing: %d", missing)
+	}
+}

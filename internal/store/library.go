@@ -1218,3 +1218,45 @@ func nullStr(v string) any {
 	}
 	return v
 }
+
+// KnownTrackVersions returns nativeID → stored version (source mtime) for a
+// source, so incremental scans can skip probing unchanged files.
+func (s *Store) KnownTrackVersions(ctx context.Context, sourceKind string) (map[string]int64, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT native_id, version FROM tracks WHERE source_kind = ?`, sourceKind)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	known := map[string]int64{}
+	for rows.Next() {
+		var id string
+		var version int64
+		if err := rows.Scan(&id, &version); err != nil {
+			return nil, err
+		}
+		known[id] = version
+	}
+	return known, rows.Err()
+}
+
+// MarkTracksSeen bumps seen_seq for unchanged files an incremental scan
+// skipped, keeping them alive through FinishScan without content writes.
+func (s *Store) MarkTracksSeen(ctx context.Context, sourceKind string, nativeIDs []string, seq int64) error {
+	const chunk = 400
+	for start := 0; start < len(nativeIDs); start += chunk {
+		end := min(start+chunk, len(nativeIDs))
+		batch := nativeIDs[start:end]
+		args := make([]any, 0, len(batch)+2)
+		args = append(args, seq, sourceKind)
+		placeholders := strings.Repeat("?,", len(batch))
+		for _, id := range batch {
+			args = append(args, id)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`UPDATE tracks SET seen_seq = ?, missing = 0 WHERE source_kind = ? AND native_id IN (`+placeholders[:len(placeholders)-1]+`)`,
+			args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}

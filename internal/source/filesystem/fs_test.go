@@ -176,3 +176,4 @@ func TestValidUUIDRejectsMalformedMusicBrainzIDs(t *testing.T) {
 		}
 	}
 }
+

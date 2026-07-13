@@ -639,3 +639,58 @@ func TestCloseCancelsResetRetryBackoff(t *testing.T) {
 		t.Fatal("close did not cancel reset retry backoff")
 	}
 }
+
+// Restarting must resume durable enrichment work (identity matching, art)
+// BEFORE the startup rescan: the catalog from the last run is already in the
+// database, and a multi-minute scan must not starve the surviving queue.
+func TestStartupResumesEnrichmentBeforeScan(t *testing.T) {
+	s, dataDir := openStore(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "one.flac"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSetting(ctx, settingSourceKind, "filesystem"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSetting(ctx, settingFilesystemPath, dir); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewManager(s, dataDir)
+	defer m.Close()
+
+	var mu sync.Mutex
+	var order []string
+	enricher := enricherFunc(func(context.Context) {
+		mu.Lock()
+		order = append(order, "enrich")
+		mu.Unlock()
+	})
+	scanStarted := make(chan struct{}, 1)
+	m.onScanStart = func() {
+		mu.Lock()
+		order = append(order, "scan")
+		mu.Unlock()
+		select {
+		case scanStarted <- struct{}{}:
+		default:
+		}
+	}
+	m.SetEnricher(enricher)
+
+	select {
+	case <-scanStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("startup scan never ran")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(order) < 2 || order[0] != "enrich" || order[1] != "scan" {
+		t.Fatalf("startup order = %v, want enrichment before scan", order)
+	}
+}
+
+type enricherFunc func(context.Context)
+
+func (f enricherFunc) Run(ctx context.Context) { f(ctx) }
