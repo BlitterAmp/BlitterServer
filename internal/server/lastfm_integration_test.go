@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -211,19 +212,33 @@ func TestLastfmCallbackStateAndProfileIsolation(t *testing.T) {
 	}
 	authURL, _ := url.Parse(resp.(api.ConnectMyLastfm201JSONResponse).Url)
 	cb, _ := url.Parse(authURL.Query().Get("cb"))
-	if cb.Scheme != "https" || cb.Path != "/v1/lastfm/callback" {
-		t.Fatalf("callback: %s", cb)
+	// last.fm appends its token as "?token=" verbatim, so a callback URL that
+	// already carries a query string comes back mangled ("?state=x?token=y")
+	// and the state never matches. The state must ride in the path and the
+	// callback URL must stay query-free.
+	if cb.Scheme != "https" || !strings.HasPrefix(cb.Path, "/v1/lastfm/callback/") || cb.RawQuery != "" {
+		t.Fatalf("callback must be query-free with path state: %s", cb)
 	}
-	state := cb.Query().Get("state")
-	bad, _ := s.CompleteLastfmAuth(context.Background(), api.CompleteLastfmAuthRequestObject{Params: api.CompleteLastfmAuthParams{State: state, Token: "bad!"}})
+	state := strings.TrimPrefix(cb.Path, "/v1/lastfm/callback/")
+	if state == "" {
+		t.Fatalf("missing path state: %s", cb)
+	}
+	badTok := "bad!"
+	bad, _ := s.CompleteLastfmAuth(context.Background(), api.CompleteLastfmAuthRequestObject{State: state, Params: api.CompleteLastfmAuthParams{Token: &badTok}})
 	if _, ok := bad.(api.CompleteLastfmAuth400TexthtmlResponse); !ok {
 		t.Fatalf("malformed: %T", bad)
 	}
+	// A tokenless hit (browser prefetch, cancelled authorization) fails but
+	// must not consume the attempt.
+	tokenless, _ := s.CompleteLastfmAuth(context.Background(), api.CompleteLastfmAuthRequestObject{State: state, Params: api.CompleteLastfmAuthParams{}})
+	if _, ok := tokenless.(api.CompleteLastfmAuth400TexthtmlResponse); !ok {
+		t.Fatalf("tokenless: %T", tokenless)
+	}
 	f.exchangeErr = &lastfm.ProviderError{Kind: lastfm.ErrorTemporary, Code: 11}
 	valid := "G234567890abcdefghijklmnopqrstu"
-	_, _ = s.CompleteLastfmAuth(context.Background(), api.CompleteLastfmAuthRequestObject{Params: api.CompleteLastfmAuthParams{State: state, Token: valid}})
+	_, _ = s.CompleteLastfmAuth(context.Background(), api.CompleteLastfmAuthRequestObject{State: state, Params: api.CompleteLastfmAuthParams{Token: &valid}})
 	f.exchangeErr = nil
-	okResp, err := s.CompleteLastfmAuth(context.Background(), api.CompleteLastfmAuthRequestObject{Params: api.CompleteLastfmAuthParams{State: state, Token: valid}})
+	okResp, err := s.CompleteLastfmAuth(context.Background(), api.CompleteLastfmAuthRequestObject{State: state, Params: api.CompleteLastfmAuthParams{Token: &valid}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +251,7 @@ func TestLastfmCallbackStateAndProfileIsolation(t *testing.T) {
 	if !mine.(api.GetMyLastfm200JSONResponse).Connected || other.(api.GetMyLastfm200JSONResponse).Connected {
 		t.Fatal("profile isolation failed")
 	}
-	again, _ := s.CompleteLastfmAuth(context.Background(), api.CompleteLastfmAuthRequestObject{Params: api.CompleteLastfmAuthParams{State: state, Token: valid}})
+	again, _ := s.CompleteLastfmAuth(context.Background(), api.CompleteLastfmAuthRequestObject{State: state, Params: api.CompleteLastfmAuthParams{Token: &valid}})
 	if _, ok := again.(api.CompleteLastfmAuth400TexthtmlResponse); !ok {
 		t.Fatal("state reused")
 	}

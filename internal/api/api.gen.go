@@ -1783,8 +1783,7 @@ type StreamEventsParams struct {
 
 // CompleteLastfmAuthParams defines parameters for CompleteLastfmAuth.
 type CompleteLastfmAuthParams struct {
-	State string `form:"state" json:"state"`
-	Token string `form:"token" json:"token"`
+	Token *string `form:"token,omitempty" json:"token,omitempty"`
 }
 
 // ListLovesParams defines parameters for ListLoves.
@@ -2355,7 +2354,7 @@ type ClientInterface interface {
 	GetHome(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// CompleteLastfmAuth request
-	CompleteLastfmAuth(ctx context.Context, params *CompleteLastfmAuthParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+	CompleteLastfmAuth(ctx context.Context, state string, params *CompleteLastfmAuthParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetLibrary request
 	GetLibrary(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3396,8 +3395,8 @@ func (c *Client) GetHome(ctx context.Context, reqEditors ...RequestEditorFn) (*h
 	return c.Client.Do(req)
 }
 
-func (c *Client) CompleteLastfmAuth(ctx context.Context, params *CompleteLastfmAuthParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewCompleteLastfmAuthRequest(c.Server, params)
+func (c *Client) CompleteLastfmAuth(ctx context.Context, state string, params *CompleteLastfmAuthParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCompleteLastfmAuthRequest(c.Server, state, params)
 	if err != nil {
 		return nil, err
 	}
@@ -6315,15 +6314,22 @@ func NewGetHomeRequest(server string) (*http.Request, error) {
 }
 
 // NewCompleteLastfmAuthRequest generates requests for CompleteLastfmAuth
-func NewCompleteLastfmAuthRequest(server string, params *CompleteLastfmAuthParams) (*http.Request, error) {
+func NewCompleteLastfmAuthRequest(server string, state string, params *CompleteLastfmAuthParams) (*http.Request, error) {
 	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "state", state, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
 
 	serverURL, err := url.Parse(server)
 	if err != nil {
 		return nil, err
 	}
 
-	operationPath := fmt.Sprintf("/v1/lastfm/callback")
+	operationPath := fmt.Sprintf("/v1/lastfm/callback/%s", pathParam0)
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -6342,20 +6348,16 @@ func NewCompleteLastfmAuthRequest(server string, params *CompleteLastfmAuthParam
 		// per the OpenAPI spec (e.g. "color=blue,black,brown").
 		var rawQueryFragments []string
 
-		if queryFrag, err := runtime.StyleParamWithOptions("form", true, "state", params.State, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-			return nil, err
-		} else {
-			for _, qp := range strings.Split(queryFrag, "&") {
-				rawQueryFragments = append(rawQueryFragments, qp)
-			}
-		}
+		if params.Token != nil {
 
-		if queryFrag, err := runtime.StyleParamWithOptions("form", true, "token", params.Token, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
-			return nil, err
-		} else {
-			for _, qp := range strings.Split(queryFrag, "&") {
-				rawQueryFragments = append(rawQueryFragments, qp)
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "token", *params.Token, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else {
+				for _, qp := range strings.Split(queryFrag, "&") {
+					rawQueryFragments = append(rawQueryFragments, qp)
+				}
 			}
+
 		}
 
 		if encoded := queryValues.Encode(); encoded != "" {
@@ -8601,7 +8603,7 @@ type ClientWithResponsesInterface interface {
 	GetHomeWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetHomeResponse, error)
 
 	// CompleteLastfmAuthWithResponse request
-	CompleteLastfmAuthWithResponse(ctx context.Context, params *CompleteLastfmAuthParams, reqEditors ...RequestEditorFn) (*CompleteLastfmAuthResponse, error)
+	CompleteLastfmAuthWithResponse(ctx context.Context, state string, params *CompleteLastfmAuthParams, reqEditors ...RequestEditorFn) (*CompleteLastfmAuthResponse, error)
 
 	// GetLibraryWithResponse request
 	GetLibraryWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetLibraryResponse, error)
@@ -12904,8 +12906,8 @@ func (c *ClientWithResponses) GetHomeWithResponse(ctx context.Context, reqEditor
 }
 
 // CompleteLastfmAuthWithResponse request returning *CompleteLastfmAuthResponse
-func (c *ClientWithResponses) CompleteLastfmAuthWithResponse(ctx context.Context, params *CompleteLastfmAuthParams, reqEditors ...RequestEditorFn) (*CompleteLastfmAuthResponse, error) {
-	rsp, err := c.CompleteLastfmAuth(ctx, params, reqEditors...)
+func (c *ClientWithResponses) CompleteLastfmAuthWithResponse(ctx context.Context, state string, params *CompleteLastfmAuthParams, reqEditors ...RequestEditorFn) (*CompleteLastfmAuthResponse, error) {
+	rsp, err := c.CompleteLastfmAuth(ctx, state, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -17523,8 +17525,8 @@ type ServerInterface interface {
 	// (GET /v1/home)
 	GetHome(w http.ResponseWriter, r *http.Request)
 	// Complete browser-based last.fm authorization
-	// (GET /v1/lastfm/callback)
-	CompleteLastfmAuth(w http.ResponseWriter, r *http.Request, params CompleteLastfmAuthParams)
+	// (GET /v1/lastfm/callback/{state})
+	CompleteLastfmAuth(w http.ResponseWriter, r *http.Request, state string, params CompleteLastfmAuthParams)
 	// Active library summary (freshness anchor)
 	// (GET /v1/library)
 	GetLibrary(w http.ResponseWriter, r *http.Request)
@@ -19283,25 +19285,21 @@ func (siw *ServerInterfaceWrapper) CompleteLastfmAuth(w http.ResponseWriter, r *
 	var err error
 	_ = err
 
-	// Parameter object where we will unmarshal all parameters from the context
-	var params CompleteLastfmAuthParams
+	// ------------- Path parameter "state" -------------
+	var state string
 
-	// ------------- Required query parameter "state" -------------
-
-	err = runtime.BindQueryParameterWithOptions("form", true, true, "state", r.URL.Query(), &params.State, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	err = runtime.BindStyledParameterWithOptions("simple", "state", r.PathValue("state"), &state, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
 	if err != nil {
-		var requiredError *runtime.RequiredParameterError
-		if errors.As(err, &requiredError) {
-			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "state"})
-		} else {
-			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "state", Err: err})
-		}
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "state", Err: err})
 		return
 	}
 
-	// ------------- Required query parameter "token" -------------
+	// Parameter object where we will unmarshal all parameters from the context
+	var params CompleteLastfmAuthParams
 
-	err = runtime.BindQueryParameterWithOptions("form", true, true, "token", r.URL.Query(), &params.Token, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	// ------------- Optional query parameter "token" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "token", r.URL.Query(), &params.Token, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
 	if err != nil {
 		var requiredError *runtime.RequiredParameterError
 		if errors.As(err, &requiredError) {
@@ -19313,7 +19311,7 @@ func (siw *ServerInterfaceWrapper) CompleteLastfmAuth(w http.ResponseWriter, r *
 	}
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.CompleteLastfmAuth(w, r, params)
+		siw.Handler.CompleteLastfmAuth(w, r, state, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -20959,7 +20957,7 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/genres", wrapper.ListGenres)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/genres/{genre}/tracks", wrapper.ListGenreTracks)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/home", wrapper.GetHome)
-	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/lastfm/callback", wrapper.CompleteLastfmAuth)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/lastfm/callback/{state}", wrapper.CompleteLastfmAuth)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/library", wrapper.GetLibrary)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/loves", wrapper.ListLoves)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/v1/loves/{ref}", wrapper.SetLove)
@@ -23567,6 +23565,7 @@ func (response GetHome401ApplicationProblemPlusJSONResponse) VisitGetHomeRespons
 }
 
 type CompleteLastfmAuthRequestObject struct {
+	State  string `json:"state"`
 	Params CompleteLastfmAuthParams
 }
 
@@ -26270,7 +26269,7 @@ type StrictServerInterface interface {
 	// (GET /v1/home)
 	GetHome(ctx context.Context, request GetHomeRequestObject) (GetHomeResponseObject, error)
 	// Complete browser-based last.fm authorization
-	// (GET /v1/lastfm/callback)
+	// (GET /v1/lastfm/callback/{state})
 	CompleteLastfmAuth(ctx context.Context, request CompleteLastfmAuthRequestObject) (CompleteLastfmAuthResponseObject, error)
 	// Active library summary (freshness anchor)
 	// (GET /v1/library)
@@ -27985,9 +27984,10 @@ func (sh *strictHandler) GetHome(w http.ResponseWriter, r *http.Request) {
 }
 
 // CompleteLastfmAuth operation middleware
-func (sh *strictHandler) CompleteLastfmAuth(w http.ResponseWriter, r *http.Request, params CompleteLastfmAuthParams) {
+func (sh *strictHandler) CompleteLastfmAuth(w http.ResponseWriter, r *http.Request, state string, params CompleteLastfmAuthParams) {
 	var request CompleteLastfmAuthRequestObject
 
+	request.State = state
 	request.Params = params
 
 	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
