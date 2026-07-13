@@ -448,3 +448,12 @@ func discNumber(v int) int {
 	return v
 }
 func durationClose(a, b int) bool { return a == 0 || b == 0 || a-b < 3000 && b-a < 3000 }
+
+// CountDueMusicBrainzAlbums reports how many albums are eligible for identity
+// resolution at the given time — pass progress logging and status surfaces.
+func (s *Store) CountDueMusicBrainzAlbums(ctx context.Context, now time.Time) (int64, error) {
+	var count int64
+	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM albums al LEFT JOIN album_musicbrainz_matches m ON m.album_id=al.album_id
+		WHERE al.missing=0 AND COALESCE(m.next_attempt_at,0)<=?`, now.Unix()).Scan(&count)
+	return count, err
+}

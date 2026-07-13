@@ -64,6 +64,9 @@ type Enricher struct {
 	// ProgressInterval rate-limits intermediate library.changed publishes
 	// during a long pass so clients see progress without event spam.
 	ProgressInterval time.Duration
+	// ArtSliceBudget bounds the pre-identity artwork slice per pass: covers
+	// appear quickly without starving identity matching across restarts.
+	ArtSliceBudget time.Duration
 }
 
 func New(st *store.Store, bus *events.Bus, artDir string, cfg Config) *Enricher {
@@ -81,6 +84,7 @@ func New(st *store.Store, bus *events.Bus, artDir string, cfg Config) *Enricher 
 		LastfmBase:       "https://ws.audioscrobbler.com/2.0",
 		FanartBase:       "https://webservice.fanart.tv/v3.2",
 		ProgressInterval: 15 * time.Second,
+		ArtSliceBudget:   90 * time.Second,
 	}
 	e.mbClient = cfg.MusicBrainz
 	if e.mbClient != nil {
@@ -172,9 +176,14 @@ func (e *Enricher) RunAt(ctx context.Context, now time.Time) {
 		}
 		return err == nil
 	}
-	albumArtStage := func() {
+	albumArtStage := func(deadline time.Time) {
+		pages := 0
 		for {
 			if ctx.Err() != nil {
+				return
+			}
+			if !deadline.IsZero() && time.Now().After(deadline) {
+				log.Info("artwork stage yielding to identity matching", "attempted", stats.attempted)
 				return
 			}
 			albums, err := e.st.AlbumsNeedingArtAt(ctx, now, perRun)
@@ -183,8 +192,13 @@ func (e *Enricher) RunAt(ctx context.Context, now time.Time) {
 				return
 			}
 			if len(albums) == 0 {
+				if pages > 0 {
+					log.Info("album artwork stage drained", "succeeded", stats.succeeded, "missed", stats.missed, "transient", stats.transient)
+				}
 				return
 			}
+			pages++
+			log.Info("album artwork stage", "page", pages, "queued", len(albums), "succeeded_so_far", stats.succeeded)
 			progressed := false
 			for _, a := range albums {
 				if ctx.Err() != nil {
@@ -238,12 +252,17 @@ func (e *Enricher) RunAt(ctx context.Context, now time.Time) {
 		}
 	}
 
-	artistArtStage := func() {
+	artistArtStage := func(deadline time.Time) {
 		if e.fanartKey(ctx) == "" {
 			return
 		}
+		pages := 0
 		for {
 			if ctx.Err() != nil {
+				return
+			}
+			if !deadline.IsZero() && time.Now().After(deadline) {
+				log.Info("artist artwork stage yielding to identity matching", "attempted", stats.attempted)
 				return
 			}
 			artists, err := e.st.ArtistsNeedingArtAt(ctx, now, perRun)
@@ -252,8 +271,13 @@ func (e *Enricher) RunAt(ctx context.Context, now time.Time) {
 				return
 			}
 			if len(artists) == 0 {
+				if pages > 0 {
+					log.Info("artist artwork stage drained", "succeeded", stats.succeeded)
+				}
 				return
 			}
+			pages++
+			log.Info("artist artwork stage", "page", pages, "queued", len(artists))
 			progressed := false
 			for _, ar := range artists {
 				if ctx.Err() != nil {
@@ -307,14 +331,22 @@ func (e *Enricher) RunAt(ctx context.Context, now time.Time) {
 		}
 	}
 
-	// Artwork first: a fresh library must not wait behind a full identity
-	// drain to show covers. Whatever identity already exists is used (CAA);
-	// the rest falls back to name-based lookups.
-	albumArtStage()
-	artistArtStage()
+	// Artwork first — but only a bounded slice: covers appear quickly on a
+	// fresh library without starving identity matching, which restarts would
+	// otherwise re-park behind a full artwork drain forever.
+	artDeadline := time.Now().Add(e.ArtSliceBudget)
+	albumArtStage(artDeadline)
+	artistArtStage(artDeadline)
 
 	if e.resolver != nil {
+		due, _ := e.st.CountDueMusicBrainzAlbums(ctx, now)
+		log.Info("identity matching started", "due", due)
+		matched := 0
 		resolved, err := e.resolver.RunWithProgress(ctx, func() {
+			matched++
+			if matched%25 == 0 {
+				log.Info("identity matching progress", "applied", matched)
+			}
 			markDirty()
 			publish(false)
 		})
@@ -324,14 +356,16 @@ func (e *Enricher) RunAt(ctx context.Context, now time.Time) {
 		if err != nil {
 			log.Warn("MusicBrainz identity resolution failed", "err", err)
 		}
+		remaining, _ := e.st.CountDueMusicBrainzAlbums(ctx, now)
+		log.Info("identity matching finished", "applied", matched, "still_due", remaining)
 	}
 	publish(false)
 
 	// Identity landed above: newly matched albums and newly identified
 	// artists had their art schedules reset, so give them their first
-	// identity-aware fetch in the same pass.
-	albumArtStage()
-	artistArtStage()
+	// identity-aware fetch in the same pass — unbounded this time.
+	albumArtStage(time.Time{})
+	artistArtStage(time.Time{})
 }
 
 func (e *Enricher) store(ctx context.Context, data []byte, mime string) (string, error) {

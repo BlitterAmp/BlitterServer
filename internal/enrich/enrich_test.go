@@ -751,3 +751,46 @@ func TestProgressPublishesDuringLongPasses(t *testing.T) {
 		t.Fatalf("expected intermediate progress events, got %d", events)
 	}
 }
+
+// A zero artwork slice yields to identity matching immediately; the full
+// artwork stage after the drain still attaches everything in the same pass.
+func TestZeroArtSliceRunsIdentityBeforeArtwork(t *testing.T) {
+	st, ctx := seedAlbum(t)
+	var mu sync.Mutex
+	var order []string
+	record := func(kind string) {
+		mu.Lock()
+		defer mu.Unlock()
+		order = append(order, kind)
+	}
+	mb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		record("resolve")
+		_, _ = w.Write([]byte(`{"releases":[],"release-groups":[],"artists":[]}`))
+	}))
+	defer mb.Close()
+	srv := lastfmArtServer(t, func() { record("art") })
+	e := New(st, nil, t.TempDir(), Config{MusicBrainz: testMusicBrainzClient(t, st, mb.URL), LastfmKey: func(context.Context) string { return "k" }})
+	e.LastfmBase = srv.URL
+	e.providerPacers = map[string]*providerPacer{}
+	e.ArtSliceBudget = 0
+	e.Run(ctx)
+
+	mu.Lock()
+	defer mu.Unlock()
+	firstArt, firstResolve := -1, -1
+	for i, kind := range order {
+		if kind == "art" && firstArt == -1 {
+			firstArt = i
+		}
+		if kind == "resolve" && firstResolve == -1 {
+			firstResolve = i
+		}
+	}
+	if firstResolve == -1 || firstArt == -1 || firstResolve > firstArt {
+		t.Fatalf("zero slice must resolve identity before artwork: order=%v", order)
+	}
+	need, err := st.AlbumsNeedingArt(ctx, 10)
+	if err != nil || len(need) != 0 {
+		t.Fatalf("post-drain artwork stage must still run: %v err=%v", need, err)
+	}
+}

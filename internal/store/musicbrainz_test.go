@@ -448,3 +448,18 @@ func TestApplyConsensusPreservesExistingReleaseGroup(t *testing.T) {
 		t.Fatalf("release group erased: %q", rg)
 	}
 }
+
+func TestCountDueMusicBrainzAlbums(t *testing.T) {
+	s, album := musicBrainzAlbumFixture(t)
+	ctx := context.Background()
+	now := time.Now()
+	if n, err := s.CountDueMusicBrainzAlbums(ctx, now); err != nil || n != 1 {
+		t.Fatalf("due=%d err=%v", n, err)
+	}
+	if err := s.RecordMusicBrainzResult(ctx, album.AlbumID, "matched", MusicBrainzCandidate{}, nil, now.Add(7*24*time.Hour), ""); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.CountDueMusicBrainzAlbums(ctx, now); err != nil || n != 0 {
+		t.Fatalf("matched album still due: %d err=%v", n, err)
+	}
+}
