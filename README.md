@@ -11,6 +11,15 @@ than guessing by splitting artist text. Richer repeated-value parsing is deferre
 records in this phase, so multiple files or encodings may share a recording MBID; a later canonical recording/source
 mapping phase will normalize them.
 
+MusicBrainz identity resolution runs at album granularity on startup and in randomized 4-8 hour serialized enrichment
+passes. One process-wide client sends a contactable versioned User-Agent, spaces every request start (including retries)
+by at least 1.1 seconds, honors provider retry deadlines globally, and durably caches direct and search responses.
+Embedded release IDs are looked up directly; otherwise release candidates are scored from title, credited artists,
+date, track layout, and available durations. Only a high-confidence candidate with a clear runner-up margin changes
+canonical identity. Ambiguous and unmatched evidence remains in SQLite without changing the library. Matched albums are
+eligible after 7 days, transient failures after 24 hours, and unmatched albums after 30 days. A serialized batch emits
+at most one `library.changed`, and only if identity, credits, recordings, or artwork actually changed.
+
 The self-hosted backend for [BlitterAmp](https://github.com/BlitterAmp/BlitterAmp). BlitterServer is the engine of your music world: it indexes your library, streams and transcodes your files, keeps taste and playback state consistent across your devices, and gives the BlitterAmp apps exactly one API to talk to — this one.
 
 It is **filesystem-first**: a directory of music files is a complete source, with metadata enriched from public sources and last.fm. Media servers (Plex, and later Jellyfin/Navidrome) are optional integrations, not dependencies. It runs standalone on a NAS or server, and is designed to also ship embedded inside the BlitterAmp desktop app as a managed engine.

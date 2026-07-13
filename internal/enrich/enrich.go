@@ -18,18 +18,17 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/BlitterAmp/BlitterServer/internal/events"
 	"github.com/BlitterAmp/BlitterServer/internal/logging"
+	"github.com/BlitterAmp/BlitterServer/internal/mbresolver"
+	"github.com/BlitterAmp/BlitterServer/internal/musicbrainz"
 	"github.com/BlitterAmp/BlitterServer/internal/store"
 )
 
 // perRun caps how many entities we resolve in one pass (MusicBrainz is ~1 req/s).
 const perRun = 150
-
-var musicBrainzRateGate sync.Mutex
 
 // Config carries the credentials + identity enrichment needs. Keys are read
 // from server settings (maintained via the admin API), so they're getters.
@@ -39,48 +38,83 @@ type Config struct {
 	// FanartKey returns the current fanart.tv key ("" disables artist photos).
 	FanartKey func(context.Context) string
 	// UserAgent identifies us to MusicBrainz (required by their policy).
-	UserAgent string
+	MusicBrainz *musicbrainz.Client
 }
 
 // Enricher runs enrichment passes. Base URLs are fields so tests can point them
 // at local servers.
 type Enricher struct {
-	st     *store.Store
-	bus    *events.Bus
-	artDir string
-	http   *http.Client
-	cfg    Config
+	st       *store.Store
+	bus      *events.Bus
+	artDir   string
+	http     *http.Client
+	cfg      Config
+	resolver *mbresolver.Resolver
+	mbClient *musicbrainz.Client
 
-	MBBase     string
 	CAABase    string
 	LastfmBase string
 	FanartBase string
-
-	mbInterval time.Duration
 }
 
 func New(st *store.Store, bus *events.Bus, artDir string, cfg Config) *Enricher {
-	if cfg.UserAgent == "" {
-		cfg.UserAgent = "BlitterServer/1.0 (https://github.com/BlitterAmp/BlitterServer)"
-	}
-	return &Enricher{
+	e := &Enricher{
 		st:         st,
 		bus:        bus,
 		artDir:     artDir,
 		http:       &http.Client{Timeout: 20 * time.Second},
 		cfg:        cfg,
-		MBBase:     "https://musicbrainz.org/ws/2",
 		CAABase:    "https://coverartarchive.org",
 		LastfmBase: "https://ws.audioscrobbler.com/2.0",
 		FanartBase: "https://webservice.fanart.tv/v3.2",
-		mbInterval: 1100 * time.Millisecond,
 	}
+	e.mbClient = cfg.MusicBrainz
+	if e.mbClient != nil {
+		e.resolver = mbresolver.New(st, e.mbClient)
+	}
+	return e
+}
+
+// mbReleaseGroup remains as a cautious art fallback for package tests and
+// future explicit fallback use. It accepts only one exact title result.
+func (e *Enricher) mbReleaseGroup(ctx context.Context, artist, album string) string {
+	q := fmt.Sprintf(`releasegroup:"%s" AND artist:"%s"`, album, artist)
+	if e.mbClient == nil {
+		return ""
+	}
+	var body struct {
+		Groups []struct{ ID, Title string } `json:"release-groups"`
+	}
+	if e.mbClient.GetJSON(ctx, "/release-group?query="+url.QueryEscape(q)+"&fmt=json&limit=5", &body) != nil {
+		return ""
+	}
+	match := ""
+	for _, g := range body.Groups {
+		if strings.EqualFold(strings.TrimSpace(g.Title), strings.TrimSpace(album)) {
+			if match != "" {
+				return ""
+			}
+			match = g.ID
+		}
+	}
+	return match
 }
 
 // Run does one enrichment pass over untried albums (then artists). Best-effort:
 // failures just mark the entity tried and move on.
 func (e *Enricher) Run(ctx context.Context) {
 	log := logging.From(ctx).With("component", "enrich")
+	changed := false
+	defer func() {
+		if !changed || e.bus == nil {
+			return
+		}
+		publishCtx := context.WithoutCancel(ctx)
+		if sum, err := e.st.GetLibrarySummary(publishCtx); err == nil {
+			_ = e.bus.Publish(publishCtx, "library.changed", "", map[string]any{"libraryId": "lib_local", "updatedAt": sum.UpdatedAt})
+		}
+		log.Info("enrichment updated the library")
+	}()
 	var seq int64
 	nextSeq := func() bool {
 		if seq != 0 {
@@ -90,14 +124,21 @@ func (e *Enricher) Run(ctx context.Context) {
 		seq, err = e.st.NextScanSeq(ctx)
 		return err == nil
 	}
-	changed := false
+	if e.resolver != nil {
+		if resolved, err := e.resolver.Run(ctx); err != nil {
+			changed = resolved
+			log.Warn("MusicBrainz identity resolution failed", "err", err)
+		} else {
+			changed = resolved
+		}
+	}
 
 	albums, _ := e.st.AlbumsNeedingArt(ctx, perRun)
 	for _, a := range albums {
 		if ctx.Err() != nil {
 			return
 		}
-		if data, mime := e.albumArt(ctx, a.ArtistName, a.Title); data != nil {
+		if data, mime := e.albumArt(ctx, a.ReleaseGroupID, a.ArtistName, a.Title); data != nil {
 			if id, err := e.store(ctx, data, mime); err == nil {
 				if !nextSeq() {
 					return
@@ -119,7 +160,7 @@ func (e *Enricher) Run(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			if data, mime := e.artistArt(ctx, ar.Name); data != nil {
+			if data, mime := e.artistArt(ctx, ar.MusicBrainzID); data != nil {
 				if id, err := e.store(ctx, data, mime); err == nil {
 					if !nextSeq() {
 						return
@@ -136,12 +177,6 @@ func (e *Enricher) Run(ctx context.Context) {
 		}
 	}
 
-	if changed && e.bus != nil {
-		if sum, err := e.st.GetLibrarySummary(ctx); err == nil {
-			_ = e.bus.Publish(ctx, "library.changed", "", map[string]any{"libraryId": "lib_local", "updatedAt": sum.UpdatedAt})
-		}
-		log.Info("art enrichment updated the library")
-	}
 }
 
 func (e *Enricher) store(ctx context.Context, data []byte, mime string) (string, error) {
@@ -151,9 +186,12 @@ func (e *Enricher) store(ctx context.Context, data []byte, mime string) (string,
 
 // ── album art ──
 
-func (e *Enricher) albumArt(ctx context.Context, artist, album string) ([]byte, string) {
-	if rg := e.mbReleaseGroup(ctx, artist, album); rg != "" {
-		return e.albumArtForReleaseGroup(ctx, rg, artist, album)
+func (e *Enricher) albumArt(ctx context.Context, releaseGroupID, artist, album string) ([]byte, string) {
+	if releaseGroupID != "" {
+		return e.albumArtForReleaseGroup(ctx, releaseGroupID, artist, album)
+	}
+	if fallback := e.mbReleaseGroup(ctx, artist, album); fallback != "" {
+		return e.albumArtForReleaseGroup(ctx, fallback, artist, album)
 	}
 	return e.lastfmAlbumArt(ctx, artist, album)
 }
@@ -200,19 +238,6 @@ func (e *Enricher) fanartAlbumArt(ctx context.Context, key, releaseGroupID strin
 	return nil, ""
 }
 
-func (e *Enricher) mbReleaseGroup(ctx context.Context, artist, album string) string {
-	q := fmt.Sprintf(`artist:"%s" AND releasegroup:"%s"`, mbEscape(artist), mbEscape(album))
-	var body struct {
-		Groups []struct {
-			ID string `json:"id"`
-		} `json:"release-groups"`
-	}
-	if e.mbQuery(ctx, "release-group", q, &body) && len(body.Groups) > 0 {
-		return body.Groups[0].ID
-	}
-	return ""
-}
-
 func (e *Enricher) lastfmAlbumImage(ctx context.Context, key, artist, album string) string {
 	u := fmt.Sprintf("%s/?method=album.getinfo&api_key=%s&artist=%s&album=%s&autocorrect=1&format=json",
 		e.LastfmBase, url.QueryEscape(key), url.QueryEscape(artist), url.QueryEscape(album))
@@ -232,8 +257,7 @@ func (e *Enricher) lastfmAlbumImage(ctx context.Context, key, artist, album stri
 
 // ── artist art (fanart.tv) ──
 
-func (e *Enricher) artistArt(ctx context.Context, name string) ([]byte, string) {
-	mbid := e.mbArtist(ctx, name)
+func (e *Enricher) artistArt(ctx context.Context, mbid string) ([]byte, string) {
 	if mbid == "" {
 		return nil, ""
 	}
@@ -261,35 +285,7 @@ func (e *Enricher) artistArt(ctx context.Context, name string) ([]byte, string) 
 	return e.fetch(ctx, pick, "")
 }
 
-func (e *Enricher) mbArtist(ctx context.Context, name string) string {
-	var body struct {
-		Artists []struct {
-			ID string `json:"id"`
-		} `json:"artists"`
-	}
-	if e.mbQuery(ctx, "artist", fmt.Sprintf(`artist:"%s"`, mbEscape(name)), &body) && len(body.Artists) > 0 {
-		return body.Artists[0].ID
-	}
-	return ""
-}
-
 // ── http helpers ──
-
-func (e *Enricher) mbQuery(ctx context.Context, entity, query string, out any) bool {
-	musicBrainzRateGate.Lock()
-	defer musicBrainzRateGate.Unlock()
-	if e.mbInterval > 0 {
-		timer := time.NewTimer(e.mbInterval)
-		defer timer.Stop()
-		select {
-		case <-timer.C:
-		case <-ctx.Done():
-			return false
-		}
-	}
-	u := fmt.Sprintf("%s/%s?query=%s&fmt=json&limit=1", e.MBBase, entity, url.QueryEscape(query))
-	return e.getJSON(ctx, u, e.cfg.UserAgent, out)
-}
 
 func (e *Enricher) getJSON(ctx context.Context, u, userAgent string, out any) bool {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
@@ -380,10 +376,6 @@ func (e *Enricher) fanartKey(ctx context.Context) string {
 		return ""
 	}
 	return e.cfg.FanartKey(ctx)
-}
-
-func mbEscape(s string) string {
-	return strings.ReplaceAll(s, `"`, `\"`)
 }
 
 func largestImage(images []struct {

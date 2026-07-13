@@ -6,14 +6,23 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/BlitterAmp/BlitterServer/internal/events"
+	"github.com/BlitterAmp/BlitterServer/internal/musicbrainz"
 	"github.com/BlitterAmp/BlitterServer/internal/source"
 	"github.com/BlitterAmp/BlitterServer/internal/store"
 )
+
+func testMusicBrainzClient(t *testing.T, st *store.Store, baseURL string) *musicbrainz.Client {
+	t.Helper()
+	client, err := musicbrainz.NewClient(musicbrainz.Options{BaseURL: baseURL, UserAgent: "BlitterServer/test (mailto:test@example.com)", Cache: st, Interval: time.Nanosecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client
+}
 
 func seedAlbum(t *testing.T) (*store.Store, context.Context) {
 	t.Helper()
@@ -47,7 +56,7 @@ func TestEnrichAlbumArtFromCoverArtArchive(t *testing.T) {
 
 	mb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "release-group") {
-			_, _ = w.Write([]byte(`{"release-groups":[{"id":"rg-1"}]}`))
+			_, _ = w.Write([]byte(`{"release-groups":[{"id":"rg-1","title":"Great Album"}]}`))
 		} else {
 			_, _ = w.Write([]byte(`{"artists":[]}`))
 		}
@@ -63,9 +72,8 @@ func TestEnrichAlbumArtFromCoverArtArchive(t *testing.T) {
 	}))
 	defer caa.Close()
 
-	e := New(st, nil, t.TempDir(), Config{})
-	e.MBBase, e.CAABase = mb.URL, caa.URL
-	e.mbInterval = 0
+	e := New(st, nil, t.TempDir(), Config{MusicBrainz: testMusicBrainzClient(t, st, mb.URL)})
+	e.CAABase = caa.URL
 	e.Run(ctx)
 
 	if need, _ := st.AlbumsNeedingArt(ctx, 10); len(need) != 0 {
@@ -182,9 +190,7 @@ func TestEnrichMarksTriedWhenNothingFound(t *testing.T) {
 	}))
 	defer mb.Close()
 
-	e := New(st, nil, t.TempDir(), Config{})
-	e.MBBase = mb.URL
-	e.mbInterval = 0
+	e := New(st, nil, t.TempDir(), Config{MusicBrainz: testMusicBrainzClient(t, st, mb.URL)})
 	e.Run(ctx)
 
 	// No art found, but it must be marked tried so we don't re-query forever.
@@ -220,10 +226,10 @@ func TestEnrichArtistPhotoFromFanart(t *testing.T) {
 	defer fanart.Close()
 
 	e := New(st, nil, t.TempDir(), Config{
-		FanartKey: func(context.Context) string { return "test-key" },
+		FanartKey:   func(context.Context) string { return "test-key" },
+		MusicBrainz: testMusicBrainzClient(t, st, mb.URL),
 	})
-	e.MBBase, e.FanartBase = mb.URL, fanart.URL
-	e.mbInterval = 0
+	e.FanartBase = fanart.URL
 	e.Run(ctx)
 
 	if need, _ := st.ArtistsNeedingArt(ctx, 10); len(need) != 0 {
@@ -233,8 +239,11 @@ func TestEnrichArtistPhotoFromFanart(t *testing.T) {
 
 func TestMusicBrainzRateWaitHonorsCancellation(t *testing.T) {
 	st, _ := seedAlbum(t)
-	e := New(st, nil, t.TempDir(), Config{})
-	e.mbInterval = time.Hour
+	client, err := musicbrainz.NewClient(musicbrainz.Options{BaseURL: "https://example.invalid", UserAgent: "BlitterServer/test (mailto:test@example.com)", Interval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(st, nil, t.TempDir(), Config{MusicBrainz: client})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { e.Run(ctx); close(done) }()
@@ -246,37 +255,16 @@ func TestMusicBrainzRateWaitHonorsCancellation(t *testing.T) {
 	}
 }
 
-func TestMusicBrainzRequestsAreGloballySerializedAndIdentified(t *testing.T) {
-	st, ctx := seedAlbum(t)
-	entered := make(chan string, 2)
-	release := make(chan struct{}, 2)
-	mb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		entered <- r.Header.Get("User-Agent")
-		<-release
-		_, _ = w.Write([]byte(`{"release-groups":[]}`))
-	}))
-	defer mb.Close()
-	e1 := New(st, nil, t.TempDir(), Config{UserAgent: "BlitterServer/test (mailto:test@example.com)"})
-	e2 := New(st, nil, t.TempDir(), Config{UserAgent: "BlitterServer/test (mailto:test@example.com)"})
-	e1.MBBase, e2.MBBase = mb.URL, mb.URL
-	e1.mbInterval, e2.mbInterval = 0, 0
-	var wg sync.WaitGroup
-	for _, e := range []*Enricher{e1, e2} {
-		wg.Add(1)
-		go func() { defer wg.Done(); e.mbReleaseGroup(ctx, "artist", "album") }()
+func TestEnricherUsesInjectedProcessMusicBrainzClient(t *testing.T) {
+	st, _ := seedAlbum(t)
+	client, err := musicbrainz.NewClient(musicbrainz.Options{BaseURL: "https://example.invalid", UserAgent: "BlitterServer/test (mailto:test@example.com)"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if ua := <-entered; ua != "BlitterServer/test (mailto:test@example.com)" {
-		t.Fatalf("user agent=%q", ua)
+	e := New(st, nil, t.TempDir(), Config{MusicBrainz: client})
+	if e.mbClient != client {
+		t.Fatal("enricher did not retain injected MusicBrainz client")
 	}
-	select {
-	case <-entered:
-		t.Fatal("concurrent MusicBrainz requests were not globally serialized")
-	case <-time.After(20 * time.Millisecond):
-	}
-	release <- struct{}{}
-	<-entered
-	release <- struct{}{}
-	wg.Wait()
 }
 
 func TestProvider503RetryAfterRetriesOnce(t *testing.T) {
@@ -310,8 +298,7 @@ func TestLibraryChangedOnlyWhenArtIsApplied(t *testing.T) {
 		_, _ = w.Write([]byte(`{"release-groups":[]}`))
 	}))
 	defer mb.Close()
-	e := New(st, bus, t.TempDir(), Config{})
-	e.MBBase, e.mbInterval = mb.URL, 0
+	e := New(st, bus, t.TempDir(), Config{MusicBrainz: testMusicBrainzClient(t, st, mb.URL)})
 	e.Run(ctx)
 	select {
 	case event := <-sub:
@@ -326,7 +313,7 @@ func TestLibraryChangedPublishedExactlyOnceForAppliedArt(t *testing.T) {
 	sub, cancel := bus.Subscribe("", 0)
 	defer cancel()
 	mb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"release-groups":[{"id":"rg-event"}]}`))
+		_, _ = w.Write([]byte(`{"release-groups":[{"id":"rg-event","title":"Great Album"}]}`))
 	}))
 	defer mb.Close()
 	caa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -334,8 +321,8 @@ func TestLibraryChangedPublishedExactlyOnceForAppliedArt(t *testing.T) {
 		_, _ = w.Write(pngBytes)
 	}))
 	defer caa.Close()
-	e := New(st, bus, t.TempDir(), Config{})
-	e.MBBase, e.CAABase, e.mbInterval = mb.URL, caa.URL, 0
+	e := New(st, bus, t.TempDir(), Config{MusicBrainz: testMusicBrainzClient(t, st, mb.URL)})
+	e.CAABase = caa.URL
 	e.Run(ctx)
 	select {
 	case event := <-sub:
@@ -363,7 +350,7 @@ func TestAlbumEnrichmentDoesNotOverwriteArtAttachedDuringLookup(t *testing.T) {
 		if applied, err := st.SetAlbumArt(ctx, needs[0].AlbumID, newerID, 50); err != nil || !applied {
 			t.Errorf("attach newer art applied=%v err=%v", applied, err)
 		}
-		_, _ = w.Write([]byte(`{"release-groups":[{"id":"rg-race"}]}`))
+		_, _ = w.Write([]byte(`{"release-groups":[{"id":"rg-race","title":"Great Album"}]}`))
 	}))
 	defer mb.Close()
 	caa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -371,11 +358,54 @@ func TestAlbumEnrichmentDoesNotOverwriteArtAttachedDuringLookup(t *testing.T) {
 		_, _ = w.Write(pngBytes)
 	}))
 	defer caa.Close()
-	e := New(st, nil, t.TempDir(), Config{})
-	e.MBBase, e.CAABase, e.mbInterval = mb.URL, caa.URL, 0
+	e := New(st, nil, t.TempDir(), Config{MusicBrainz: testMusicBrainzClient(t, st, mb.URL)})
+	e.CAABase = caa.URL
 	e.Run(ctx)
 	album, found, err := st.GetAlbum(ctx, needs[0].AlbumID)
 	if err != nil || !found || album.ArtID != newerID {
 		t.Fatalf("newer art overwritten: found=%v art=%q err=%v", found, album.ArtID, err)
+	}
+}
+
+func TestCommittedIdentityPublishesEventWhenLaterArtWorkIsCanceled(t *testing.T) {
+	st, ctx := seedAlbum(t)
+	seq, _ := st.NextScanSeq(ctx)
+	if err := st.UpsertTrack(ctx, "filesystem", source.TrackMeta{NativeID: "n1", Title: "Song", Index: 1, Disc: 1, PrimaryArtist: source.ArtistReference{Name: "The Band"}, TrackCredits: []source.ArtistCredit{{Name: "The Band"}}, AlbumCredits: []source.ArtistCredit{{Name: "The Band"}}, Album: "Great Album", ReleaseMBID: "resolved", Container: "flac", Codec: "flac", Version: 1}, "", seq); err != nil {
+		t.Fatal(err)
+	}
+	bus := events.NewBus(st)
+	sub, unsubscribe := bus.Subscribe("", 0)
+	defer unsubscribe()
+	artStarted := make(chan struct{})
+	mb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/release/resolved" {
+			_, _ = w.Write([]byte(`{"id":"resolved","title":"Great Album","release-group":{"id":"group"},"artist-credit":[{"name":"The Band","artist":{"id":"artist","name":"The Band"}}],"media":[{"position":1,"tracks":[{"position":1,"recording":{"id":"recording","title":"Song","artist-credit":[{"name":"The Band","artist":{"id":"artist","name":"The Band"}}]}}]}]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer mb.Close()
+	caa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { close(artStarted); <-r.Context().Done() }))
+	defer caa.Close()
+	e := New(st, bus, t.TempDir(), Config{MusicBrainz: testMusicBrainzClient(t, st, mb.URL)})
+	e.CAABase = caa.URL
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { e.Run(runCtx); close(done) }()
+	<-artStarted
+	cancel()
+	<-done
+	select {
+	case event := <-sub:
+		if event.Type != "library.changed" {
+			t.Fatalf("event=%s", event.Type)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("committed identity change was not published")
+	}
+	select {
+	case event := <-sub:
+		t.Fatalf("duplicate event %s", event.Type)
+	default:
 	}
 }

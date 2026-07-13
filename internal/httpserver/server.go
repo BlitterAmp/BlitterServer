@@ -18,6 +18,7 @@ import (
 	"github.com/BlitterAmp/BlitterServer/internal/events"
 	"github.com/BlitterAmp/BlitterServer/internal/library"
 	"github.com/BlitterAmp/BlitterServer/internal/logging"
+	"github.com/BlitterAmp/BlitterServer/internal/musicbrainz"
 	"github.com/BlitterAmp/BlitterServer/internal/server"
 	"github.com/BlitterAmp/BlitterServer/internal/store"
 )
@@ -89,10 +90,14 @@ func handlerWithServer(st *store.Store, mgr *library.Manager, dataDir, version s
 
 	bus := events.NewBus(st)
 	mgr.SetBus(bus)
+	mb, err := musicbrainz.NewClient(musicbrainz.Options{BaseURL: "https://musicbrainz.org/ws/2", UserAgent: "BlitterServer/" + version + " (https://github.com/BlitterAmp/BlitterServer)", Cache: st})
+	if err != nil {
+		panic(err)
+	}
 	mgr.SetEnricher(enrich.New(st, bus, filepath.Join(dataDir, "art"), enrich.Config{
-		LastfmKey: func(ctx context.Context) string { v, _, _ := st.GetSetting(ctx, "lastfm_api_key"); return v },
-		FanartKey: func(ctx context.Context) string { v, _, _ := st.GetSetting(ctx, "fanart_api_key"); return v },
-		UserAgent: "BlitterServer/" + version + " (https://github.com/BlitterAmp/BlitterServer)",
+		LastfmKey:   func(ctx context.Context) string { v, _, _ := st.GetSetting(ctx, "lastfm_api_key"); return v },
+		FanartKey:   func(ctx context.Context) string { v, _, _ := st.GetSetting(ctx, "fanart_api_key"); return v },
+		MusicBrainz: mb,
 	}))
 	artMgr := artifacts.NewManager(st, mgr, bus, dataDir)
 	artMgr.Start()

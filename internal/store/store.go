@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
@@ -22,8 +23,15 @@ import (
 var migrations embed.FS
 
 type Store struct {
-	db     *sql.DB
-	secret cipher.AEAD
+	db              *sql.DB
+	secret          cipher.AEAD
+	libraryIdentity sync.Mutex
+}
+
+// LockLibraryScan prevents a canonical resolver apply from interleaving with a source scan.
+func (s *Store) LockLibraryScan() func() {
+	s.libraryIdentity.Lock()
+	return s.libraryIdentity.Unlock
 }
 
 // Open creates dataDir if needed, opens (or creates) the database, and runs
