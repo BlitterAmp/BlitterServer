@@ -127,6 +127,7 @@ func (s *Store) ApplyMusicBrainzRelease(ctx context.Context, album MusicBrainzAl
 }
 
 type musicBrainzResult struct {
+	state      string
 	selected   MusicBrainzCandidate
 	candidates []MusicBrainzCandidate
 	next       time.Time
@@ -136,7 +137,19 @@ type musicBrainzResult struct {
 func (s *Store) ApplyMusicBrainzMatch(ctx context.Context, album MusicBrainzAlbum, release CanonicalRelease, seq int64, selected MusicBrainzCandidate, candidates []MusicBrainzCandidate, next time.Time) (bool, error) {
 	s.libraryIdentity.Lock()
 	defer s.libraryIdentity.Unlock()
-	return s.applyMusicBrainzRelease(ctx, album, release, seq, &musicBrainzResult{selected: selected, candidates: candidates, next: next})
+	return s.applyMusicBrainzRelease(ctx, album, release, seq, &musicBrainzResult{state: "matched", selected: selected, candidates: candidates, next: next})
+}
+
+// ApplyMusicBrainzConsensus applies the identity every edition-ambiguous
+// candidate agrees on — album-level artist credits and, when shared, the
+// release group — while the specific release stays unset and the match stays
+// recorded as ambiguous for review. Tracks and recordings are never touched.
+func (s *Store) ApplyMusicBrainzConsensus(ctx context.Context, album MusicBrainzAlbum, release CanonicalRelease, seq int64, selected MusicBrainzCandidate, candidates []MusicBrainzCandidate, next time.Time) (bool, error) {
+	s.libraryIdentity.Lock()
+	defer s.libraryIdentity.Unlock()
+	release.ReleaseID = ""
+	release.Tracks = nil
+	return s.applyMusicBrainzRelease(ctx, album, release, seq, &musicBrainzResult{state: "ambiguous", selected: selected, candidates: candidates, next: next})
 }
 
 func (s *Store) applyMusicBrainzRelease(ctx context.Context, album MusicBrainzAlbum, release CanonicalRelease, seq int64, result *musicBrainzResult) (bool, error) {
@@ -157,7 +170,14 @@ func (s *Store) applyMusicBrainzRelease(ctx context.Context, album MusicBrainzAl
 		return false, err
 	}
 	changed := false
-	res, err := tx.ExecContext(ctx, `UPDATE albums SET musicbrainz_release_id=?,musicbrainz_release_group_id=?,change_seq=CASE WHEN musicbrainz_release_id IS NOT ? OR musicbrainz_release_group_id IS NOT ? THEN ? ELSE change_seq END WHERE album_id=?`, release.ReleaseID, release.ReleaseGroupID, release.ReleaseID, release.ReleaseGroupID, seq, album.AlbumID)
+	// Empty incoming ids store as NULL (the release-id column is UNIQUE, so
+	// empty strings would collide across albums) and never erase previously
+	// applied identity.
+	res, err := tx.ExecContext(ctx, `UPDATE albums SET
+		musicbrainz_release_id=COALESCE(NULLIF(?,''), musicbrainz_release_id),
+		musicbrainz_release_group_id=COALESCE(NULLIF(?,''), musicbrainz_release_group_id),
+		change_seq=CASE WHEN COALESCE(NULLIF(?,''), musicbrainz_release_id) IS NOT musicbrainz_release_id OR COALESCE(NULLIF(?,''), musicbrainz_release_group_id) IS NOT musicbrainz_release_group_id THEN ? ELSE change_seq END
+		WHERE album_id=?`, release.ReleaseID, release.ReleaseGroupID, release.ReleaseID, release.ReleaseGroupID, seq, album.AlbumID)
 	if err != nil {
 		return false, err
 	}
@@ -253,7 +273,7 @@ func (s *Store) applyMusicBrainzRelease(ctx context.Context, album MusicBrainzAl
 		}
 	}
 	if result != nil {
-		if err := recordMusicBrainzResultTx(ctx, tx, album.AlbumID, "matched", result.selected, result.candidates, result.next, ""); err != nil {
+		if err := recordMusicBrainzResultTx(ctx, tx, album.AlbumID, result.state, result.selected, result.candidates, result.next, ""); err != nil {
 			return false, err
 		}
 	}

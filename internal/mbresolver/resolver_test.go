@@ -287,3 +287,136 @@ func TestResolverDrainsPastStaleFirstBatch(t *testing.T) {
 		t.Fatalf("attempted %d albums, want 7: %v", len(requests), requests)
 	}
 }
+
+func consensusFixture(t *testing.T, albumTitle string) (*store.Store, context.Context) {
+	t.Helper()
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	seq, _ := st.NextScanSeq(ctx)
+	meta := source.TrackMeta{NativeID: "one", Title: "Song", Album: albumTitle, Index: 1, Disc: 1, DurationMs: 200000, PrimaryArtist: source.ArtistReference{Name: "The Band"}, AlbumCredits: []source.ArtistCredit{{Name: "The Band"}}, TrackCredits: []source.ArtistCredit{{Name: "The Band"}}, Container: "flac", Codec: "flac", Version: 1}
+	if err := st.UpsertTrack(ctx, "filesystem", meta, "", seq); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.FinishScan(ctx, "filesystem", seq); err != nil {
+		t.Fatal(err)
+	}
+	return st, ctx
+}
+
+func consensusRelease(id, title, artistID, rgID string) string {
+	return `{"id":"` + id + `","title":"` + title + `","release-group":{"id":"` + rgID + `"},"artist-credit":[{"name":"The Band","artist":{"id":"` + artistID + `","name":"The Band"}}],"media":[{"position":1,"tracks":[{"position":1,"recording":{"id":"rec-` + id + `","title":"Song","length":200000,"artist-credit":[{"name":"The Band","artist":{"id":"` + artistID + `","name":"The Band"}}]}}]}]}`
+}
+
+// Edition ambiguity with artist and release-group agreement still applies
+// that shared identity; the edition stays parked as ambiguous.
+func TestResolverAppliesConsensusFromAmbiguousEditions(t *testing.T) {
+	st, ctx := consensusFixture(t, "Classic Album")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/release/ed-") {
+			id := strings.TrimPrefix(r.URL.Path, "/release/")
+			_, _ = w.Write([]byte(consensusRelease(id, "Classic Album", "mbid-band", "rg-classic")))
+			return
+		}
+		_, _ = w.Write([]byte(`{"releases":[` + consensusRelease("ed-1", "Classic Album", "mbid-band", "rg-classic") + `,` + consensusRelease("ed-2", "Classic Album", "mbid-band", "rg-classic") + `]}`))
+	}))
+	defer srv.Close()
+	client, _ := musicbrainz.NewClient(musicbrainz.Options{BaseURL: srv.URL, UserAgent: "BlitterServer/test (mailto:test@example.com)", Cache: musicbrainz.NewFilesystemCache(providercache.New(t.TempDir())), Interval: time.Nanosecond})
+	changed, err := New(st, client).Run(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("consensus application must report change")
+	}
+	albums, _, err := st.ListAlbums(ctx, "title", "", 10)
+	if err != nil || len(albums) != 1 {
+		t.Fatalf("albums=%v err=%v", albums, err)
+	}
+	if albums[0].MusicBrainzReleaseGroupID != "rg-classic" || albums[0].MusicBrainzReleaseID != "" {
+		t.Fatalf("consensus identity: rg=%q release=%q", albums[0].MusicBrainzReleaseGroupID, albums[0].MusicBrainzReleaseID)
+	}
+	due, err := st.DueMusicBrainzAlbums(ctx, time.Now(), 10)
+	if err != nil || len(due) != 0 {
+		t.Fatalf("album must stay parked after consensus: %v err=%v", due, err)
+	}
+	artists, _, err := st.ListArtists(ctx, "name", "", 10)
+	if err != nil || len(artists) != 1 || artists[0].MusicBrainzID != "mbid-band" {
+		t.Fatalf("artist consensus adoption: %v err=%v", artists, err)
+	}
+}
+
+// Candidates that disagree on the artist yield no partial application.
+func TestResolverConsensusRequiresArtistAgreement(t *testing.T) {
+	st, ctx := consensusFixture(t, "Split Album")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/release/ed-") {
+			id := strings.TrimPrefix(r.URL.Path, "/release/")
+			artist := "mbid-a"
+			if id == "ed-2" {
+				artist = "mbid-b"
+			}
+			_, _ = w.Write([]byte(consensusRelease(id, "Split Album", artist, "rg-"+id)))
+			return
+		}
+		_, _ = w.Write([]byte(`{"releases":[` + consensusRelease("ed-1", "Split Album", "mbid-a", "rg-ed-1") + `,` + consensusRelease("ed-2", "Split Album", "mbid-b", "rg-ed-2") + `]}`))
+	}))
+	defer srv.Close()
+	client, _ := musicbrainz.NewClient(musicbrainz.Options{BaseURL: srv.URL, UserAgent: "BlitterServer/test (mailto:test@example.com)", Cache: musicbrainz.NewFilesystemCache(providercache.New(t.TempDir())), Interval: time.Nanosecond})
+	if _, err := New(st, client).Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	albums, _, err := st.ListAlbums(ctx, "title", "", 10)
+	if err != nil || len(albums) != 1 {
+		t.Fatalf("albums=%v err=%v", albums, err)
+	}
+	if albums[0].MusicBrainzReleaseGroupID != "" {
+		t.Fatalf("disagreeing candidates must not apply identity: rg=%q", albums[0].MusicBrainzReleaseGroupID)
+	}
+	artists, _, err := st.ListArtists(ctx, "name", "", 10)
+	if err != nil || len(artists) != 1 || artists[0].MusicBrainzID != "" {
+		t.Fatalf("artist must stay unidentified: %v err=%v", artists, err)
+	}
+}
+
+// Disc/edition designators in local titles are stripped for the search query.
+func TestResolverNormalizesSearchTitles(t *testing.T) {
+	st, ctx := consensusFixture(t, "Movement in Still Life CD01")
+	var query string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/release/") {
+			id := strings.TrimPrefix(r.URL.Path, "/release/")
+			_, _ = w.Write([]byte(consensusRelease(id, "Movement in Still Life", "mbid-band", "rg-misl")))
+			return
+		}
+		query = r.URL.Query().Get("query")
+		_, _ = w.Write([]byte(`{"releases":[` + consensusRelease("ed-1", "Movement in Still Life", "mbid-band", "rg-misl") + `]}`))
+	}))
+	defer srv.Close()
+	client, _ := musicbrainz.NewClient(musicbrainz.Options{BaseURL: srv.URL, UserAgent: "BlitterServer/test (mailto:test@example.com)", Cache: musicbrainz.NewFilesystemCache(providercache.New(t.TempDir())), Interval: time.Nanosecond})
+	if _, err := New(st, client).Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(query, `release:"Movement in Still Life"`) {
+		t.Fatalf("search must use the normalized title, got %q", query)
+	}
+}
+
+func TestSearchTitleNormalization(t *testing.T) {
+	for input, want := range map[string]string{
+		"Movement in Still Life CD01":                     "Movement in Still Life",
+		"1995 - Ima (Disc 01)":                            "1995 - Ima",
+		"Electronica 2- The Heart of Noise [88875196672]": "Electronica 2- The Heart of Noise",
+		"Zoolook (1997 remaster)":                         "Zoolook",
+		"Revolutions (Remastered 1997)":                   "Revolutions",
+		"Plain Title":                                     "Plain Title",
+		"CD02":                                            "CD02",
+	} {
+		if got := searchTitle(input); got != want {
+			t.Errorf("searchTitle(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
