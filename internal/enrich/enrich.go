@@ -178,18 +178,6 @@ func (e *Enricher) RunAt(ctx context.Context, now time.Time) {
 			log.Info("enrichment updated the library")
 		}
 	}()
-	var seq int64
-	nextSeq := func() bool {
-		if seq != 0 {
-			return true
-		}
-		var err error
-		seq, err = e.st.NextScanSeq(ctx)
-		if err != nil {
-			log.Error("allocate enrichment change sequence", "err", err)
-		}
-		return err == nil
-	}
 	albumArtStage := func(deadline time.Time) {
 		pages := 0
 		for {
@@ -225,10 +213,7 @@ func (e *Enricher) RunAt(ctx context.Context, now time.Time) {
 				}
 				if data != nil {
 					if id, err := e.store(ctx, data, mime); err == nil {
-						if !nextSeq() {
-							return
-						}
-						applied, err := e.st.SetAlbumArt(ctx, a.AlbumID, id, seq)
+						applied, err := e.attachAlbumArt(ctx, a.AlbumID, id)
 						if applied {
 							markDirty()
 							publish(false)
@@ -304,10 +289,7 @@ func (e *Enricher) RunAt(ctx context.Context, now time.Time) {
 				}
 				if data != nil {
 					if id, err := e.store(ctx, data, mime); err == nil {
-						if !nextSeq() {
-							return
-						}
-						applied, err := e.st.SetArtistArt(ctx, ar.ArtistID, ar.ArtID, id, seq)
+						applied, err := e.attachArtistArt(ctx, ar.ArtistID, ar.ArtID, id)
 						if applied {
 							markDirty()
 							publish(false)
@@ -373,6 +355,8 @@ func (e *Enricher) RunAt(ctx context.Context, now time.Time) {
 		remaining, _ := e.st.CountDueMusicBrainzAlbums(ctx, now)
 		log.Info("identity matching finished", "applied", matched, "still_due", remaining)
 	}
+	publish(false)
+	e.runArtistIdentityStage(ctx, markDirty, publish)
 	publish(false)
 
 	// Identity landed above: newly matched albums and newly identified

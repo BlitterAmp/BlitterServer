@@ -18,10 +18,27 @@ import (
 var ErrBodyTooLarge = errors.New("musicbrainz response exceeds limit")
 
 // BackoffError reports a persisted provider retry deadline.
-type BackoffError struct{ RetryAt time.Time }
+type BackoffError struct {
+	RetryAt    time.Time
+	StatusCode int
+}
 
 func (e *BackoffError) Error() string {
 	return "musicbrainz backoff until " + e.RetryAt.Format(time.RFC3339)
+}
+
+func (e *BackoffError) Unwrap() error {
+	if e.StatusCode == 0 {
+		return nil
+	}
+	return &HTTPStatusError{StatusCode: e.StatusCode}
+}
+
+// HTTPStatusError reports a non-success MusicBrainz response status.
+type HTTPStatusError struct{ StatusCode int }
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("musicbrainz status %d", e.StatusCode)
 }
 
 type CacheEntry struct {
@@ -121,7 +138,7 @@ func (c *Client) GetJSON(ctx context.Context, path string, out any) error {
 		}
 		if ok && now.Before(global.RetryAt) {
 			c.extendRetry(global.RetryAt)
-			return &BackoffError{RetryAt: global.RetryAt}
+			return &BackoffError{RetryAt: global.RetryAt, StatusCode: global.Status}
 		}
 		entry, ok, err := c.cache.MusicBrainzCache(ctx, key)
 		if err != nil {
@@ -131,11 +148,11 @@ func (c *Client) GetJSON(ctx context.Context, path string, out any) error {
 			cached = entry
 			if now.Before(entry.RetryAt) {
 				c.extendRetry(entry.RetryAt)
-				return &BackoffError{RetryAt: entry.RetryAt}
+				return &BackoffError{RetryAt: entry.RetryAt, StatusCode: entry.Status}
 			}
 			if now.Before(entry.FreshUntil) {
 				if entry.Status != http.StatusOK {
-					return fmt.Errorf("musicbrainz cached status %d", entry.Status)
+					return &HTTPStatusError{StatusCode: entry.Status}
 				}
 				return json.Unmarshal(entry.Body, out)
 			}
@@ -186,7 +203,7 @@ func (c *Client) GetJSON(ctx context.Context, path string, out any) error {
 				delay = time.Duration(1<<attempt) * c.interval
 			}
 			c.extendRetry(now.Add(delay))
-			if err := c.put(ctx, c.base+"/.global-retry", CacheEntry{RetryAt: c.globalRetry()}); err != nil {
+			if err := c.put(ctx, c.base+"/.global-retry", CacheEntry{Status: resp.StatusCode, RetryAt: c.globalRetry()}); err != nil {
 				return fmt.Errorf("persist musicbrainz global backoff: %w", err)
 			}
 			if attempt < c.maxRetries {
@@ -202,9 +219,9 @@ func (c *Client) GetJSON(ctx context.Context, path string, out any) error {
 			return fmt.Errorf("persist musicbrainz response: %w", err)
 		}
 		if transient {
-			return &BackoffError{RetryAt: entry.RetryAt}
+			return &BackoffError{RetryAt: entry.RetryAt, StatusCode: entry.Status}
 		}
-		return fmt.Errorf("musicbrainz status %d", resp.StatusCode)
+		return &HTTPStatusError{StatusCode: resp.StatusCode}
 	}
 }
 

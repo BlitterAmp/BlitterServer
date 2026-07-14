@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 
 	"github.com/BlitterAmp/BlitterServer/internal/source"
@@ -133,5 +134,48 @@ func TestChangesSincePaginates(t *testing.T) {
 	}
 	if len(seen) != 9 {
 		t.Fatalf("paged total=%d want 9", len(seen))
+	}
+}
+
+func TestChangesSnapshotPinsRowsAndVersionToOneReadTransaction(t *testing.T) {
+	ctx := context.Background()
+	s := indexFixture(t)
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	version, err := libraryChangesVersionTx(ctx, tx)
+	if err != nil || version != 1 {
+		t.Fatalf("snapshot version=%d err=%v", version, err)
+	}
+
+	writer, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newVersion, err := nextScanSeqTx(ctx, writer)
+	if err == nil {
+		_, err = writer.ExecContext(ctx, `UPDATE tracks SET title='Committed Later',change_seq=? WHERE track_id=(SELECT min(track_id) FROM tracks)`, newVersion)
+	}
+	if err == nil {
+		err = writer.Commit()
+	} else {
+		_ = writer.Rollback()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	changes, _, err := changesSinceQuery(ctx, tx, 1, "", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != 1 || len(changes) != 0 {
+		t.Fatalf("snapshot exposed version=%d changes=%+v", version, changes)
+	}
+	publicChanges, _, publicVersion, err := s.ChangesSnapshot(ctx, 1, "", 100)
+	if err != nil || publicVersion != newVersion || len(publicChanges) != 1 || publicChanges[0].ChangeSeq != newVersion {
+		t.Fatalf("next snapshot version=%d changes=%+v err=%v", publicVersion, publicChanges, err)
 	}
 }

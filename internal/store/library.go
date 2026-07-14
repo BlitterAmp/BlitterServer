@@ -484,8 +484,8 @@ func (s *Store) ArtistsNeedingArtAt(ctx context.Context, now time.Time, limit in
 	return out, rows.Err()
 }
 
-// SetAlbumArt/SetArtistArt attach fetched art and bump change_seq so clients
-// pick the new cover up via delta sync. seq is a fresh NextScanSeq for the run.
+// SetAlbumArt/SetArtistArt attach fetched art using a caller-supplied change
+// sequence. Enrichment uses the atomic AtNextSequence variants instead.
 func (s *Store) SetAlbumArt(ctx context.Context, albumID, artID string, seq int64) (bool, error) {
 	result, err := s.db.ExecContext(ctx,
 		`UPDATE albums SET art_id = ?, art_tried = 1, art_tried_at = ?, change_seq = ? WHERE album_id = ? AND art_id IS NULL`, artID, time.Now().Unix(), seq, albumID)
