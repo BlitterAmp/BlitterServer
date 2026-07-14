@@ -1885,6 +1885,51 @@ paths:
         "204": { description: Removed }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
+  /admin/api/integrations/discogs:
+    get:
+      operationId: adminGetDiscogs
+      tags: [admin]
+      summary: Discogs config state
+      description: Discogs supplies album and artist artwork during enrichment.
+      security: [{ adminSession: [] }]
+      responses:
+        "200":
+          description: Config
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [configured]
+                properties:
+                  configured: { type: boolean }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    put:
+      operationId: adminSetDiscogs
+      tags: [admin]
+      summary: Set the Discogs personal access token
+      security: [{ adminSession: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [personalToken]
+              properties:
+                personalToken: { type: string, writeOnly: true }
+      responses:
+        "204": { description: Saved }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    delete:
+      operationId: adminDeleteDiscogs
+      tags: [admin]
+      summary: Remove the Discogs personal access token
+      security: [{ adminSession: [] }]
+      responses:
+        "204": { description: Removed }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
   /admin/api/profiles:
     get:
       operationId: adminListProfiles

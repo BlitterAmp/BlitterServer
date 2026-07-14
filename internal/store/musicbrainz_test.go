@@ -97,8 +97,11 @@ func TestMusicBrainzEligibilityUsesPersistedDeadline(t *testing.T) {
 	if due, err := s.DueMusicBrainzAlbums(ctx, next.Add(-time.Second), 10); err != nil || len(due) != 0 {
 		t.Fatalf("early due=%d err=%v", len(due), err)
 	}
-	if due, err := s.DueMusicBrainzAlbums(ctx, next.Add(time.Second), 10); err != nil || len(due) != 1 {
-		t.Fatalf("overdue=%d err=%v", len(due), err)
+	if due, err := s.DueMusicBrainzAlbums(ctx, next.Add(time.Second), 10); err != nil || len(due) != 0 {
+		t.Fatalf("matched album became due after deadline: %d err=%v", len(due), err)
+	}
+	if n, err := s.CountDueMusicBrainzAlbums(ctx, next.Add(time.Second)); err != nil || n != 0 {
+		t.Fatalf("matched album counted after deadline: %d err=%v", n, err)
 	}
 }
 
@@ -446,5 +449,20 @@ func TestApplyConsensusPreservesExistingReleaseGroup(t *testing.T) {
 	}
 	if rg != "rg-keep" {
 		t.Fatalf("release group erased: %q", rg)
+	}
+}
+
+func TestCountDueMusicBrainzAlbums(t *testing.T) {
+	s, album := musicBrainzAlbumFixture(t)
+	ctx := context.Background()
+	now := time.Now()
+	if n, err := s.CountDueMusicBrainzAlbums(ctx, now); err != nil || n != 1 {
+		t.Fatalf("due=%d err=%v", n, err)
+	}
+	if err := s.RecordMusicBrainzResult(ctx, album.AlbumID, "matched", MusicBrainzCandidate{}, nil, now.Add(7*24*time.Hour), ""); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.CountDueMusicBrainzAlbums(ctx, now); err != nil || n != 0 {
+		t.Fatalf("matched album still due: %d err=%v", n, err)
 	}
 }

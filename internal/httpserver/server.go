@@ -97,10 +97,12 @@ func handlerWithServer(st *store.Store, mgr *library.Manager, dataDir, version s
 		panic(err)
 	}
 	mgr.SetEnricher(enrich.New(st, bus, filepath.Join(dataDir, "art"), enrich.Config{
-		LastfmKey:     func(ctx context.Context) string { v, _, _ := st.GetSetting(ctx, "lastfm_api_key"); return v },
-		FanartKey:     func(ctx context.Context) string { v, _, _ := st.GetSetting(ctx, "fanart_api_key"); return v },
-		MusicBrainz:   mb,
-		ProviderCache: providerCache,
+		LastfmKey:        func(ctx context.Context) string { v, _, _ := st.GetSetting(ctx, "lastfm_api_key"); return v },
+		FanartKey:        func(ctx context.Context) string { v, _, _ := st.GetSetting(ctx, "fanart_api_key"); return v },
+		DiscogsToken:     func(ctx context.Context) string { v, _, _ := st.GetSetting(ctx, "discogs_personal_token"); return v },
+		DiscogsUserAgent: "BlitterServer/" + version + " (https://github.com/BlitterAmp/BlitterServer)",
+		MusicBrainz:      mb,
+		ProviderCache:    providerCache,
 	}))
 	artMgr := artifacts.NewManager(st, mgr, bus, dataDir)
 	artMgr.Start()

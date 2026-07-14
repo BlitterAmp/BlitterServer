@@ -16,6 +16,7 @@ var integrationCredentialKeys = []string{
 	"lastfm_api_key",
 	"lastfm_shared_secret",
 	"fanart_api_key",
+	"discogs_personal_token",
 }
 
 const credentialSidecarMagic = "BIC1"

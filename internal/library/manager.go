@@ -54,6 +54,9 @@ type Manager struct {
 	bus      *events.Bus
 	enricher Enricher
 
+	// onScanStart is a test seam observing when a scan begins.
+	onScanStart func()
+
 	mu                sync.Mutex
 	src               source.MusicSource
 	scanning          bool
@@ -341,6 +344,9 @@ func (m *Manager) Rescan(ctx context.Context) error {
 
 func (m *Manager) scan(src source.MusicSource) {
 	defer m.scanWG.Done()
+	if m.onScanStart != nil {
+		m.onScanStart()
+	}
 	ctx := m.lifecycleCtx
 	log := logging.From(ctx).With("component", "library.scan", "source", src.Kind())
 	start := time.Now()
@@ -364,6 +370,7 @@ func (m *Manager) scan(src source.MusicSource) {
 	if err != nil {
 		log.Error("scan failed", "err", err, "duration_ms", time.Since(start).Milliseconds())
 		_ = m.st.SetSetting(ctx, settingLastScanError, err.Error())
+		m.TriggerEnrichment()
 		return
 	}
 	_ = m.st.SetSetting(ctx, settingLastScanError, "")

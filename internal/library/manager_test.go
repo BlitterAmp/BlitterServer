@@ -221,6 +221,37 @@ func TestSetEnricherTriggersStartupAndPeriodicPasses(t *testing.T) {
 	m.Close()
 }
 
+func TestSetEnricherScansConfiguredSourceBeforeStartupPass(t *testing.T) {
+	s, dataDir := openStore(t)
+	m := NewManager(s, dataDir)
+	src := &sequenceSource{
+		entered: make(chan struct{}), release: make(chan struct{}),
+		meta: source.TrackMeta{
+			NativeID: "startup.flac", Title: "Startup", Album: "Startup Album",
+			PrimaryArtist: source.ArtistReference{Name: "Artist"},
+			AlbumCredits:  []source.ArtistCredit{{Name: "Artist"}}, TrackCredits: []source.ArtistCredit{{Name: "Artist"}},
+			Container: "flac", Codec: "flac", Version: 1,
+		},
+	}
+	m.mu.Lock()
+	m.src = src
+	m.mu.Unlock()
+	e := newBlockingEnricher()
+	m.SetEnricher(e)
+	<-src.entered
+	select {
+	case <-e.started:
+		t.Fatal("startup enrichment ran before configured scan completed")
+	default:
+	}
+	close(src.release)
+	if run := <-e.started; run != 1 {
+		t.Fatalf("post-scan run=%d", run)
+	}
+	e.release <- struct{}{}
+	m.Close()
+}
+
 func TestCloseCancelsPeriodicEnrichmentWait(t *testing.T) {
 	s, dataDir := openStore(t)
 	m := NewManager(s, dataDir)
@@ -328,6 +359,7 @@ type sequenceSource struct {
 	entered chan struct{}
 	release chan struct{}
 	meta    source.TrackMeta
+	err     error
 }
 
 func (s *sequenceSource) Kind() string { return "filesystem" }
@@ -338,7 +370,7 @@ func (s *sequenceSource) Scan(ctx context.Context, emit func(source.TrackMeta) e
 	close(s.entered)
 	select {
 	case <-s.release:
-		return nil
+		return s.err
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -639,3 +671,106 @@ func TestCloseCancelsResetRetryBackoff(t *testing.T) {
 		t.Fatal("close did not cancel reset retry backoff")
 	}
 }
+
+func TestStartupScanTriggersEnrichmentAfterCompletion(t *testing.T) {
+	s, dataDir := openStore(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "one.flac"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSetting(ctx, settingSourceKind, "filesystem"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSetting(ctx, settingFilesystemPath, dir); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewManager(s, dataDir)
+	defer m.Close()
+
+	var mu sync.Mutex
+	var order []string
+	enrichmentStarted := make(chan struct{}, 1)
+	enricher := enricherFunc(func(context.Context) {
+		mu.Lock()
+		order = append(order, "enrich")
+		mu.Unlock()
+		enrichmentStarted <- struct{}{}
+	})
+	scanStarted := make(chan struct{}, 1)
+	m.onScanStart = func() {
+		mu.Lock()
+		order = append(order, "scan")
+		mu.Unlock()
+		select {
+		case scanStarted <- struct{}{}:
+		default:
+		}
+	}
+	m.SetEnricher(enricher)
+
+	select {
+	case <-scanStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("startup scan never ran")
+	}
+	select {
+	case <-enrichmentStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("successful startup scan did not trigger enrichment")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(order) < 2 || order[0] != "scan" || order[1] != "enrich" {
+		t.Fatalf("startup order = %v, want scan before enrichment", order)
+	}
+}
+
+func TestStartupScanFailureTriggersEnrichmentAfterScanEnds(t *testing.T) {
+	s, dataDir := openStore(t)
+	m := NewManager(s, dataDir)
+	defer m.Close()
+	src := &sequenceSource{
+		entered: make(chan struct{}), release: make(chan struct{}), err: errors.New("synthetic scan failure"),
+		meta: source.TrackMeta{
+			NativeID: "startup.flac", Title: "Startup", Album: "Startup Album",
+			PrimaryArtist: source.ArtistReference{Name: "Artist"},
+			AlbumCredits:  []source.ArtistCredit{{Name: "Artist"}}, TrackCredits: []source.ArtistCredit{{Name: "Artist"}},
+			Container: "flac", Codec: "flac", Version: 1,
+		},
+	}
+	m.mu.Lock()
+	m.src = src
+	m.mu.Unlock()
+	e := newBlockingEnricher()
+	m.SetEnricher(e)
+
+	select {
+	case <-src.entered:
+	case <-time.After(time.Second):
+		t.Fatal("startup scan did not begin")
+	}
+	select {
+	case <-e.started:
+		t.Fatal("enrichment ran concurrently with failed startup scan")
+	default:
+	}
+	close(src.release)
+	select {
+	case run := <-e.started:
+		if run != 1 {
+			t.Fatalf("post-failure run=%d", run)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("startup enrichment did not run after scan failure")
+	}
+	if status := m.Status(context.Background()); status.Scanning || status.LastScanError == "" {
+		t.Fatalf("post-failure status=%+v", status)
+	}
+	e.release <- struct{}{}
+}
+
+type enricherFunc func(context.Context)
+
+func (f enricherFunc) Run(ctx context.Context) { f(ctx) }

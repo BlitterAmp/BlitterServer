@@ -5,19 +5,22 @@
   let lidarr = $state(null)
   let lastfm = $state(null)
   let fanart = $state(null)
+  let discogs = $state(null)
   let loading = $state(true)
   let error = $state('')
   let lidarrForm = $state({ baseUrl: '', apiKey: '' })
   let lastfmForm = $state({ apiKey: '', sharedSecret: '' })
   let fanartKey = $state('')
+  let discogsToken = $state('')
   let testResult = $state(null)
 
   async function load() {
     try {
       lidarr = await api.get('/admin/api/integrations/lidarr')
-      ;[lastfm, fanart] = await Promise.all([
+      ;[lastfm, fanart, discogs] = await Promise.all([
         api.get('/admin/api/integrations/lastfm'),
         api.get('/admin/api/integrations/fanart'),
+        api.get('/admin/api/integrations/discogs'),
       ])
       if (lidarr?.baseUrl) lidarrForm.baseUrl = lidarr.baseUrl
     } catch (err) {
@@ -71,6 +74,18 @@
   async function deleteFanart() {
     error = ''
     try { await api.del('/admin/api/integrations/fanart'); await load() }
+    catch (err) { error = err.message }
+  }
+
+  async function saveDiscogs(e) {
+    e.preventDefault(); error = ''
+    try { await api.put('/admin/api/integrations/discogs', { personalToken: discogsToken }); discogsToken = ''; await load() }
+    catch (err) { error = err.message }
+  }
+
+  async function deleteDiscogs() {
+    error = ''
+    try { await api.del('/admin/api/integrations/discogs'); await load() }
     catch (err) { error = err.message }
   }
 
@@ -148,6 +163,23 @@
       <div class="card-actions">
         <button class="btn btn-primary btn-sm" type="submit" disabled={!fanartKey}>Save</button>
         {#if fanart?.configured}<button class="btn btn-outline btn-error btn-sm" type="button" onclick={deleteFanart}>Remove</button>{/if}
+      </div>
+    </form>
+  </div>
+
+  <div class="card bg-base-100 shadow-sm">
+    <form class="card-body" onsubmit={saveDiscogs}>
+      <h2 class="card-title text-base">Discogs
+        <span class="badge badge-sm {discogs?.configured ? 'badge-success' : 'badge-ghost'}">{discogs?.configured ? 'configured' : 'not configured'}</span>
+      </h2>
+      <p class="text-sm opacity-70">Album and artist artwork fallback. The personal access token is write-only.</p>
+      <label class="form-control">
+        <span class="label label-text">Personal access token {#if discogs?.configured}<span class="opacity-60">(set - enter to replace)</span>{/if}</span>
+        <input class="input input-bordered w-full font-mono" type="password" bind:value={discogsToken} autocomplete="off" />
+      </label>
+      <div class="card-actions">
+        <button class="btn btn-primary btn-sm" type="submit" disabled={!discogsToken}>Save</button>
+        {#if discogs?.configured}<button class="btn btn-outline btn-error btn-sm" type="button" onclick={deleteDiscogs}>Remove</button>{/if}
       </div>
     </form>
   </div>

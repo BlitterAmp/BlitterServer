@@ -133,8 +133,17 @@ func (s *Store) UpsertTrack(ctx context.Context, kind string, m source.TrackMeta
 		_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM album_musicbrainz_matches WHERE album_id=? AND state='matched')`, linkedAlbumID).Scan(&preserveResolved)
 	}
 
-	grouping := m.PrimaryArtist
-	if grouping.Name == "" && len(m.TrackCredits) > 0 {
+	grouping := source.ArtistReference{}
+	for _, credit := range m.AlbumCredits {
+		if credit.Name != "" || credit.MBID != "" {
+			grouping = source.ArtistReference{Name: credit.Name, MBID: credit.MBID}
+			break
+		}
+	}
+	if grouping.Name == "" && grouping.MBID == "" {
+		grouping = m.PrimaryArtist
+	}
+	if grouping.Name == "" && grouping.MBID == "" && len(m.TrackCredits) > 0 {
 		grouping = source.ArtistReference{Name: m.TrackCredits[0].Name, MBID: m.TrackCredits[0].MBID}
 	}
 	artistID, err := s.upsertArtist(ctx, grouping.Name, grouping.MBID, linkedArtistID, now, seq)
@@ -457,7 +466,7 @@ func (s *Store) ArtistsNeedingArt(ctx context.Context, limit int) ([]ArtistArtNe
 func (s *Store) ArtistsNeedingArtAt(ctx context.Context, now time.Time, limit int) ([]ArtistArtNeed, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT artist_id, name, COALESCE(art_id, ''), COALESCE(musicbrainz_id,'') FROM artists
-		WHERE missing = 0 AND COALESCE(musicbrainz_id,'') != '' AND (`+primaryArtistPredicate("artists")+`) AND art_next_attempt_at <= ?
+		WHERE missing = 0 AND (`+primaryArtistPredicate("artists")+`) AND art_next_attempt_at <= ?
 		  AND (art_id IS NULL OR EXISTS (SELECT 1 FROM albums al WHERE al.artist_id=artists.artist_id AND al.art_id=artists.art_id AND al.missing=0))
 		LIMIT ?`, now.Unix(), limit)
 	if err != nil {
@@ -721,7 +730,7 @@ func (s *Store) ListArtists(ctx context.Context, sort, cur string, limit int) ([
 	}
 	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT a.artist_id, a.name, %s, %s, COALESCE(a.musicbrainz_id,''),
-		       (SELECT count(DISTINCT al.album_id) FROM albums al JOIN album_artist_credits ac ON ac.album_id=al.album_id WHERE ac.artist_id = a.artist_id AND al.missing = 0),
+		       (SELECT count(*) FROM albums al WHERE al.artist_id = a.artist_id AND al.missing = 0),
 		       (SELECT count(DISTINCT t.track_id) FROM tracks t JOIN track_artist_credits c ON c.track_id=t.track_id WHERE c.artist_id = a.artist_id AND t.missing = 0)
 		FROM artists a WHERE %s ORDER BY %s %s, a.artist_id LIMIT %d`,
 		artistArt, keyCol, where, keyCol, dir, limit+1), args...)
@@ -785,7 +794,7 @@ func (s *Store) GetArtist(ctx context.Context, artistID string) (ArtistRow, bool
 	var a ArtistRow
 	err := s.db.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT a.artist_id, a.name, %s, COALESCE(a.musicbrainz_id,''),
-		       (SELECT count(DISTINCT al.album_id) FROM albums al JOIN album_artist_credits ac ON ac.album_id=al.album_id WHERE ac.artist_id = a.artist_id AND al.missing = 0),
+		       (SELECT count(*) FROM albums al WHERE al.artist_id = a.artist_id AND al.missing = 0),
 		       (SELECT count(DISTINCT t.track_id) FROM tracks t JOIN track_artist_credits c ON c.track_id=t.track_id WHERE c.artist_id = a.artist_id AND t.missing = 0)
 		FROM artists a WHERE a.artist_id = ? AND a.missing = 0`, artistArt), artistID).
 		Scan(&a.ArtistID, &a.Name, &a.ArtID, &a.MusicBrainzID, &a.AlbumCount, &a.TrackCount)
@@ -914,7 +923,7 @@ func (s *Store) GetAlbum(ctx context.Context, albumID string) (AlbumRow, bool, e
 
 func (s *Store) ListArtistAlbums(ctx context.Context, artistID string) ([]AlbumRow, error) {
 	rows, err := s.db.QueryContext(ctx,
-		albumSelect+` WHERE al.missing = 0 AND EXISTS (SELECT 1 FROM album_artist_credits c WHERE c.album_id=al.album_id AND c.artist_id=?) ORDER BY COALESCE(al.year, 9999), al.title`, artistID)
+		albumSelect+` WHERE al.missing = 0 AND al.artist_id=? ORDER BY COALESCE(al.year, 9999), al.title`, artistID)
 	if err != nil {
 		return nil, err
 	}
@@ -1142,7 +1151,7 @@ func (s *Store) SearchLibrary(ctx context.Context, q string) (LibrarySearch, err
 
 	arows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT a.artist_id, a.name, %s, COALESCE(a.musicbrainz_id,''),
-		       (SELECT count(DISTINCT al.album_id) FROM albums al JOIN album_artist_credits ac ON ac.album_id=al.album_id WHERE ac.artist_id = a.artist_id AND al.missing = 0),
+		       (SELECT count(*) FROM albums al WHERE al.artist_id = a.artist_id AND al.missing = 0),
 		       (SELECT count(DISTINCT t.track_id) FROM tracks t JOIN track_artist_credits c ON c.track_id=t.track_id WHERE c.artist_id=a.artist_id AND t.missing=0)
 		FROM artists a WHERE a.missing = 0 AND (a.name LIKE ? ESCAPE '\' OR EXISTS (SELECT 1 FROM artist_aliases aa WHERE aa.artist_id=a.artist_id AND aa.name LIKE ? ESCAPE '\')) ORDER BY a.name LIMIT 25`, artistArt), pattern, pattern)
 	if err != nil {
@@ -1217,4 +1226,46 @@ func nullStr(v string) any {
 		return nil
 	}
 	return v
+}
+
+// KnownTrackVersions returns nativeID → stored version (source mtime) for a
+// source, so incremental scans can skip probing unchanged files.
+func (s *Store) KnownTrackVersions(ctx context.Context, sourceKind string) (map[string]int64, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT native_id, version FROM tracks WHERE source_kind = ?`, sourceKind)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	known := map[string]int64{}
+	for rows.Next() {
+		var id string
+		var version int64
+		if err := rows.Scan(&id, &version); err != nil {
+			return nil, err
+		}
+		known[id] = version
+	}
+	return known, rows.Err()
+}
+
+// MarkTracksSeen bumps seen_seq for unchanged files an incremental scan
+// skipped, keeping them alive through FinishScan without content writes.
+func (s *Store) MarkTracksSeen(ctx context.Context, sourceKind string, nativeIDs []string, seq int64) error {
+	const chunk = 400
+	for start := 0; start < len(nativeIDs); start += chunk {
+		end := min(start+chunk, len(nativeIDs))
+		batch := nativeIDs[start:end]
+		args := make([]any, 0, len(batch)+2)
+		args = append(args, seq, sourceKind)
+		placeholders := strings.Repeat("?,", len(batch))
+		for _, id := range batch {
+			args = append(args, id)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`UPDATE tracks SET seen_seq = ?, missing = 0 WHERE source_kind = ? AND native_id IN (`+placeholders[:len(placeholders)-1]+`)`,
+			args...); err != nil {
+			return err
+		}
+	}
+	return nil
 }

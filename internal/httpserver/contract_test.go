@@ -162,6 +162,7 @@ func TestEveryUnimplementedOperationAnswersHonestly(t *testing.T) {
 		"adminTestLidarr": true,
 		"adminGetLastfm":  true, "adminSetLastfm": true, "adminDeleteLastfm": true,
 		"adminGetFanart": true, "adminSetFanart": true, "adminDeleteFanart": true,
+		"adminGetDiscogs": true, "adminSetDiscogs": true, "adminDeleteDiscogs": true,
 	}
 	client := ts.Client()
 

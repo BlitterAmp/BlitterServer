@@ -286,7 +286,7 @@ func TestMusicBrainzIdentityAndStructuredCredits(t *testing.T) {
 		t.Fatalf("primary identity: %+v", primary)
 	}
 	search, err := s.SearchLibrary(ctx, "Guest")
-	if err != nil || len(search.Artists) != 1 || search.Artists[0].MusicBrainzID != guestMBID {
+	if err != nil || len(search.Artists) != 1 || search.Artists[0].MusicBrainzID != guestMBID || search.Artists[0].AlbumCount != 0 || search.Artists[0].TrackCount != 1 {
 		t.Fatalf("guest search: %v %+v", err, search.Artists)
 	}
 	guest, found, err := s.GetArtist(ctx, search.Artists[0].ArtistID)
@@ -474,6 +474,70 @@ func TestFinishScanKeepsAlbumAndCreditedArtistsPresent(t *testing.T) {
 	result, err := s.SearchLibrary(ctx, "Performer")
 	if err != nil || len(result.Artists) != 1 || result.Artists[0].TrackCount != 1 {
 		t.Fatalf("credited artist search count: err=%v result=%+v", err, result.Artists)
+	}
+}
+
+func TestAlbumOwnershipUsesAlbumCreditsWhileTrackBrowseUsesCredits(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	seq, _ := s.NextScanSeq(ctx)
+	for i, track := range []source.TrackMeta{
+		{
+			NativeID: "compilation/one.flac", Title: "One", Album: "Shared Album",
+			PrimaryArtist: source.ArtistReference{Name: "Guest One"},
+			AlbumCredits:  []source.ArtistCredit{{Name: "Album Owner"}},
+			TrackCredits:  []source.ArtistCredit{{Name: "Guest One"}},
+			Container:     "flac", Codec: "flac", Version: 1,
+		},
+		{
+			NativeID: "compilation/two.flac", Title: "Two", Album: "Shared Album",
+			PrimaryArtist: source.ArtistReference{Name: "Guest Two"},
+			AlbumCredits:  []source.ArtistCredit{{Name: "Album Owner"}},
+			TrackCredits:  []source.ArtistCredit{{Name: "Guest Two"}},
+			Container:     "flac", Codec: "flac", Version: 1,
+		},
+	} {
+		track.Index = i + 1
+		if err := s.UpsertTrack(ctx, "filesystem", track, "", seq); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.FinishScan(ctx, "filesystem", seq); err != nil {
+		t.Fatal(err)
+	}
+
+	albums, _, err := s.ListAlbums(ctx, "title", "", 10)
+	if err != nil || len(albums) != 1 || albums[0].ArtistName != "Album Owner" {
+		t.Fatalf("albums=%+v err=%v", albums, err)
+	}
+	artists, _, err := s.ListArtists(ctx, "title", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := make(map[string]ArtistRow, len(artists))
+	for _, artist := range artists {
+		byName[artist.Name] = artist
+	}
+	owner := byName["Album Owner"]
+	if owner.AlbumCount != 1 {
+		t.Fatalf("owner=%+v", owner)
+	}
+	owned, err := s.ListArtistAlbums(ctx, owner.ArtistID)
+	if err != nil || len(owned) != 1 || owned[0].AlbumID != albums[0].AlbumID {
+		t.Fatalf("owned albums=%+v err=%v", owned, err)
+	}
+	guest := byName["Guest One"]
+	guestDetail, found, err := s.GetArtist(ctx, guest.ArtistID)
+	if err != nil || !found || guestDetail.AlbumCount != 0 || guestDetail.TrackCount != 1 {
+		t.Fatalf("guest=%+v found=%v err=%v", guestDetail, found, err)
+	}
+	guestAlbums, err := s.ListArtistAlbums(ctx, guest.ArtistID)
+	if err != nil || len(guestAlbums) != 0 {
+		t.Fatalf("guest albums=%+v err=%v", guestAlbums, err)
+	}
+	guestTracks, err := s.ListArtistTracks(ctx, guest.ArtistID)
+	if err != nil || len(guestTracks) != 1 || guestTracks[0].Title != "One" {
+		t.Fatalf("guest tracks=%+v err=%v", guestTracks, err)
 	}
 }
 
@@ -747,5 +811,34 @@ func TestResolveTrackNative(t *testing.T) {
 	}
 	if _, _, found, _ := s.ResolveTrackNative(ctx, "trk_nope"); found {
 		t.Fatal("unknown track must not resolve")
+	}
+}
+
+// Incremental scans skip probing unchanged files: the store supplies known
+// versions and marks skipped files seen so FinishScan keeps them alive.
+func TestKnownVersionsAndMarkSeenSurviveFinishScan(t *testing.T) {
+	s := indexFixture(t)
+	ctx := context.Background()
+	known, err := s.KnownTrackVersions(ctx, "filesystem")
+	if err != nil || len(known) == 0 {
+		t.Fatalf("known=%v err=%v", known, err)
+	}
+	seq, _ := s.NextScanSeq(ctx)
+	ids := make([]string, 0, len(known))
+	for id := range known {
+		ids = append(ids, id)
+	}
+	if err := s.MarkTracksSeen(ctx, "filesystem", ids, seq); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinishScan(ctx, "filesystem", seq); err != nil {
+		t.Fatal(err)
+	}
+	var missing int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM tracks WHERE missing=1`).Scan(&missing); err != nil {
+		t.Fatal(err)
+	}
+	if missing != 0 {
+		t.Fatalf("unchanged tracks marked missing: %d", missing)
 	}
 }

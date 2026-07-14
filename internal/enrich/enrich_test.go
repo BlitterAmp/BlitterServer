@@ -142,32 +142,138 @@ func TestFanartAlbumImageDoesNotFallback(t *testing.T) {
 func TestAlbumArtProviderOrder(t *testing.T) {
 	st, ctx := seedAlbum(t)
 	var calls []string
-	var providerURL string
 	providers := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls = append(calls, r.URL.Path)
 		switch r.URL.Path {
+		case "/":
+			_, _ = w.Write([]byte(`{"album":{"image":[]}}`))
+		case "/database/search":
+			_, _ = w.Write([]byte(`{"results":[{"id":9,"type":"master","title":"artist - album"}]}`))
+		case "/masters/9":
+			_, _ = w.Write([]byte(`{"title":"album","artists":[{"name":"artist"}],"images":[]}`))
+		case "/music/albums/rg-order":
+			_, _ = w.Write([]byte(`{"albums":[{"release_group_id":"rg-order","albumcover":[]}]}`))
 		case "/release-group/rg-order/front-500":
 			w.WriteHeader(http.StatusNotFound)
-		case "/music/albums/rg-order":
-			_, _ = w.Write([]byte(`{"albums":[{"release_group_id":"rg-order","albumcover":[{"url":"` + providerURL + `/fanart-image"}]}]}`))
-		case "/fanart-image":
-			w.WriteHeader(http.StatusNotFound)
-		default:
-			_, _ = w.Write([]byte(`{"album":{"image":[]}}`))
 		}
 	}))
 	defer providers.Close()
-	providerURL = providers.URL
 
 	e := New(st, nil, t.TempDir(), Config{
-		FanartKey: func(context.Context) string { return "fanart-key" },
-		LastfmKey: func(context.Context) string { return "lastfm-key" },
+		FanartKey:        func(context.Context) string { return "fanart-key" },
+		LastfmKey:        func(context.Context) string { return "lastfm-key" },
+		DiscogsToken:     func(context.Context) string { return "discogs-token" },
+		DiscogsUserAgent: testDiscogsUA,
 	})
-	e.CAABase, e.FanartBase, e.LastfmBase = providers.URL, providers.URL, providers.URL
-	e.albumArtForReleaseGroup(ctx, "rg-order", "artist", "album")
-	want := []string{"/release-group/rg-order/front-500", "/music/albums/rg-order", "/fanart-image", "/"}
+	e.CAABase, e.FanartBase, e.LastfmBase, e.DiscogsBase = providers.URL, providers.URL, providers.URL, providers.URL
+	e.providerPacers = map[string]*providerPacer{}
+	e.albumArtOutcome(ctx, "rg-order", "artist", "album")
+	want := []string{"/", "/database/search", "/masters/9", "/music/albums/rg-order", "/release-group/rg-order/front-500"}
 	if strings.Join(calls, ",") != strings.Join(want, ",") {
 		t.Fatalf("provider calls=%v want %v", calls, want)
+	}
+}
+
+func TestArtistArtProviderOrder(t *testing.T) {
+	st, ctx := seedAlbum(t)
+	var calls []string
+	providers := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.URL.Path)
+		switch r.URL.Path {
+		case "/":
+			_, _ = w.Write([]byte(`{"artist":{"image":[]}}`))
+		case "/database/search":
+			_, _ = w.Write([]byte(`{"results":[{"id":7,"type":"artist","title":"artist"}]}`))
+		case "/artists/7":
+			_, _ = w.Write([]byte(`{"name":"artist","images":[]}`))
+		case "/music/mbid":
+			_, _ = w.Write([]byte(`{"artistthumb":[]}`))
+		}
+	}))
+	defer providers.Close()
+
+	e := New(st, nil, t.TempDir(), Config{
+		LastfmKey:        func(context.Context) string { return "lastfm-key" },
+		DiscogsToken:     func(context.Context) string { return "discogs-token" },
+		DiscogsUserAgent: testDiscogsUA,
+		FanartKey:        func(context.Context) string { return "fanart-key" },
+	})
+	e.LastfmBase, e.DiscogsBase, e.FanartBase = providers.URL, providers.URL, providers.URL
+	e.providerPacers = map[string]*providerPacer{}
+	e.artistArtOutcome(ctx, "artist", "mbid")
+	want := []string{"/", "/database/search", "/artists/7", "/music/mbid"}
+	if strings.Join(calls, ",") != strings.Join(want, ",") {
+		t.Fatalf("provider calls=%v want %v", calls, want)
+	}
+}
+
+func TestAlbumArtDefersMusicBrainzUntilLastfmAndDiscogsMiss(t *testing.T) {
+	st, ctx := seedAlbum(t)
+	var calls []string
+	providers := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, "provider:"+r.URL.Path)
+		switch r.URL.Path {
+		case "/":
+			_, _ = w.Write([]byte(`{"album":{"image":[]}}`))
+		case "/database/search":
+			_, _ = w.Write([]byte(`{"results":[]}`))
+		case "/music/albums/rg-late":
+			_, _ = w.Write([]byte(`{"albums":[]}`))
+		case "/release-group/rg-late/front-500":
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer providers.Close()
+	mb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls = append(calls, "musicbrainz")
+		_, _ = w.Write([]byte(`{"release-groups":[{"id":"rg-late","title":"album"}]}`))
+	}))
+	defer mb.Close()
+
+	e := New(st, nil, t.TempDir(), Config{
+		LastfmKey:        func(context.Context) string { return "lastfm-key" },
+		DiscogsToken:     func(context.Context) string { return "discogs-token" },
+		DiscogsUserAgent: testDiscogsUA,
+		FanartKey:        func(context.Context) string { return "fanart-key" },
+		MusicBrainz:      testMusicBrainzClient(t, st, mb.URL),
+	})
+	e.LastfmBase, e.DiscogsBase, e.FanartBase, e.CAABase = providers.URL, providers.URL, providers.URL, providers.URL
+	e.providerPacers = map[string]*providerPacer{}
+	e.albumArtOutcome(ctx, "", "artist", "album")
+	want := []string{"provider:/", "provider:/database/search", "musicbrainz", "provider:/music/albums/rg-late", "provider:/release-group/rg-late/front-500"}
+	if strings.Join(calls, ",") != strings.Join(want, ",") {
+		t.Fatalf("calls=%v want %v", calls, want)
+	}
+}
+
+func TestProviderTransientsDoNotPreventLaterAlbumSuccess(t *testing.T) {
+	st, ctx := seedAlbum(t)
+	var base string
+	providers := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.WriteHeader(http.StatusInternalServerError)
+		case "/database/search":
+			w.WriteHeader(http.StatusForbidden)
+		case "/music/albums/rg":
+			_, _ = w.Write([]byte(`{"albums":[{"release_group_id":"rg","albumcover":[{"url":"` + base + `/fanart-image"}]}]}`))
+		case "/fanart-image":
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write(pngBytes)
+		}
+	}))
+	defer providers.Close()
+	base = providers.URL
+	e := New(st, nil, t.TempDir(), Config{
+		LastfmKey:        func(context.Context) string { return "lastfm-key" },
+		DiscogsToken:     func(context.Context) string { return "discogs-token" },
+		DiscogsUserAgent: testDiscogsUA,
+		FanartKey:        func(context.Context) string { return "fanart-key" },
+	})
+	e.LastfmBase, e.DiscogsBase, e.FanartBase, e.CAABase = providers.URL, providers.URL, providers.URL, providers.URL
+	e.providerPacers = map[string]*providerPacer{}
+	if data, _, outcome := e.albumArtOutcome(ctx, "rg", "artist", "album"); data == nil || outcome != lookupSuccess {
+		t.Fatalf("later fanart success data=%d outcome=%v", len(data), outcome)
 	}
 }
 
@@ -184,6 +290,108 @@ func TestLastfmAlbumGetInfoUsesAutocorrect(t *testing.T) {
 	e.lastfmAlbumImage(ctx, "key", "artist", "album")
 	if query.Get("autocorrect") != "1" {
 		t.Fatalf("autocorrect=%q", query.Get("autocorrect"))
+	}
+}
+
+func TestLastfmArtistGetInfoSelectsLargestImage(t *testing.T) {
+	st, ctx := seedAlbum(t)
+	var base string
+	lastfm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/artist.jpg" {
+			w.Header().Set("Content-Type", "image/jpeg")
+			_, _ = w.Write([]byte("artist-photo"))
+			return
+		}
+		q := r.URL.Query()
+		if q.Get("method") != "artist.getinfo" || q.Get("artist") != "The Band" || q.Get("autocorrect") != "1" || q.Get("format") != "json" {
+			t.Fatalf("artist.getInfo query=%v", q)
+		}
+		_, _ = w.Write([]byte(`{"artist":{"image":[{"#text":"` + base + `/small.jpg","size":"small"},{"#text":"` + base + `/artist.jpg","size":"extralarge"}]}}`))
+	}))
+	defer lastfm.Close()
+	base = lastfm.URL
+	e := New(st, nil, t.TempDir(), Config{LastfmKey: func(context.Context) string { return "key" }})
+	e.LastfmBase = lastfm.URL
+	e.providerPacers = map[string]*providerPacer{}
+	data, mime, outcome := e.lastfmArtistArtOutcome(ctx, "The Band")
+	if string(data) != "artist-photo" || mime != "image/jpeg" || outcome != lookupSuccess {
+		t.Fatalf("data=%q mime=%q outcome=%v", data, mime, outcome)
+	}
+}
+
+func TestArtistArtDefersMusicBrainzUntilFanart(t *testing.T) {
+	st, ctx := seedAlbum(t)
+	var calls []string
+	providers := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, "provider:"+r.URL.Path)
+		switch r.URL.Path {
+		case "/":
+			_, _ = w.Write([]byte(`{"artist":{"image":[]}}`))
+		case "/database/search":
+			_, _ = w.Write([]byte(`{"results":[]}`))
+		case "/music/artist-id":
+			_, _ = w.Write([]byte(`{"artistthumb":[]}`))
+		}
+	}))
+	defer providers.Close()
+	mb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls = append(calls, "musicbrainz")
+		_, _ = w.Write([]byte(`{"artists":[{"id":"artist-id","name":"Artist"}]}`))
+	}))
+	defer mb.Close()
+	e := New(st, nil, t.TempDir(), Config{
+		LastfmKey:        func(context.Context) string { return "lastfm-key" },
+		DiscogsToken:     func(context.Context) string { return "discogs-token" },
+		DiscogsUserAgent: testDiscogsUA,
+		FanartKey:        func(context.Context) string { return "fanart-key" },
+		MusicBrainz:      testMusicBrainzClient(t, st, mb.URL),
+	})
+	e.LastfmBase, e.DiscogsBase, e.FanartBase = providers.URL, providers.URL, providers.URL
+	e.providerPacers = map[string]*providerPacer{}
+	e.artistArtOutcome(ctx, "Artist", "")
+	want := []string{"provider:/", "provider:/database/search", "musicbrainz", "provider:/music/artist-id"}
+	if strings.Join(calls, ",") != strings.Join(want, ",") {
+		t.Fatalf("calls=%v want %v", calls, want)
+	}
+}
+
+func TestArtistStageRunsWithLastfmOrDiscogsConfigured(t *testing.T) {
+	for _, provider := range []string{"lastfm", "discogs"} {
+		t.Run(provider, func(t *testing.T) {
+			st, ctx := seedAlbum(t)
+			var base string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/":
+					_, _ = w.Write([]byte(`{"artist":{"image":[{"#text":"` + base + `/image","size":"extralarge"}]}}`))
+				case "/database/search":
+					_, _ = w.Write([]byte(`{"results":[{"id":1,"type":"artist","title":"The Band"}]}`))
+				case "/artists/1":
+					_, _ = w.Write([]byte(`{"name":"The Band","images":[{"type":"primary","uri":"` + base + `/image"}]}`))
+				case "/image":
+					w.Header().Set("Content-Type", "image/png")
+					_, _ = w.Write(pngBytes)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			base = srv.URL
+			cfg := Config{DiscogsUserAgent: testDiscogsUA}
+			if provider == "lastfm" {
+				cfg.LastfmKey = func(context.Context) string { return "key" }
+			} else {
+				cfg.DiscogsToken = func(context.Context) string { return "token" }
+			}
+			e := New(st, nil, t.TempDir(), cfg)
+			e.LastfmBase, e.DiscogsBase = srv.URL, srv.URL
+			e.providerPacers = map[string]*providerPacer{}
+			e.Run(ctx)
+			artists, _, err := st.ListArtists(ctx, "title", "", 10)
+			if err != nil || len(artists) != 1 || artists[0].ArtID == "" {
+				t.Fatalf("artist stage did not attach %s art: artists=%+v err=%v", provider, artists, err)
+			}
+		})
 	}
 }
 
@@ -205,11 +413,51 @@ func TestEnrichMarksTriedWhenNothingFound(t *testing.T) {
 }
 
 func TestEnrichArtistPhotoFromFanart(t *testing.T) {
-	st, ctx := seedAlbum(t)
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	seq, _ := st.NextScanSeq(ctx)
+	if err := st.UpsertTrack(ctx, "filesystem", source.TrackMeta{
+		NativeID: "compilation/song.flac", Title: "Song", Album: "Compilation",
+		PrimaryArtist: source.ArtistReference{Name: "Photo Artist"},
+		AlbumCredits:  []source.ArtistCredit{{Name: "Compilation Owner"}},
+		TrackCredits:  []source.ArtistCredit{{Name: "Photo Artist"}},
+		Container:     "flac", Codec: "flac", Version: 1,
+	}, "", seq); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.FinishScan(ctx, "filesystem", seq); err != nil {
+		t.Fatal(err)
+	}
+	artists, _, err := st.ListArtists(ctx, "title", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var artistID string
+	for _, artist := range artists {
+		if artist.Name == "Photo Artist" {
+			artistID = artist.ArtistID
+		}
+	}
+	if artistID == "" {
+		t.Fatalf("photo artist missing: %+v", artists)
+	}
+	if albums, err := st.ListArtistAlbums(ctx, artistID); err != nil || len(albums) != 0 {
+		t.Fatalf("photo artist unexpectedly owns albums: %+v err=%v", albums, err)
+	}
 
+	mbCalls := 0
+	photoArtistMBCalls := 0
 	mb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "artist") {
-			_, _ = w.Write([]byte(`{"artists":[{"id":"ar-1"}]}`))
+		if r.URL.Path == "/artist" {
+			mbCalls++
+			if strings.Contains(r.URL.Query().Get("query"), "Photo Artist") {
+				photoArtistMBCalls++
+			}
+			_, _ = w.Write([]byte(`{"artists":[{"id":"ar-1","name":" photo artist "}]}`))
 		} else {
 			_, _ = w.Write([]byte(`{"release-groups":[]}`))
 		}
@@ -221,8 +469,10 @@ func TestEnrichArtistPhotoFromFanart(t *testing.T) {
 		_, _ = w.Write(pngBytes)
 	}))
 	defer img.Close()
+	fanartCalls := 0
 	fanart := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/music/ar-1") {
+			fanartCalls++
 			_, _ = w.Write([]byte(`{"artistthumb":[{"url":"` + img.URL + `/pic.jpg"}]}`))
 			return
 		}
@@ -235,10 +485,51 @@ func TestEnrichArtistPhotoFromFanart(t *testing.T) {
 		MusicBrainz: testMusicBrainzClient(t, st, mb.URL),
 	})
 	e.FanartBase = fanart.URL
+	e.providerPacers = map[string]*providerPacer{}
 	e.Run(ctx)
 
-	if need, _ := st.ArtistsNeedingArt(ctx, 10); len(need) != 0 {
-		t.Fatalf("artist should have a photo (or be tried): %d remain", len(need))
+	artist, found, err := st.GetArtist(ctx, artistID)
+	if err != nil || !found || artist.ArtID == "" {
+		t.Fatalf("artist photo not attached: found=%v artist=%+v err=%v", found, artist, err)
+	}
+	if mbCalls == 0 || photoArtistMBCalls != 1 || fanartCalls != 1 {
+		t.Fatalf("provider calls: musicbrainz=%d photo_artist=%d fanart=%d", mbCalls, photoArtistMBCalls, fanartCalls)
+	}
+}
+
+func TestLastfmSemanticTransientIsNotCached(t *testing.T) {
+	st, ctx := seedAlbum(t)
+	requests := 0
+	var base string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path == "/apex.jpg" {
+			w.Header().Set("Content-Type", "image/jpeg")
+			_, _ = w.Write(pngBytes)
+			return
+		}
+		if requests == 1 {
+			_, _ = w.Write([]byte(`{"error":11,"message":"Service Offline"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"album":{"image":[{"#text":"` + base + `/apex.jpg","size":"extralarge"}]}}`))
+	}))
+	defer srv.Close()
+	base = srv.URL
+	dataDir := t.TempDir()
+	e := New(st, nil, filepath.Join(dataDir, "art"), Config{
+		LastfmKey:     func(context.Context) string { return "secret" },
+		ProviderCache: providercache.New(filepath.Join(dataDir, "provider-cache")),
+	})
+	e.LastfmBase = srv.URL
+	e.providerPacers = map[string]*providerPacer{}
+
+	if data, _, outcome := e.lastfmAlbumArtOutcome(ctx, "artist", "album"); data != nil || outcome != lookupTransient || requests != 1 {
+		t.Fatalf("first lookup data=%d outcome=%v requests=%d", len(data), outcome, requests)
+	}
+	data, _, outcome := e.lastfmAlbumArtOutcome(ctx, "artist", "album")
+	if data == nil || outcome != lookupSuccess || requests != 3 {
+		t.Fatalf("second lookup data=%d outcome=%v requests=%d", len(data), outcome, requests)
 	}
 }
 
@@ -344,6 +635,38 @@ func TestFreshProviderCacheBypassesPacer(t *testing.T) {
 	}
 }
 
+func TestCachedLastfmCodeSixSuccessIsRewrittenAsSevenDayMiss(t *testing.T) {
+	st, ctx := seedAlbum(t)
+	dataDir := t.TempDir()
+	cache := providercache.New(filepath.Join(dataDir, "provider-cache"))
+	requestURL := "https://ws.audioscrobbler.com/2.0/?method=album.getinfo&artist=Missing&album=Missing&api_key=secret&format=json"
+	key, err := providercache.CanonicalKey(http.MethodGet, requestURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := cache.Put("lastfm", key, providercache.Entry{
+		URL: key, Status: http.StatusOK, FetchedAt: now, FreshUntil: now.Add(30 * 24 * time.Hour),
+		Kind: providercache.KindSuccess, Body: []byte(`{"error":6,"message":"Album not found"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	e := New(st, nil, filepath.Join(dataDir, "art"), Config{ProviderCache: cache})
+	e.LastfmBase = "https://ws.audioscrobbler.com"
+	var body any
+	before := time.Now()
+	if outcome := e.getJSONOutcome(ctx, requestURL, "", &body); outcome != lookupMiss {
+		t.Fatalf("outcome=%v", outcome)
+	}
+	entry, ok := cache.Get("lastfm", key)
+	if !ok || entry.Kind != providercache.KindMiss || entry.Status != http.StatusOK {
+		t.Fatalf("rewritten entry=%+v ok=%v", entry, ok)
+	}
+	if entry.FreshUntil.Before(before.Add(7*24*time.Hour-time.Minute)) || entry.FreshUntil.After(time.Now().Add(7*24*time.Hour+time.Minute)) {
+		t.Fatalf("FreshUntil=%s", entry.FreshUntil)
+	}
+}
+
 func TestFreshProviderCacheAvoidsMetadataAndImageRequests(t *testing.T) {
 	st, ctx := seedAlbum(t)
 	requests := 0
@@ -425,7 +748,7 @@ func TestProviderCacheRepopulatesArtAfterDatabaseResetWithoutNetworkOrRewrite(t 
 	e := New(st, nil, filepath.Join(dataDir, "art"), Config{LastfmKey: func(context.Context) string { return "secret" }, ProviderCache: cache})
 	e.LastfmBase = srv.URL
 	e.Run(ctx)
-	if requests != 2 {
+	if requests != 3 {
 		t.Fatalf("first run requests=%d", requests)
 	}
 	entries, err := os.ReadDir(filepath.Join(dataDir, "art"))
@@ -749,5 +1072,48 @@ func TestProgressPublishesDuringLongPasses(t *testing.T) {
 	}
 	if events < 2 {
 		t.Fatalf("expected intermediate progress events, got %d", events)
+	}
+}
+
+// A zero artwork slice yields to identity matching immediately; the full
+// artwork stage after the drain still attaches everything in the same pass.
+func TestZeroArtSliceRunsIdentityBeforeArtwork(t *testing.T) {
+	st, ctx := seedAlbum(t)
+	var mu sync.Mutex
+	var order []string
+	record := func(kind string) {
+		mu.Lock()
+		defer mu.Unlock()
+		order = append(order, kind)
+	}
+	mb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		record("resolve")
+		_, _ = w.Write([]byte(`{"releases":[],"release-groups":[],"artists":[]}`))
+	}))
+	defer mb.Close()
+	srv := lastfmArtServer(t, func() { record("art") })
+	e := New(st, nil, t.TempDir(), Config{MusicBrainz: testMusicBrainzClient(t, st, mb.URL), LastfmKey: func(context.Context) string { return "k" }})
+	e.LastfmBase = srv.URL
+	e.providerPacers = map[string]*providerPacer{}
+	e.ArtSliceBudget = 0
+	e.Run(ctx)
+
+	mu.Lock()
+	defer mu.Unlock()
+	firstArt, firstResolve := -1, -1
+	for i, kind := range order {
+		if kind == "art" && firstArt == -1 {
+			firstArt = i
+		}
+		if kind == "resolve" && firstResolve == -1 {
+			firstResolve = i
+		}
+	}
+	if firstResolve == -1 || firstArt == -1 || firstResolve > firstArt {
+		t.Fatalf("zero slice must resolve identity before artwork: order=%v", order)
+	}
+	need, err := st.AlbumsNeedingArt(ctx, 10)
+	if err != nil || len(need) != 0 {
+		t.Fatalf("post-drain artwork stage must still run: %v err=%v", need, err)
 	}
 }

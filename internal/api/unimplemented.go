@@ -47,6 +47,18 @@ func (Unimplemented) AdminDeleteFanart(ctx context.Context, request AdminDeleteF
 	return nil, ErrNotImplemented
 }
 
+func (Unimplemented) AdminGetDiscogs(ctx context.Context, request AdminGetDiscogsRequestObject) (AdminGetDiscogsResponseObject, error) {
+	return nil, ErrNotImplemented
+}
+
+func (Unimplemented) AdminSetDiscogs(ctx context.Context, request AdminSetDiscogsRequestObject) (AdminSetDiscogsResponseObject, error) {
+	return nil, ErrNotImplemented
+}
+
+func (Unimplemented) AdminDeleteDiscogs(ctx context.Context, request AdminDeleteDiscogsRequestObject) (AdminDeleteDiscogsResponseObject, error) {
+	return nil, ErrNotImplemented
+}
+
 func (Unimplemented) AdminGetLastfm(ctx context.Context, request AdminGetLastfmRequestObject) (AdminGetLastfmResponseObject, error) {
 	return nil, ErrNotImplemented
 }
