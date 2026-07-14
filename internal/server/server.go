@@ -5,6 +5,7 @@ package server
 import (
 	"context"
 
+	"github.com/BlitterAmp/BlitterServer/internal/activity"
 	"github.com/BlitterAmp/BlitterServer/internal/api"
 	"github.com/BlitterAmp/BlitterServer/internal/artifacts"
 	"github.com/BlitterAmp/BlitterServer/internal/events"
@@ -91,7 +92,63 @@ func (s *Server) GetStatus(ctx context.Context, _ api.GetStatusRequestObject) (a
 		resp.Source.Kind = api.ServerStatusSourceKind(kind)
 		resp.Source.Connected = s.lib.Connected(ctx)
 	}
+	resp.Activity = libraryActivityResponse(s.lib.ActivityTracker().Snapshot())
 	return resp, nil
+}
+
+func libraryActivityResponse(snapshot *activity.Snapshot) *api.LibraryActivity {
+	if snapshot == nil {
+		return nil
+	}
+	counts := api.LibraryActivityCounts{}
+	set := func(value int) *int { return &value }
+	switch snapshot.Stage {
+	case activity.StageFilesystemScan:
+		counts.Discovered = set(snapshot.Counts.Discovered)
+		counts.Reused = set(snapshot.Counts.Reused)
+		counts.Probed = set(snapshot.Counts.Probed)
+		counts.Indexed = set(snapshot.Counts.Indexed)
+		counts.Changed = set(snapshot.Counts.Changed)
+		counts.Removed = set(snapshot.Counts.Removed)
+		counts.Failed = set(snapshot.Counts.Failed)
+	case activity.StageMusicBrainzResolution:
+		counts.Total = set(snapshot.Counts.Total)
+		counts.Processed = set(snapshot.Counts.Processed)
+		counts.Changed = set(snapshot.Counts.Changed)
+		counts.Failed = set(snapshot.Counts.Failed)
+		if snapshot.Counts.Remaining >= 0 {
+			counts.Remaining = set(snapshot.Counts.Remaining)
+		}
+	case activity.StageMusicBrainzArtistMetadata:
+		counts.Total = set(snapshot.Counts.Total)
+		counts.Processed = set(snapshot.Counts.Processed)
+		counts.Changed = set(snapshot.Counts.Changed)
+		counts.Terminal = set(snapshot.Counts.Terminal)
+		counts.Failed = set(snapshot.Counts.Failed)
+		if snapshot.Counts.Remaining >= 0 {
+			counts.Remaining = set(snapshot.Counts.Remaining)
+		}
+	case activity.StageAlbumArtwork, activity.StageArtistArtwork:
+		counts.Total = set(snapshot.Counts.Total)
+		counts.Attempted = set(snapshot.Counts.Attempted)
+		counts.Succeeded = set(snapshot.Counts.Succeeded)
+		counts.Skipped = set(snapshot.Counts.Skipped)
+		counts.Missed = set(snapshot.Counts.Missed)
+		counts.Transient = set(snapshot.Counts.Transient)
+		counts.Failed = set(snapshot.Counts.Failed)
+		if snapshot.Counts.Remaining >= 0 {
+			counts.Remaining = set(snapshot.Counts.Remaining)
+		}
+	}
+	out := &api.LibraryActivity{
+		Stage: api.LibraryActivityStage(snapshot.Stage), State: api.LibraryActivityState(snapshot.State),
+		StartedAt: snapshot.StartedAt, UpdatedAt: snapshot.UpdatedAt, Counts: counts,
+	}
+	if snapshot.Reason != "" {
+		reason := api.LibraryActivityReason(snapshot.Reason)
+		out.Reason = &reason
+	}
+	return out
 }
 
 func (s *Server) GetCapabilities(ctx context.Context, _ api.GetCapabilitiesRequestObject) (api.GetCapabilitiesResponseObject, error) {

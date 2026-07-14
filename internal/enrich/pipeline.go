@@ -4,12 +4,13 @@ import (
 	"context"
 	"time"
 
+	"github.com/BlitterAmp/BlitterServer/internal/activity"
 	"github.com/BlitterAmp/BlitterServer/internal/logging"
 	"github.com/BlitterAmp/BlitterServer/internal/mbresolver"
 	"github.com/BlitterAmp/BlitterServer/internal/progress"
 )
 
-type runSummary struct{ attempted, succeeded, skipped, missed, transient, failed int }
+type runSummary = activity.Counts
 
 func (e *Enricher) Run(ctx context.Context) {
 	e.RunAt(ctx, time.Now())
@@ -19,6 +20,13 @@ func (e *Enricher) RunAt(ctx context.Context, now time.Time) {
 	log := logging.From(ctx).With("component", "enrich")
 	started := e.Now()
 	total := runSummary{}
+	var lastToken activity.Token
+	var failedSnapshot *activity.Snapshot
+	captureFailure := func() {
+		if snapshot := e.activity.Snapshot(); snapshot != nil && snapshot.State == activity.StateFailed {
+			failedSnapshot = snapshot
+		}
+	}
 	dirty, anyChange := false, false
 	lastPublish := time.Now()
 	markDirty := func() { dirty, anyChange = true, true }
@@ -45,10 +53,10 @@ func (e *Enricher) RunAt(ctx context.Context, now time.Time) {
 		message := "library enrichment completed"
 		if ctx.Err() != nil {
 			message = "library enrichment cancelled"
-		} else if total.failed > 0 {
+		} else if total.Failed > 0 {
 			message = "library enrichment failed"
 		}
-		args := []any{"attempted", total.attempted, "succeeded", total.succeeded, "skipped", total.skipped, "missed", total.missed, "transient", total.transient, "failed", total.failed, "duration_ms", e.Now().Sub(started).Milliseconds()}
+		args := []any{"attempted", total.Attempted, "succeeded", total.Succeeded, "skipped", total.Skipped, "missed", total.Missed, "transient", total.Transient, "failed", total.Failed, "duration_ms", e.Now().Sub(started).Milliseconds()}
 		if message == "library enrichment failed" {
 			log.Error(message, args...)
 		} else {
@@ -58,23 +66,36 @@ func (e *Enricher) RunAt(ctx context.Context, now time.Time) {
 		if anyChange {
 			log.Info("enrichment updated the library")
 		}
+		if ctx.Err() != nil || total.Failed == 0 {
+			e.activity.Finish(lastToken)
+		} else if failedSnapshot != nil {
+			e.activity.RetainFailure(lastToken, *failedSnapshot)
+		}
 	}()
 
 	// Artwork first — but only a bounded slice: covers appear quickly on a
 	// fresh library without starving identity matching, which restarts would
 	// otherwise re-park behind a full artwork drain forever.
 	artDeadline := time.Now().Add(e.ArtSliceBudget)
-	e.runAlbumArtStage(ctx, now, artDeadline, log, &total, markDirty, publish)
-	e.runArtistArtStage(ctx, now, artDeadline, log, &total, markDirty, publish)
+	lastToken = e.runAlbumArtStage(ctx, now, artDeadline, log, &total, markDirty, publish)
+	captureFailure()
+	lastToken = e.runArtistArtStage(ctx, now, artDeadline, log, &total, markDirty, publish)
+	captureFailure()
 
 	if e.resolver != nil {
+		lastToken = e.activity.Start(activity.StageMusicBrainzResolution, activity.Counts{})
 		due, _ := e.st.CountDueMusicBrainzAlbums(ctx, now)
+		resolutionCounts := activity.Counts{Total: int(due), Remaining: int(due)}
+		e.activity.Update(lastToken, resolutionCounts)
 		reporter := progress.New(e.Now, e.LogProgressInterval)
 		log.Info("musicbrainz resolution started", "due", due)
 		var resolution mbresolver.ResolutionProgress
 		previousApplied := 0
 		resolved, err := e.resolver.RunWithProgress(ctx, func(current mbresolver.ResolutionProgress) {
 			resolution = current
+			resolutionCounts.Processed = current.Processed
+			resolutionCounts.Changed = current.Applied
+			resolutionCounts.Failed = current.Failed
 			if current.Applied > previousApplied {
 				markDirty()
 				previousApplied = current.Applied
@@ -82,6 +103,8 @@ func (e *Enricher) RunAt(ctx context.Context, now time.Time) {
 			publish(false)
 			if reporter.Due(current.Processed) {
 				remaining, _ := e.st.CountDueMusicBrainzAlbums(ctx, now)
+				resolutionCounts.Remaining = int(remaining)
+				e.activity.Update(lastToken, resolutionCounts)
 				log.Info("musicbrainz resolution progress", "due", due, "processed", current.Processed, "applied", current.Applied, "failed", current.Failed, "remaining", remaining, "duration_ms", reporter.DurationMS())
 			}
 		})
@@ -90,9 +113,10 @@ func (e *Enricher) RunAt(ctx context.Context, now time.Time) {
 		}
 		if err != nil {
 			log.Warn("musicbrainz resolution failed", "err", err)
-			total.failed++
+			total.Failed++
 		}
 		remaining, _ := e.st.CountDueMusicBrainzAlbums(ctx, now)
+		resolutionCounts.Remaining = int(remaining)
 		message := "musicbrainz resolution completed"
 		if ctx.Err() != nil {
 			message = "musicbrainz resolution cancelled"
@@ -101,19 +125,26 @@ func (e *Enricher) RunAt(ctx context.Context, now time.Time) {
 		}
 		args := []any{"due", due, "processed", resolution.Processed, "applied", resolution.Applied, "failed", resolution.Failed, "remaining", remaining, "duration_ms", reporter.DurationMS()}
 		if err != nil && ctx.Err() == nil {
+			e.activity.Fail(lastToken, resolutionCounts)
+			captureFailure()
 			log.Error(message, args...)
 		} else {
+			e.activity.Update(lastToken, resolutionCounts)
 			log.Info(message, args...)
 		}
 	}
 	publish(false)
-	artistIdentity := e.runArtistIdentityStage(ctx, markDirty, publish)
-	total.failed += artistIdentity.Failed
+	artistIdentity, artistToken := e.runArtistIdentityStage(ctx, markDirty, publish)
+	lastToken = artistToken
+	captureFailure()
+	total.Failed += artistIdentity.Failed
 	publish(false)
 
 	// Identity landed above: newly matched albums and newly identified
 	// artists had their art schedules reset, so give them their first
 	// identity-aware fetch in the same pass — unbounded this time.
-	e.runAlbumArtStage(ctx, now, time.Time{}, log, &total, markDirty, publish)
-	e.runArtistArtStage(ctx, now, time.Time{}, log, &total, markDirty, publish)
+	lastToken = e.runAlbumArtStage(ctx, now, time.Time{}, log, &total, markDirty, publish)
+	captureFailure()
+	lastToken = e.runArtistArtStage(ctx, now, time.Time{}, log, &total, markDirty, publish)
+	captureFailure()
 }

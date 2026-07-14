@@ -2254,6 +2254,49 @@ components:
           properties:
             lidarr: { type: string, enum: [absent, configured, error] }
             lastfm: { type: string, enum: [absent, configured, connected, error] }
+        activity:
+          type: object
+          allOf: [{ $ref: "#/components/schemas/LibraryActivity" }]
+          nullable: true
+          description: Current library pipeline activity. Null or absent means idle; poll this status endpoint for authoritative state.
+
+    LibraryActivity:
+      type: object
+      required: [stage, state, startedAt, updatedAt, counts]
+      properties:
+        stage:
+          type: string
+          enum: [filesystem_scan, musicbrainz_resolution, musicbrainz_artist_metadata, album_artwork, artist_artwork]
+        state:
+          type: string
+          enum: [running, failed]
+        startedAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        counts: { $ref: "#/components/schemas/LibraryActivityCounts" }
+        reason:
+          type: string
+          enum: [operation_failed]
+          nullable: true
+
+    LibraryActivityCounts:
+      type: object
+      properties:
+        total: { type: integer, minimum: 0 }
+        discovered: { type: integer, minimum: 0 }
+        reused: { type: integer, minimum: 0 }
+        probed: { type: integer, minimum: 0 }
+        indexed: { type: integer, minimum: 0 }
+        processed: { type: integer, minimum: 0 }
+        attempted: { type: integer, minimum: 0 }
+        changed: { type: integer, minimum: 0 }
+        removed: { type: integer, minimum: 0 }
+        succeeded: { type: integer, minimum: 0 }
+        skipped: { type: integer, minimum: 0 }
+        missed: { type: integer, minimum: 0 }
+        transient: { type: integer, minimum: 0 }
+        failed: { type: integer, minimum: 0 }
+        terminal: { type: integer, minimum: 0 }
+        remaining: { type: integer, minimum: 0 }
 
     Capabilities:
       type: object

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/BlitterAmp/BlitterServer/internal/activity"
 	"github.com/BlitterAmp/BlitterServer/internal/logging"
 	"github.com/BlitterAmp/BlitterServer/internal/progress"
 	"github.com/BlitterAmp/BlitterServer/internal/source"
@@ -23,10 +24,7 @@ type scanJob struct {
 	parserVersion int
 }
 
-type scanStats struct {
-	discovered, reused, probed, indexed, failed int
-	tracksChanged, tracksRemoved                int
-}
+type scanStats = activity.Counts
 
 func (m *Manager) startScanLocked() {
 	m.scanning = true
@@ -46,16 +44,22 @@ func (m *Manager) scan(job scanJob) {
 	ctx := m.lifecycleCtx
 	start := m.now()
 	if !m.acquireOperation() {
-		m.finishScanJob(ctx, job, scanStats{}, false, context.Canceled, start)
+		m.finishScanJob(ctx, job, activity.Token{}, scanStats{}, false, context.Canceled, start, false)
 		return
 	}
-	stats, mutated, err := m.runScan(ctx, job)
-	m.releaseOperation()
-	m.finishScanJob(ctx, job, stats, mutated, err, start)
+	token := m.activity.Start(activity.StageFilesystemScan, scanStats{})
+	stats, mutated, err := m.runScan(ctx, job, token)
+	m.finishScanJob(ctx, job, token, stats, mutated, err, start, true)
 }
 
-func (m *Manager) finishScanJob(ctx context.Context, job scanJob, stats scanStats, mutated bool, scanErr error, start time.Time) {
+func (m *Manager) finishScanJob(ctx context.Context, job scanJob, token activity.Token, stats scanStats, mutated bool, scanErr error, start time.Time, operationHeld bool) {
 	log := logging.From(ctx).With("component", "library.scan", "source", job.src.Kind())
+	releaseOperation := func() {
+		if operationHeld {
+			m.releaseOperation()
+			operationHeld = false
+		}
+	}
 	m.mu.Lock()
 	if !m.jobCurrentLocked(job) {
 		if mutated {
@@ -64,51 +68,64 @@ func (m *Manager) finishScanJob(ctx context.Context, job scanJob, stats scanStat
 		log.Info("filesystem scan cancelled", scanLogAttrs(stats, m.now().Sub(start).Milliseconds())...)
 		m.startPendingScanLocked()
 		m.mu.Unlock()
+		releaseOperation()
+		m.activity.Finish(token)
 		return
 	}
 	if ctx.Err() != nil || m.closed || errors.Is(scanErr, context.Canceled) {
 		log.Info("filesystem scan cancelled", scanLogAttrs(stats, m.now().Sub(start).Milliseconds())...)
 		m.scanning = false
 		m.mu.Unlock()
+		releaseOperation()
+		m.activity.Finish(token)
 		return
 	}
 	_ = m.st.SetSetting(ctx, settingLastScanAt, time.Now().UTC().Format(time.RFC3339))
 	if scanErr != nil {
 		log.Error("filesystem scan failed", append(scanLogAttrs(stats, m.now().Sub(start).Milliseconds()), "err", scanErr)...)
+		m.activity.Fail(token, stats)
 		_ = m.st.SetSetting(ctx, settingLastScanError, scanErr.Error())
 		if mutated {
 			m.publishLibraryChangedLocked(ctx, log)
 		}
 		m.scanning = false
 		m.mu.Unlock()
+		releaseOperation()
 		m.TriggerEnrichment()
 		return
 	}
-	if stats.failed > 0 {
+	if stats.Failed > 0 {
 		noun := "files"
-		if stats.failed == 1 {
+		if stats.Failed == 1 {
 			noun = "file"
 		}
-		aggregateError := fmt.Sprintf("%d %s failed", stats.failed, noun)
+		aggregateError := fmt.Sprintf("%d %s failed", stats.Failed, noun)
 		_ = m.st.SetSetting(ctx, settingLastScanError, aggregateError)
-		log.Warn("filesystem scan completed with errors", append(scanLogAttrs(stats, m.now().Sub(start).Milliseconds()), "tracks_changed", stats.tracksChanged, "tracks_removed", stats.tracksRemoved)...)
+		log.Warn("filesystem scan completed with errors", append(scanLogAttrs(stats, m.now().Sub(start).Milliseconds()), "tracks_changed", stats.Changed, "tracks_removed", stats.Removed)...)
+		m.activity.Fail(token, stats)
 		m.publishLibraryChangedLocked(ctx, log)
 		m.scanning = false
 		m.mu.Unlock()
+		releaseOperation()
 		m.TriggerEnrichment()
 		return
 	}
 	_ = m.st.SetSetting(ctx, settingLastScanError, "")
-	log.Info("filesystem scan completed", append(scanLogAttrs(stats, m.now().Sub(start).Milliseconds()), "tracks_changed", stats.tracksChanged, "tracks_removed", stats.tracksRemoved)...)
+	log.Info("filesystem scan completed", append(scanLogAttrs(stats, m.now().Sub(start).Milliseconds()), "tracks_changed", stats.Changed, "tracks_removed", stats.Removed)...)
 	m.publishLibraryChangedLocked(ctx, log)
 	m.scanning = false
+	if m.onScanBookkeeping != nil {
+		m.onScanBookkeeping()
+	}
 	m.mu.Unlock()
+	releaseOperation()
 	m.TriggerEnrichment()
+	m.activity.Finish(token)
 }
 
 func scanLogAttrs(stats scanStats, durationMS int64) []any {
-	return []any{"discovered", stats.discovered, "reused", stats.reused, "probed", stats.probed,
-		"indexed", stats.indexed, "failed", stats.failed, "duration_ms", durationMS}
+	return []any{"discovered", stats.Discovered, "reused", stats.Reused, "probed", stats.Probed,
+		"indexed", stats.Indexed, "failed", stats.Failed, "duration_ms", durationMS}
 }
 
 func (m *Manager) publishLibraryChangedLocked(ctx context.Context, log *slog.Logger) {
@@ -162,7 +179,7 @@ func (m *Manager) acquireOperation() bool {
 
 func (m *Manager) releaseOperation() { m.operation <- struct{}{} }
 
-func (m *Manager) runScan(ctx context.Context, job scanJob) (stats scanStats, mutated bool, resultErr error) {
+func (m *Manager) runScan(ctx context.Context, job scanJob, token activity.Token) (stats scanStats, mutated bool, resultErr error) {
 	unlock := m.st.LockLibraryScan()
 	defer unlock()
 	seq, err := m.st.NextScanSeq(ctx)
@@ -182,10 +199,11 @@ func (m *Manager) runScan(ctx context.Context, job scanJob) (stats scanStats, mu
 	seen := make(map[string]struct{})
 
 	err = job.src.Enumerate(ctx, func(candidate source.TrackCandidate) error {
-		stats.discovered++
+		stats.Discovered++
 		defer func() {
-			if reporter.Due(stats.discovered) {
+			if reporter.Due(stats.Discovered) {
 				durationMS := reporter.DurationMS()
+				m.activity.Update(token, stats)
 				log.Info("filesystem scan progress", append(scanLogAttrs(stats, durationMS), "elapsed_ms", durationMS)...)
 			}
 		}()
@@ -197,25 +215,25 @@ func (m *Manager) runScan(ctx context.Context, job scanJob) (stats scanStats, mu
 		}
 		encountered[candidate.NativeID] = struct{}{}
 		if entry, ok := cache[candidate.NativeID]; ok && entry.CanonicalExists && entry.Candidate == candidate {
-			stats.reused++
+			stats.Reused++
 			seen[candidate.NativeID] = struct{}{}
 			if entry.ArtPending {
 				attempted, failed, retryErr := m.retryPendingArt(ctx, job, candidate, entry, seq, artDir, artIDs)
 				mutated = mutated || attempted
 				if failed {
-					stats.failed++
+					stats.Failed++
 				}
 				if retryErr != nil {
-					stats.failed++
+					stats.Failed++
 					return retryErr
 				}
 			}
 			return nil
 		}
-		stats.probed++
+		stats.Probed++
 		meta, err := job.src.Parse(ctx, candidate)
 		if err != nil {
-			stats.failed++
+			stats.Failed++
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -231,7 +249,7 @@ func (m *Manager) runScan(ctx context.Context, job scanJob) (stats scanStats, mu
 			if _, ok := artIDs[meta.ArtHash]; !ok {
 				artID, found, err := m.st.FindArtByHash(ctx, meta.ArtHash)
 				if err != nil {
-					stats.failed++
+					stats.Failed++
 					return err
 				}
 				if found {
@@ -243,16 +261,16 @@ func (m *Manager) runScan(ctx context.Context, job scanJob) (stats scanStats, mu
 			}
 		}
 		if artFailed {
-			stats.failed++
+			stats.Failed++
 		}
 		return m.withCurrentSource(job, func() error {
 			artID := artIDs[meta.ArtHash]
 			mutated = true // UpsertTrack can commit early statements before a late error.
 			if err := m.upsertTrack(ctx, job.src.Kind(), meta, "", seq); err != nil {
-				stats.failed++
+				stats.Failed++
 				return err
 			}
-			stats.indexed++
+			stats.Indexed++
 			seen[candidate.NativeID] = struct{}{}
 			if artFailed {
 				return m.st.PutSourceFileCacheState(ctx, job.sourceID, job.src.Kind(), job.parserVersion, candidate, meta, true)
@@ -260,7 +278,7 @@ func (m *Manager) runScan(ctx context.Context, job scanJob) (stats scanStats, mu
 			if meta.ArtHash != "" && artID == "" && len(artData) > 0 {
 				artID, err = m.st.UpsertArt(ctx, meta.ArtHash, artMIME, artData, artDir)
 				if err != nil {
-					stats.failed++
+					stats.Failed++
 					_ = m.st.PutSourceFileCacheState(ctx, job.sourceID, job.src.Kind(), job.parserVersion, candidate, meta, true)
 					return err
 				}
@@ -268,7 +286,7 @@ func (m *Manager) runScan(ctx context.Context, job scanJob) (stats scanStats, mu
 			}
 			if artID != "" {
 				if _, err := m.st.AttachTrackArt(ctx, job.src.Kind(), candidate.NativeID, artID, seq); err != nil {
-					stats.failed++
+					stats.Failed++
 					return err
 				}
 			}
@@ -286,7 +304,7 @@ func (m *Manager) runScan(ctx context.Context, job scanJob) (stats scanStats, mu
 		if countErr != nil {
 			return stats, mutated, countErr
 		}
-		stats.tracksChanged, stats.tracksRemoved = counts.Changed, counts.Removed
+		stats.Changed, stats.Removed = counts.Changed, counts.Removed
 	}
 	return stats, mutated, err
 }

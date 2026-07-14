@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/BlitterAmp/BlitterServer/internal/activity"
 	"github.com/BlitterAmp/BlitterServer/internal/logging"
 	"github.com/BlitterAmp/BlitterServer/internal/source"
 	"github.com/BlitterAmp/BlitterServer/internal/store"
@@ -132,7 +133,7 @@ func TestMusicBrainzArtistMetadataLogsSuccessAndTransientProgress(t *testing.T) 
 			logCtx, buf := observabilityContext()
 			e := New(st, nil, t.TempDir(), Config{MusicBrainz: client})
 			steppingEnricher(e)
-			e.runArtistIdentityStage(logCtx, func() {}, func(bool) {})
+			summary, _ := e.runArtistIdentityStage(logCtx, func() {}, func(bool) {})
 			out := buf.String()
 			for _, text := range []string{"musicbrainz artist metadata started", "musicbrainz artist metadata progress"} {
 				if !strings.Contains(out, text) {
@@ -144,6 +145,13 @@ func TestMusicBrainzArtistMetadataLogsSuccessAndTransientProgress(t *testing.T) 
 			}
 			if !transient && (!strings.Contains(out, "msg=\"musicbrainz artist metadata completed\"") || !strings.Contains(out, "changed=1")) {
 				t.Fatalf("success terminal: %s", out)
+			}
+			snapshot := e.activity.Snapshot()
+			if snapshot == nil || snapshot.Stage != activity.StageMusicBrainzArtistMetadata || snapshot.Counts.Total != 1 || snapshot.Counts.Processed != summary.Processed {
+				t.Fatalf("metadata activity: snapshot=%+v summary=%+v", snapshot, summary)
+			}
+			if transient && snapshot.State != activity.StateFailed {
+				t.Fatalf("transient metadata failure was not retained: %+v", snapshot)
 			}
 			for _, private := range []string{"Private Artist", "Private Song", "Private Album", "private-mbid", server.URL} {
 				if strings.Contains(out, private) {
@@ -176,7 +184,7 @@ func TestArtistIdentityFailuresPropagateToStageAndOverall(t *testing.T) {
 	steppingEnricher(e)
 	e.markArtistMetadataTerminal = func(context.Context, string, string) error { return errors.New("synthetic terminal write failure") }
 	logCtx, buf := observabilityContext()
-	summary := e.runArtistIdentityStage(logCtx, func() {}, func(bool) {})
+	summary, _ := e.runArtistIdentityStage(logCtx, func() {}, func(bool) {})
 	if summary.Failed != 1 || summary.Terminal != 0 || !strings.Contains(buf.String(), "msg=\"musicbrainz artist metadata failed\"") {
 		t.Fatalf("terminal failure summary=%+v log=%s", summary, buf.String())
 	}
@@ -193,6 +201,9 @@ func TestArtistIdentityFailuresPropagateToStageAndOverall(t *testing.T) {
 	overall.RunAt(overallCtx, time.Now())
 	if !strings.Contains(overallBuf.String(), "msg=\"musicbrainz artist metadata failed\"") || !strings.Contains(overallBuf.String(), "msg=\"library enrichment failed\"") {
 		t.Fatalf("consolidation failure did not propagate: %s", overallBuf.String())
+	}
+	if snapshot := overall.activity.Snapshot(); snapshot == nil || snapshot.Stage != activity.StageMusicBrainzArtistMetadata || snapshot.State != activity.StateFailed || snapshot.Counts.Failed != 1 {
+		t.Fatalf("pipeline did not retain the failed metadata stage: %+v", snapshot)
 	}
 }
 
@@ -232,5 +243,8 @@ func TestArtworkSkippedAndRemainingFailureCounters(t *testing.T) {
 	out := buf.String()
 	if !strings.Contains(out, "skipped=1") || strings.Contains(out, "succeeded=1") || !strings.Contains(out, "remaining=-1") || !strings.Contains(out, "msg=\"album artwork failed\"") {
 		t.Fatalf("artwork skipped/remaining counters: %s", out)
+	}
+	if total.Failed != 1 {
+		t.Fatalf("remaining count failure added %d overall failures, want 1", total.Failed)
 	}
 }

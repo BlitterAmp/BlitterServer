@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	blitterserver "github.com/BlitterAmp/BlitterServer"
+	"github.com/BlitterAmp/BlitterServer/internal/activity"
 	"github.com/BlitterAmp/BlitterServer/internal/api"
 	"github.com/BlitterAmp/BlitterServer/internal/httpserver"
 	"github.com/BlitterAmp/BlitterServer/internal/library"
@@ -65,6 +66,35 @@ func TestContractStatusRequiresAuth(t *testing.T) {
 	}
 	if authed.JSON200.Source.Connected {
 		t.Fatal("no source is configured; connected must be false")
+	}
+}
+
+func TestContractStatusReturnsAuthoritativeLibraryActivity(t *testing.T) {
+	st, err := store.Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	mgr := library.NewManager(st, t.TempDir())
+	tracker := mgr.ActivityTracker()
+	ts := httptest.NewServer(httpserver.Handler(st, mgr, t.TempDir(), "test"))
+	defer ts.Close()
+	// Handler assembly starts background enrichment. Join it so this contract
+	// fixture can install a deterministic current snapshot.
+	mgr.Close()
+	tracker.Start(activity.StageMusicBrainzResolution, activity.Counts{Total: 9, Processed: 4, Changed: 2, Failed: 1, Remaining: 5})
+	dev, _ := st.CreateDevice(context.Background(), "d", "ios")
+	prf, _ := st.CreateProfile(context.Background(), "p")
+	tok, _ := st.CreateProfileToken(context.Background(), dev, prf)
+	c, _ := api.NewClientWithResponses(ts.URL)
+
+	resp, err := c.GetStatusWithResponse(context.Background(), bearer(tok))
+	if err != nil || resp.JSON200 == nil || resp.JSON200.Activity == nil {
+		t.Fatalf("status activity: err=%v response=%+v", err, resp)
+	}
+	got := resp.JSON200.Activity
+	if got.Stage != api.MusicbrainzResolution || got.State != api.LibraryActivityStateRunning || got.Counts.Total == nil || *got.Counts.Total != 9 || got.Counts.Processed == nil || *got.Counts.Processed != 4 || got.Counts.Remaining == nil || *got.Counts.Remaining != 5 {
+		t.Fatalf("activity contract response: %+v", got)
 	}
 }
 
