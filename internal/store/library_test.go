@@ -794,14 +794,16 @@ func TestUpsertArtDoesNotRewriteExistingBlobAfterDatabaseReset(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()
 	artDir := filepath.Join(dataDir, "art")
+	data := []byte("PNGDATA")
+	hash := sha256Hex(data)
 	s, err := Open(ctx, dataDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.UpsertArt(ctx, "survivor", "image/png", []byte("PNGDATA"), artDir); err != nil {
+	if _, err := s.UpsertArt(ctx, hash, "image/png", data, artDir); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(artDir, "survivor")
+	path := filepath.Join(artDir, hash)
 	before, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
@@ -816,7 +818,7 @@ func TestUpsertArtDoesNotRewriteExistingBlobAfterDatabaseReset(t *testing.T) {
 	}
 	t.Cleanup(func() { s.Close() })
 	time.Sleep(10 * time.Millisecond)
-	if _, err := s.UpsertArt(ctx, "survivor", "image/png", []byte("PNGDATA"), artDir); err != nil {
+	if _, err := s.UpsertArt(ctx, hash, "image/png", data, artDir); err != nil {
 		t.Fatal(err)
 	}
 	after, err := os.Stat(path)
@@ -841,21 +843,13 @@ func TestResolveTrackNative(t *testing.T) {
 	}
 }
 
-// Incremental scans skip probing unchanged files: the store supplies known
-// versions and marks skipped files seen so FinishScan keeps them alive.
-func TestKnownVersionsAndMarkSeenSurviveFinishScan(t *testing.T) {
+// Incremental scans mark cache hits seen so FinishScan keeps them alive.
+func TestMarkSeenSurvivesFinishScan(t *testing.T) {
 	s := indexFixture(t)
 	ctx := context.Background()
-	known, err := s.KnownTrackVersions(ctx, "filesystem")
-	if err != nil || len(known) == 0 {
-		t.Fatalf("known=%v err=%v", known, err)
-	}
 	seq, _ := s.NextScanSeq(ctx)
-	ids := make([]string, 0, len(known))
-	for id := range known {
-		ids = append(ids, id)
-	}
-	if err := s.MarkTracksSeen(ctx, "filesystem", ids, seq); err != nil {
+	ids := []string{"a1/al1/t1.flac", "a1/al1/t2.flac", "a1/al2/t1.flac", "a2/al1/t1.flac"}
+	if marked, err := s.MarkTracksSeen(ctx, "filesystem", ids, seq); err != nil || marked != int64(len(ids)) {
 		t.Fatal(err)
 	}
 	if err := s.FinishScan(ctx, "filesystem", seq); err != nil {

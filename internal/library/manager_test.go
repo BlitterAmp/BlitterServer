@@ -362,9 +362,10 @@ type sequenceSource struct {
 	err     error
 }
 
-func (s *sequenceSource) Kind() string { return "filesystem" }
-func (s *sequenceSource) Scan(ctx context.Context, emit func(source.TrackMeta) error) error {
-	if err := emit(s.meta); err != nil {
+func (s *sequenceSource) Kind() string       { return "filesystem" }
+func (s *sequenceSource) ParserVersion() int { return 1 }
+func (s *sequenceSource) Enumerate(ctx context.Context, emit func(source.TrackCandidate) error) error {
+	if err := emit(source.TrackCandidate{NativeID: s.meta.NativeID, SizeBytes: s.meta.SizeBytes, MtimeNS: s.meta.Version}); err != nil {
 		return err
 	}
 	close(s.entered)
@@ -375,10 +376,13 @@ func (s *sequenceSource) Scan(ctx context.Context, emit func(source.TrackMeta) e
 		return ctx.Err()
 	}
 }
+func (s *sequenceSource) Parse(context.Context, source.TrackCandidate) (source.TrackMeta, error) {
+	return s.meta, nil
+}
 func (s *sequenceSource) Open(context.Context, string) (io.ReadSeekCloser, error) {
 	return nil, errors.New("unused")
 }
-func (s *sequenceSource) Art(context.Context, string) ([]byte, string, error) {
+func (s *sequenceSource) Art(context.Context, source.TrackCandidate, string) ([]byte, string, error) {
 	return nil, "", errors.New("unused")
 }
 
@@ -495,17 +499,21 @@ func TestLibraryOperationsSerializeScanBeforeEnrichment(t *testing.T) {
 	assertChangeOrder(t, s, albumID, false)
 }
 
-func (s *blockedSource) Kind() string { return "blocked" }
-func (s *blockedSource) Scan(ctx context.Context, _ func(source.TrackMeta) error) error {
+func (s *blockedSource) Kind() string       { return "blocked" }
+func (s *blockedSource) ParserVersion() int { return 1 }
+func (s *blockedSource) Enumerate(ctx context.Context, _ func(source.TrackCandidate) error) error {
 	close(s.started)
 	<-ctx.Done()
 	close(s.done)
 	return ctx.Err()
 }
+func (s *blockedSource) Parse(context.Context, source.TrackCandidate) (source.TrackMeta, error) {
+	return source.TrackMeta{}, errors.New("unused")
+}
 func (s *blockedSource) Open(context.Context, string) (io.ReadSeekCloser, error) {
 	return nil, errors.New("unused")
 }
-func (s *blockedSource) Art(context.Context, string) ([]byte, string, error) {
+func (s *blockedSource) Art(context.Context, source.TrackCandidate, string) ([]byte, string, error) {
 	return nil, "", errors.New("unused")
 }
 

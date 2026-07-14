@@ -113,3 +113,33 @@ func TestRequestLoggerInstallsContextLogger(t *testing.T) {
 		t.Fatalf("handler's context logger did not reach the buffer: %q", out)
 	}
 }
+
+func TestRequestLoggerLevelsByStatus(t *testing.T) {
+	for _, tc := range []struct {
+		status      int
+		wantVisible bool
+		wantLevel   string
+	}{
+		{status: 204, wantVisible: false},
+		{status: 302, wantVisible: false},
+		{status: 404, wantVisible: true, wantLevel: "INFO"},
+		{status: 500, wantVisible: true, wantLevel: "ERROR"},
+	} {
+		t.Run(http.StatusText(tc.status), func(t *testing.T) {
+			var buf bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+			req := httptest.NewRequest("GET", "/routine", nil)
+			req = req.WithContext(logging.With(req.Context(), logger))
+			RequestLogger(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+			})).ServeHTTP(httptest.NewRecorder(), req)
+			out := buf.String()
+			if strings.Contains(out, "msg=request") != tc.wantVisible {
+				t.Fatalf("status %d visibility=%v log=%q", tc.status, tc.wantVisible, out)
+			}
+			if tc.wantVisible && (!strings.Contains(out, "level="+tc.wantLevel) || !strings.Contains(out, "request_id=") || !strings.Contains(out, "status=")) {
+				t.Fatalf("status %d fields/level log=%q", tc.status, out)
+			}
+		})
+	}
+}

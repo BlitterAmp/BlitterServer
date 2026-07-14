@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -90,6 +92,20 @@ type LibraryChange struct {
 	Kind      string
 	ID        string
 	Missing   bool
+}
+
+type ScanChangeCounts struct {
+	Changed int
+	Removed int
+}
+
+func (s *Store) ScanChangeCounts(ctx context.Context, sourceKind string, seq int64) (ScanChangeCounts, error) {
+	var counts ScanChangeCounts
+	err := s.db.QueryRowContext(ctx, `SELECT
+		COALESCE(sum(CASE WHEN missing=0 THEN 1 ELSE 0 END),0),
+		COALESCE(sum(CASE WHEN missing=1 THEN 1 ELSE 0 END),0)
+		FROM tracks WHERE source_kind=? AND change_seq=?`, sourceKind, seq).Scan(&counts.Changed, &counts.Removed)
+	return counts, err
 }
 
 type changeCursor struct {
@@ -354,6 +370,14 @@ func (s *Store) replaceCredits(ctx context.Context, table, ownerColumn, ownerID 
 // FinishScan marks unseen rows missing, propagates art track→album→artist,
 // and bumps the library freshness anchor.
 func (s *Store) FinishScan(ctx context.Context, kind string, seq int64) error {
+	return finishScan(ctx, s.db, kind, seq)
+}
+
+type scanExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func finishScan(ctx context.Context, db scanExecer, kind string, seq int64) error {
 	seqStr := strconv.FormatInt(seq, 10)
 	for _, q := range []string{
 		// Newly-missing tracks: flip + stamp only rows that were present.
@@ -376,35 +400,49 @@ func (s *Store) FinishScan(ctx context.Context, kind string, seq int64) error {
 		    art_id = (SELECT a.art_id FROM albums a WHERE a.artist_id = artists.artist_id AND a.art_id IS NOT NULL AND a.missing = 0 ORDER BY a.year LIMIT 1)
 		 WHERE art_id IS NULL`,
 	} {
-		if _, err := s.db.ExecContext(ctx, q); err != nil {
+		if _, err := db.ExecContext(ctx, q); err != nil {
 			return fmt.Errorf("finish scan: %w", err)
 		}
 	}
-	return s.SetSetting(ctx, "library_updated_at", strconv.FormatInt(time.Now().Unix(), 10))
+	_, err := db.ExecContext(ctx, `INSERT INTO settings(key,value) VALUES('library_updated_at',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, strconv.FormatInt(time.Now().Unix(), 10))
+	return err
 }
 
 // UpsertArt stores one image (deduped by hash) under artDir and returns its
 // canonical art id.
 func (s *Store) UpsertArt(ctx context.Context, hash, mime string, data []byte, artDir string) (string, error) {
-	var existing string
-	err := s.db.QueryRowContext(ctx, `SELECT art_id FROM art WHERE hash = ?`, hash).Scan(&existing)
-	if err == nil {
-		return existing, nil
-	}
+	var existing, existingPath string
+	err := s.db.QueryRowContext(ctx, `SELECT art_id,path FROM art WHERE hash = ?`, hash).Scan(&existing, &existingPath)
 	if !errors.Is(err, sql.ErrNoRows) {
-		return "", err
-	}
-	if err := os.MkdirAll(artDir, 0o755); err != nil {
-		return "", err
-	}
-	path := filepath.Join(artDir, hash)
-	info, err := os.Stat(path)
-	if errors.Is(err, os.ErrNotExist) || err == nil && info.Size() != int64(len(data)) {
-		if err := os.WriteFile(path, data, 0o644); err != nil {
+		if err != nil {
 			return "", err
 		}
-	} else if err != nil {
+		valid, err := validArtBlob(existingPath, hash)
+		if err != nil {
+			return "", err
+		}
+		if valid {
+			return existing, nil
+		}
+	}
+	if err := os.MkdirAll(artDir, 0o755); err != nil {
+		return "", &ArtStorageError{Operation: "create directory", Cause: err}
+	}
+	path := filepath.Join(artDir, hash)
+	valid, err := validArtBlob(path, hash)
+	if err != nil {
 		return "", err
+	}
+	if !valid {
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			return "", &ArtStorageError{Operation: "write", Cause: err}
+		}
+	}
+	if existing != "" {
+		if _, err := s.db.ExecContext(ctx, `UPDATE art SET mime=?,path=? WHERE art_id=?`, mime, path, existing); err != nil {
+			return "", err
+		}
+		return existing, nil
 	}
 	artID := NewID("img")
 	if _, err := s.db.ExecContext(ctx,
@@ -412,6 +450,74 @@ func (s *Store) UpsertArt(ctx context.Context, hash, mime string, data []byte, a
 		return "", err
 	}
 	return artID, nil
+}
+
+type ArtStorageError struct {
+	Operation string
+	Cause     error
+}
+
+func (e *ArtStorageError) Error() string { return "art storage " + e.Operation + " failed" }
+func (e *ArtStorageError) Unwrap() error { return e.Cause }
+
+func (s *Store) AttachTrackArt(ctx context.Context, sourceKind, nativeID, artID string, seq int64) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `UPDATE tracks SET art_id=?,change_seq=? WHERE source_kind=? AND native_id=? AND art_id IS NOT ?`, artID, seq, sourceKind, nativeID, artID)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	if err != nil || n == 1 {
+		return n == 1, err
+	}
+	var current sql.NullString
+	if err := s.db.QueryRowContext(ctx, `SELECT art_id FROM tracks WHERE source_kind=? AND native_id=?`, sourceKind, nativeID).Scan(&current); errors.Is(err, sql.ErrNoRows) {
+		return false, ErrNotFound
+	} else if err != nil {
+		return false, err
+	}
+	if current.Valid && current.String == artID {
+		return false, nil
+	}
+	return false, errors.New("track art attachment did not converge")
+}
+
+// FindArtByHash returns an already-deduplicated embedded art row.
+func (s *Store) FindArtByHash(ctx context.Context, hash string) (string, bool, error) {
+	var artID, storedHash, path string
+	err := s.db.QueryRowContext(ctx, `SELECT art_id,hash,path FROM art WHERE hash=?`, hash).Scan(&artID, &storedHash, &path)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	valid, err := validArtBlob(path, storedHash)
+	if err != nil {
+		return "", false, err
+	}
+	if !valid || storedHash != hash {
+		return "", false, nil
+	}
+	return artID, true, nil
+}
+
+func validArtBlob(path, hash string) (bool, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, &ArtStorageError{Operation: "inspect", Cause: err}
+	}
+	if !info.Mode().IsRegular() {
+		return false, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, &ArtStorageError{Operation: "read", Cause: err}
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]) == hash, nil
 }
 
 // ── external art enrichment ────────────────────────────────────
@@ -457,6 +563,12 @@ func (s *Store) AlbumsNeedingArtAt(ctx context.Context, now time.Time, limit int
 	return out, rows.Err()
 }
 
+func (s *Store) CountAlbumsNeedingArtAt(ctx context.Context, now time.Time) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM albums WHERE art_id IS NULL AND missing=0 AND art_next_attempt_at<=?`, now.Unix()).Scan(&count)
+	return count, err
+}
+
 // ArtistsNeedingArt lists present artists we haven't tried a real photo for
 // (even those with an album-cover fallback — fanart.tv can upgrade them).
 func (s *Store) ArtistsNeedingArt(ctx context.Context, limit int) ([]ArtistArtNeed, error) {
@@ -482,6 +594,14 @@ func (s *Store) ArtistsNeedingArtAt(ctx context.Context, now time.Time, limit in
 		out = append(out, a)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) CountArtistsNeedingArtAt(ctx context.Context, now time.Time) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM artists
+		WHERE missing=0 AND (`+albumOwnerPredicate("artists")+`) AND art_next_attempt_at<=?
+		AND (art_id IS NULL OR EXISTS (SELECT 1 FROM albums al WHERE al.artist_id=artists.artist_id AND al.art_id=artists.art_id AND al.missing=0))`, now.Unix()).Scan(&count)
+	return count, err
 }
 
 // SetAlbumArt/SetArtistArt attach fetched art using a caller-supplied change
@@ -1226,44 +1346,35 @@ func nullStr(v string) any {
 	return v
 }
 
-// KnownTrackVersions returns nativeID → stored version (source mtime) for a
-// source, so incremental scans can skip probing unchanged files.
-func (s *Store) KnownTrackVersions(ctx context.Context, sourceKind string) (map[string]int64, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT native_id, version FROM tracks WHERE source_kind = ?`, sourceKind)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	known := map[string]int64{}
-	for rows.Next() {
-		var id string
-		var version int64
-		if err := rows.Scan(&id, &version); err != nil {
-			return nil, err
-		}
-		known[id] = version
-	}
-	return known, rows.Err()
-}
-
 // MarkTracksSeen bumps seen_seq for unchanged files an incremental scan
 // skipped, keeping them alive through FinishScan without content writes.
-func (s *Store) MarkTracksSeen(ctx context.Context, sourceKind string, nativeIDs []string, seq int64) error {
+func (s *Store) MarkTracksSeen(ctx context.Context, sourceKind string, nativeIDs []string, seq int64) (int64, error) {
+	return markTracksSeen(ctx, s.db, sourceKind, nativeIDs, seq)
+}
+
+func markTracksSeen(ctx context.Context, db scanExecer, sourceKind string, nativeIDs []string, seq int64) (int64, error) {
 	const chunk = 400
+	var marked int64
 	for start := 0; start < len(nativeIDs); start += chunk {
 		end := min(start+chunk, len(nativeIDs))
 		batch := nativeIDs[start:end]
-		args := make([]any, 0, len(batch)+2)
-		args = append(args, seq, sourceKind)
+		args := make([]any, 0, len(batch)+3)
+		args = append(args, seq, seq, sourceKind)
 		placeholders := strings.Repeat("?,", len(batch))
 		for _, id := range batch {
 			args = append(args, id)
 		}
-		if _, err := s.db.ExecContext(ctx,
-			`UPDATE tracks SET seen_seq = ?, missing = 0 WHERE source_kind = ? AND native_id IN (`+placeholders[:len(placeholders)-1]+`)`,
-			args...); err != nil {
-			return err
+		result, err := db.ExecContext(ctx,
+			`UPDATE tracks SET seen_seq = ?, change_seq = CASE WHEN missing=1 THEN ? ELSE change_seq END, missing = 0 WHERE source_kind = ? AND native_id IN (`+placeholders[:len(placeholders)-1]+`)`,
+			args...)
+		if err != nil {
+			return marked, err
 		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return marked, err
+		}
+		marked += n
 	}
-	return nil
+	return marked, nil
 }

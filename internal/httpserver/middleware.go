@@ -123,7 +123,15 @@ func RequestLogger(next http.Handler) http.Handler {
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		start := time.Now()
 		next.ServeHTTP(rec, r.WithContext(logging.With(r.Context(), l)))
-		l.Info("request", "status", rec.status, "duration_ms", time.Since(start).Milliseconds())
+		args := []any{"status", rec.status, "duration_ms", time.Since(start).Milliseconds()}
+		switch {
+		case rec.status >= 500:
+			l.Error("request", args...)
+		case rec.status >= 400:
+			l.Info("request", args...)
+		default:
+			l.Debug("request", args...)
+		}
 	})
 }
 

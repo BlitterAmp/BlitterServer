@@ -46,6 +46,12 @@ func (s *Store) PendingMusicBrainzArtists(ctx context.Context, cursor string, li
 	return artists[:limit], artists[limit-1].ArtistID, nil
 }
 
+func (s *Store) CountPendingMusicBrainzArtists(ctx context.Context) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM artists WHERE musicbrainz_id IS NOT NULL AND musicbrainz_aliases_fetched_at=0`).Scan(&count)
+	return count, err
+}
+
 // MarkMusicBrainzArtistMetadataTerminal records an invalid or permanently
 // unavailable MBID without treating its local name as canonical evidence.
 func (s *Store) MarkMusicBrainzArtistMetadataTerminal(ctx context.Context, artistID, mbid string) error {
