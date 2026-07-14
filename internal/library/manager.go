@@ -10,7 +10,6 @@ import (
 	"io"
 	"math/rand/v2"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -54,27 +53,36 @@ type Manager struct {
 	bus      *events.Bus
 	enricher Enricher
 
-	// onScanStart is a test seam observing when a scan begins.
-	onScanStart func()
+	// Test seams for deterministic lifecycle concurrency coverage.
+	onScanStart      func()
+	onOpenResolved   func()
+	onConfigureReady func()
 
-	mu                sync.Mutex
-	src               source.MusicSource
-	scanning          bool
-	enriching         bool
-	enrichmentPending bool
-	resetArtists      bool
-	resetAlbums       bool
-	closed            bool
-	lifecycleCtx      context.Context
-	cancelLifecycle   context.CancelFunc
-	enrichmentWG      sync.WaitGroup
-	schedulerWG       sync.WaitGroup
-	scanWG            sync.WaitGroup
-	resetArtRetries   func(context.Context, bool) error
-	waitResetRetry    func(context.Context, int) bool
-	waitEnrichment    func(context.Context) bool
-	schedulerStarted  bool
-	operation         chan struct{}
+	mu                   sync.Mutex
+	sourceConfig         sync.Mutex
+	src                  source.MusicSource
+	sourceID             string
+	sourceGeneration     int64
+	scanning             bool
+	scanPending          bool
+	enriching            bool
+	enrichmentPending    bool
+	resetArtists         bool
+	resetAlbums          bool
+	closed               bool
+	lifecycleCtx         context.Context
+	cancelLifecycle      context.CancelFunc
+	enrichmentWG         sync.WaitGroup
+	schedulerWG          sync.WaitGroup
+	scanWG               sync.WaitGroup
+	resetArtRetries      func(context.Context, bool) error
+	waitResetRetry       func(context.Context, int) bool
+	waitEnrichment       func(context.Context) bool
+	schedulerStarted     bool
+	operation            chan struct{}
+	upsertTrack          func(context.Context, string, source.TrackMeta, string, int64) error
+	now                  func() time.Time
+	scanProgressInterval time.Duration
 }
 
 // SetBus wires the event bus so completed scans publish library.changed. The
@@ -245,16 +253,23 @@ func NewManager(st *store.Store, dataDir string) *Manager {
 	m := &Manager{
 		st: st, dataDir: dataDir, lifecycleCtx: lifecycleCtx,
 		cancelLifecycle: cancelLifecycle, resetArtRetries: st.ResetArtRetries,
-		waitResetRetry: waitForResetRetry,
-		waitEnrichment: waitForEnrichment,
-		operation:      make(chan struct{}, 1),
+		waitResetRetry:       waitForResetRetry,
+		waitEnrichment:       waitForEnrichment,
+		operation:            make(chan struct{}, 1),
+		upsertTrack:          st.UpsertTrack,
+		now:                  time.Now,
+		scanProgressInterval: 15 * time.Second,
 	}
 	m.operation <- struct{}{}
 	ctx := context.Background()
 	if kind, _, _ := st.GetSetting(ctx, settingSourceKind); kind == "filesystem" {
 		if path, ok, _ := st.GetSetting(ctx, settingFilesystemPath); ok && path != "" {
 			if src, err := filesystem.New(path); err == nil {
-				m.src = src
+				if instance, _, err := st.ConfigureFilesystemSource(ctx, path); err == nil {
+					m.src = src
+					m.sourceID = instance.ID
+					m.sourceGeneration = instance.Generation
+				}
 			}
 		}
 	}
@@ -277,6 +292,11 @@ func waitForEnrichment(ctx context.Context) bool {
 
 // Configure points the filesystem source at path and queues the initial scan.
 func (m *Manager) Configure(ctx context.Context, path string) error {
+	m.sourceConfig.Lock()
+	defer m.sourceConfig.Unlock()
+	if m.onConfigureReady != nil {
+		m.onConfigureReady()
+	}
 	m.mu.Lock()
 	closed := m.closed
 	m.mu.Unlock()
@@ -294,29 +314,72 @@ func (m *Manager) Configure(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
-	if err := m.st.SetSetting(ctx, settingSourceKind, "filesystem"); err != nil {
-		return err
-	}
-	if err := m.st.SetSetting(ctx, settingFilesystemPath, path); err != nil {
-		return err
-	}
 	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return ErrClosed
+	}
+	instance, _, err := m.st.ConfigureFilesystemSource(ctx, path)
+	if err != nil {
+		return err
+	}
+	if instance.Replaced {
+		log := logging.From(ctx).With("component", "library.configure", "source", "filesystem")
+		m.publishLibraryChangedLocked(ctx, log)
+	}
 	m.src = src
-	m.mu.Unlock()
-	return m.Rescan(ctx)
+	m.sourceID = instance.ID
+	m.sourceGeneration = instance.Generation
+	if m.scanning {
+		m.scanPending = true
+		return nil
+	}
+	m.startScanLocked()
+	return nil
 }
 
-// Unlink removes the source; library rows keep their missing flags from the
-// last scan (never deleted).
+// Unlink removes the source and marks its canonical library rows missing.
 func (m *Manager) Unlink(ctx context.Context) error {
-	if err := m.st.SetSetting(ctx, settingSourceKind, ""); err != nil {
-		return err
+	m.sourceConfig.Lock()
+	defer m.sourceConfig.Unlock()
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return ErrClosed
 	}
-	if err := m.st.SetSetting(ctx, settingFilesystemPath, ""); err != nil {
+	previousSource := m.src
+	previousID := m.sourceID
+	m.sourceGeneration++
+	fencedGeneration := m.sourceGeneration
+	m.src = nil
+	m.sourceID = ""
+	m.scanPending = false
+	m.mu.Unlock()
+
+	generation, err := m.st.UnlinkFilesystemSource(ctx)
+	if err != nil {
+		m.mu.Lock()
+		if m.closed {
+			m.mu.Unlock()
+			return err
+		}
+		m.src = previousSource
+		m.sourceID = previousID
+		m.sourceGeneration = fencedGeneration
+		if previousSource != nil {
+			if m.scanning {
+				m.scanPending = true
+			} else {
+				m.startScanLocked()
+			}
+		}
+		m.mu.Unlock()
 		return err
 	}
 	m.mu.Lock()
-	m.src = nil
+	m.sourceGeneration = generation
+	log := logging.From(ctx).With("component", "library.unlink", "source", "filesystem")
+	m.publishLibraryChangedLocked(ctx, log)
 	m.mu.Unlock()
 	return nil
 }
@@ -335,81 +398,9 @@ func (m *Manager) Rescan(ctx context.Context) error {
 	if m.scanning {
 		return nil
 	}
-	m.scanning = true
-	src := m.src
-	m.scanWG.Add(1)
-	go m.scan(src)
+	m.startScanLocked()
 	return nil
 }
-
-func (m *Manager) scan(src source.MusicSource) {
-	defer m.scanWG.Done()
-	if m.onScanStart != nil {
-		m.onScanStart()
-	}
-	ctx := m.lifecycleCtx
-	log := logging.From(ctx).With("component", "library.scan", "source", src.Kind())
-	start := time.Now()
-
-	if !m.acquireOperation() {
-		m.mu.Lock()
-		m.scanning = false
-		m.mu.Unlock()
-		return
-	}
-	err := m.runScan(ctx, src)
-	m.releaseOperation()
-	m.mu.Lock()
-	m.scanning = false
-	m.mu.Unlock()
-	if ctx.Err() != nil {
-		return
-	}
-
-	_ = m.st.SetSetting(ctx, settingLastScanAt, time.Now().UTC().Format(time.RFC3339))
-	if err != nil {
-		log.Error("scan failed", "err", err, "duration_ms", time.Since(start).Milliseconds())
-		_ = m.st.SetSetting(ctx, settingLastScanError, err.Error())
-		m.TriggerEnrichment()
-		return
-	}
-	_ = m.st.SetSetting(ctx, settingLastScanError, "")
-	log.Info("scan complete", "duration_ms", time.Since(start).Milliseconds())
-
-	// Nudge connected clients to pull the catalog delta (GET /v1/changes).
-	if m.bus != nil {
-		if sum, err := m.st.GetLibrarySummary(ctx); err != nil {
-			log.Error("read library summary for scan event", "err", err)
-		} else if libraryID, err := m.st.LibraryID(ctx); err != nil {
-			log.Error("read library id for scan event", "err", err)
-		} else {
-			if err := m.bus.Publish(ctx, "library.changed", "", map[string]any{
-				"libraryId": libraryID, "updatedAt": sum.UpdatedAt,
-			}); err != nil {
-				log.Error("publish scan library change", "err", err)
-			}
-		}
-	}
-
-	// Fill any art gaps from external sources in the background; enrichment
-	// emits its own library.changed when it attaches new covers/photos.
-	m.TriggerEnrichment()
-}
-
-func (m *Manager) acquireOperation() bool {
-	select {
-	case <-m.lifecycleCtx.Done():
-		return false
-	case <-m.operation:
-		if m.lifecycleCtx.Err() != nil {
-			m.releaseOperation()
-			return false
-		}
-		return true
-	}
-}
-
-func (m *Manager) releaseOperation() { m.operation <- struct{}{} }
 
 func waitForResetRetry(ctx context.Context, attempt int) bool {
 	if attempt > 8 {
@@ -424,38 +415,6 @@ func waitForResetRetry(ctx context.Context, attempt int) bool {
 	case <-ctx.Done():
 		return false
 	}
-}
-
-func (m *Manager) runScan(ctx context.Context, src source.MusicSource) error {
-	unlock := m.st.LockLibraryScan()
-	defer unlock()
-	seq, err := m.st.NextScanSeq(ctx)
-	if err != nil {
-		return err
-	}
-	artDir := filepath.Join(m.dataDir, "art")
-	artIDs := map[string]string{} // art hash → art id, per scan
-
-	err = src.Scan(ctx, func(meta source.TrackMeta) error {
-		artID := ""
-		if meta.ArtHash != "" {
-			if id, ok := artIDs[meta.ArtHash]; ok {
-				artID = id
-			} else if data, mime, err := src.Art(ctx, meta.NativeID); err == nil {
-				id, err := m.st.UpsertArt(ctx, meta.ArtHash, mime, data, artDir)
-				if err != nil {
-					return err
-				}
-				artIDs[meta.ArtHash] = id
-				artID = id
-			}
-		}
-		return m.st.UpsertTrack(ctx, src.Kind(), meta, artID, seq)
-	})
-	if err != nil {
-		return err
-	}
-	return m.st.FinishScan(ctx, src.Kind(), seq)
 }
 
 // Status reports the admin view.
@@ -510,13 +469,16 @@ func (m *Manager) Connected(ctx context.Context) bool {
 
 // Open resolves a canonical track id and opens its audio.
 func (m *Manager) Open(ctx context.Context, trackID string) (rc io.ReadSeekCloser, found bool, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	kind, nativeID, found, err := m.st.ResolveTrackNative(ctx, trackID)
 	if err != nil || !found {
 		return nil, found, err
 	}
-	m.mu.Lock()
+	if m.onOpenResolved != nil {
+		m.onOpenResolved()
+	}
 	src := m.src
-	m.mu.Unlock()
 	if src == nil || src.Kind() != kind {
 		return nil, false, ErrNotConfigured
 	}

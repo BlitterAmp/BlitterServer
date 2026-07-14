@@ -11,7 +11,6 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/BlitterAmp/BlitterServer/internal/musicbrainz"
 	"github.com/BlitterAmp/BlitterServer/internal/source"
 	"github.com/BlitterAmp/BlitterServer/internal/store"
 )
@@ -20,17 +19,6 @@ const (
 	acceptScore  = 80.0
 	acceptMargin = 10.0
 )
-
-type Resolver struct {
-	st        *store.Store
-	client    *musicbrainz.Client
-	now       func() time.Time
-	batchSize int
-}
-
-func New(st *store.Store, client *musicbrainz.Client) *Resolver {
-	return &Resolver{st: st, client: client, now: time.Now, batchSize: 5}
-}
 
 type artistCredit struct {
 	Name       string `json:"name"`
@@ -61,46 +49,6 @@ type release struct {
 		ID string `json:"id"`
 	} `json:"release-group"`
 	Media []medium `json:"media"`
-}
-
-func (r *Resolver) Run(ctx context.Context) (bool, error) {
-	return r.RunWithProgress(ctx, nil)
-}
-
-// RunWithProgress invokes progress after every album whose stored identity
-// actually changed, so long drains can surface incremental updates.
-func (r *Resolver) RunWithProgress(ctx context.Context, progress func()) (bool, error) {
-	changed := false
-	var batchErr error
-	var afterDueAt int64 = -1
-	var afterID string
-	for {
-		albums, err := r.st.DueMusicBrainzAlbumsPage(ctx, r.now(), afterDueAt, afterID, r.batchSize)
-		if err != nil {
-			return changed, err
-		}
-		if len(albums) == 0 {
-			return changed, batchErr
-		}
-		for _, album := range albums {
-			afterDueAt, afterID = album.DueAt, album.AlbumID
-			if err := ctx.Err(); err != nil {
-				return changed, err
-			}
-			c, err := r.resolve(ctx, album)
-			if err != nil {
-				if ctx.Err() != nil {
-					return changed, ctx.Err()
-				}
-				batchErr = err
-				continue
-			}
-			changed = changed || c
-			if c && progress != nil {
-				progress()
-			}
-		}
-	}
 }
 
 func (r *Resolver) resolve(ctx context.Context, album store.MusicBrainzAlbum) (bool, error) {

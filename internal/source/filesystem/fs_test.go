@@ -2,12 +2,15 @@ package filesystem
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/BlitterAmp/BlitterServer/internal/source"
 )
@@ -68,7 +71,11 @@ func run(t *testing.T, name string, args ...string) {
 func scanAll(t *testing.T, src *Source) []source.TrackMeta {
 	t.Helper()
 	var out []source.TrackMeta
-	if err := src.Scan(context.Background(), func(m source.TrackMeta) error {
+	if err := src.Enumerate(context.Background(), func(candidate source.TrackCandidate) error {
+		m, err := src.Parse(context.Background(), candidate)
+		if err != nil {
+			return err
+		}
 		out = append(out, m)
 		return nil
 	}); err != nil {
@@ -76,6 +83,71 @@ func scanAll(t *testing.T, src *Source) []source.TrackMeta {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].NativeID < out[j].NativeID })
 	return out
+}
+
+func TestEnumerateCandidatesReportsFingerprintWithoutParsingMedia(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "unparseable.mp3")
+	contents := []byte("not an mp3, but enumeration must not care")
+	if err := os.WriteFile(path, contents, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wantTime := time.Unix(1_700_000_000, 123456789)
+	if err := os.Chtimes(path, wantTime, wantTime); err != nil {
+		t.Fatal(err)
+	}
+	src, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var candidates []source.TrackCandidate
+	if err := src.Enumerate(context.Background(), func(candidate source.TrackCandidate) error {
+		candidates = append(candidates, candidate)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("candidates=%+v", candidates)
+	}
+	got := candidates[0]
+	if got.NativeID != "unparseable.mp3" || got.SizeBytes != int64(len(contents)) || got.MtimeNS != wantTime.UnixNano() {
+		t.Fatalf("candidate=%+v", got)
+	}
+	if src.ParserVersion() <= 0 {
+		t.Fatalf("parser version=%d", src.ParserVersion())
+	}
+}
+
+func TestParseRejectsCandidateChangedBeforeRead(t *testing.T) {
+	root := fixtureLibrary(t)
+	src, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var candidate source.TrackCandidate
+	stop := errors.New("stop")
+	err = src.Enumerate(context.Background(), func(got source.TrackCandidate) error {
+		candidate = got
+		return stop
+	})
+	if !errors.Is(err, stop) {
+		t.Fatalf("enumerate stop: %v", err)
+	}
+	candidate.MtimeNS++
+	if _, err := src.Parse(context.Background(), candidate); !errors.Is(err, ErrCandidateChanged) {
+		t.Fatalf("parse changed candidate: %v", err)
+	}
+}
+
+func TestSourceRevisionIncludesSizeAndNanosecondMtime(t *testing.T) {
+	base := sourceRevision(100, time.Unix(1_700_000_000, 1).UnixNano())
+	if got := sourceRevision(100, time.Unix(1_700_000_000, 2).UnixNano()); got == base {
+		t.Fatalf("same-second nanosecond change retained revision %d", got)
+	}
+	if got := sourceRevision(101, time.Unix(1_700_000_000, 1).UnixNano()); got == base {
+		t.Fatalf("size change retained revision %d", got)
+	}
 }
 
 func TestScanFindsTaggedTracks(t *testing.T) {
@@ -140,18 +212,44 @@ func TestOpenAndArt(t *testing.T) {
 		t.Fatalf("open must return the audio bytes: %v %q", err, head)
 	}
 
-	data, mime, err := src.Art(context.Background(), tracks[0].NativeID)
+	candidate := candidateByID(t, src, tracks[0].NativeID)
+	data, mime, err := src.Art(context.Background(), candidate, tracks[0].ArtHash)
 	if err != nil || len(data) == 0 || mime == "" {
 		t.Fatalf("art: %v %d bytes %q", err, len(data), mime)
 	}
-	if _, _, err := src.Art(context.Background(), tracks[1].NativeID); err == nil {
+	if _, _, err := src.Art(context.Background(), candidateByID(t, src, tracks[1].NativeID), "missing-hash"); err == nil {
 		t.Fatal("artless track must error on Art()")
+	}
+	if _, _, err := src.Art(context.Background(), candidate, strings.Repeat("0", 64)); err == nil || strings.Contains(err.Error(), candidate.NativeID) {
+		t.Fatalf("wrong art hash must fail without exposing path: %v", err)
+	}
+	stale := candidate
+	stale.MtimeNS++
+	if _, _, err := src.Art(context.Background(), stale, tracks[0].ArtHash); !errors.Is(err, ErrCandidateChanged) {
+		t.Fatalf("stale art candidate: %v", err)
 	}
 
 	// Path traversal must not escape the root.
 	if _, err := src.Open(context.Background(), "../../etc/passwd"); err == nil {
 		t.Fatal("open must reject escaping native ids")
 	}
+}
+
+func candidateByID(t *testing.T, src *Source, nativeID string) source.TrackCandidate {
+	t.Helper()
+	var found source.TrackCandidate
+	if err := src.Enumerate(context.Background(), func(candidate source.TrackCandidate) error {
+		if candidate.NativeID == nativeID {
+			found = candidate
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if found.NativeID == "" {
+		t.Fatalf("candidate %q not found", nativeID)
+	}
+	return found
 }
 
 func TestNewRejectsMissingRoot(t *testing.T) {

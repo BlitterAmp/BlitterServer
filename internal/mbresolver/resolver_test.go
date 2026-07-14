@@ -88,9 +88,13 @@ func TestEmbeddedReleaseIDUsesDirectLookup(t *testing.T) {
 	}
 	r := New(st, client)
 	r.now = func() time.Time { return time.Unix(1000, 0) }
-	changed, err := r.Run(ctx)
+	var observed ResolutionProgress
+	changed, err := r.RunWithProgress(ctx, func(progress ResolutionProgress) { observed = progress })
 	if err != nil || !changed {
 		t.Fatalf("changed=%v err=%v", changed, err)
+	}
+	if observed.Processed != 1 || observed.Applied != 1 || observed.Failed != 0 {
+		t.Fatalf("progress=%+v", observed)
 	}
 	if !strings.HasSuffix(path, "/release/embedded-release") {
 		t.Fatalf("path=%q", path)

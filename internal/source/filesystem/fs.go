@@ -5,7 +5,9 @@ package filesystem
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -17,6 +19,19 @@ import (
 	"github.com/dhowden/tag"
 	"github.com/dhowden/tag/mbz"
 )
+
+const parserVersion = 1
+
+// ErrCandidateChanged means a file changed while a scan was considering it.
+var ErrCandidateChanged = errors.New("track candidate changed during parse")
+
+type enumerationError struct {
+	operation string
+	cause     error
+}
+
+func (e *enumerationError) Error() string { return "filesystem " + e.operation + " failed" }
+func (e *enumerationError) Unwrap() error { return e.cause }
 
 var audioExts = map[string]bool{
 	".flac": true, ".mp3": true, ".m4a": true, ".mp4": true,
@@ -30,17 +45,23 @@ type Source struct {
 }
 
 func New(root string) (*Source, error) {
-	st, err := os.Stat(root)
+	normalized, err := filepath.Abs(filepath.Clean(root))
+	if err != nil {
+		return nil, fmt.Errorf("filesystem source: %w", err)
+	}
+	st, err := os.Stat(normalized)
 	if err != nil {
 		return nil, fmt.Errorf("filesystem source: %w", err)
 	}
 	if !st.IsDir() {
-		return nil, fmt.Errorf("filesystem source: %s is not a directory", root)
+		return nil, fmt.Errorf("filesystem source: %s is not a directory", normalized)
 	}
-	return &Source{root: root}, nil
+	return &Source{root: normalized}, nil
 }
 
 func (s *Source) Kind() string { return "filesystem" }
+
+func (s *Source) ParserVersion() int { return parserVersion }
 
 // resolve maps a native id back to an absolute path, refusing escapes.
 func (s *Source) resolve(nativeID string) (string, error) {
@@ -56,13 +77,25 @@ func (s *Source) resolve(nativeID string) (string, error) {
 	if abs != rootAbs && !strings.HasPrefix(abs, rootAbs+string(os.PathSeparator)) {
 		return "", fmt.Errorf("native id %q escapes the source root", nativeID)
 	}
-	return abs, nil
+	realRoot, err := filepath.EvalSymlinks(rootAbs)
+	if err != nil {
+		return "", err
+	}
+	realPath, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", err
+	}
+	if realPath != realRoot && !strings.HasPrefix(realPath, realRoot+string(os.PathSeparator)) {
+		return "", fmt.Errorf("native id %q escapes the source root", nativeID)
+	}
+	return realPath, nil
 }
 
-func (s *Source) Scan(ctx context.Context, emit func(source.TrackMeta) error) error {
+// Enumerate walks supported files and reports only stat-derived fingerprints.
+func (s *Source) Enumerate(ctx context.Context, emit func(source.TrackCandidate) error) error {
 	return filepath.WalkDir(s.root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return err
+			return &enumerationError{operation: "walk", cause: err}
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -70,39 +103,79 @@ func (s *Source) Scan(ctx context.Context, emit func(source.TrackMeta) error) er
 		if d.IsDir() || !audioExts[strings.ToLower(filepath.Ext(path))] {
 			return nil
 		}
-		meta, err := s.read(path)
+		resolved, err := s.resolvePath(path)
 		if err != nil {
-			// A single unreadable file must not kill the scan; it simply
-			// isn't library material until it parses.
+			return &enumerationError{operation: "resolve", cause: err}
+		}
+		st, err := os.Stat(resolved)
+		if err != nil {
+			return &enumerationError{operation: "stat", cause: err}
+		}
+		if !st.Mode().IsRegular() {
 			return nil
 		}
-		return emit(meta)
+		rel, err := filepath.Rel(s.root, path)
+		if err != nil {
+			return err
+		}
+		return emit(source.TrackCandidate{NativeID: filepath.ToSlash(rel), SizeBytes: st.Size(), MtimeNS: st.ModTime().UnixNano()})
 	})
 }
 
-func (s *Source) read(path string) (source.TrackMeta, error) {
+func (s *Source) resolvePath(path string) (string, error) {
 	rel, err := filepath.Rel(s.root, path)
 	if err != nil {
-		return source.TrackMeta{}, err
+		return "", err
 	}
-	probe, err := Probe(path)
+	return s.resolve(filepath.ToSlash(rel))
+}
+
+// Parse probes and reads tags only after verifying the enumerated fingerprint.
+func (s *Source) Parse(ctx context.Context, candidate source.TrackCandidate) (source.TrackMeta, error) {
+	path, err := s.resolve(candidate.NativeID)
 	if err != nil {
 		return source.TrackMeta{}, err
 	}
-	st, err := os.Stat(path)
+	if err := ctx.Err(); err != nil {
+		return source.TrackMeta{}, err
+	}
+	before, err := os.Stat(path)
+	if err != nil || !sameCandidate(candidate, before) {
+		return source.TrackMeta{}, ErrCandidateChanged
+	}
+	meta, err := s.read(path, candidate)
+	if err != nil {
+		return source.TrackMeta{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return source.TrackMeta{}, err
+	}
+	after, err := os.Stat(path)
+	if err != nil || !sameCandidate(candidate, after) {
+		return source.TrackMeta{}, ErrCandidateChanged
+	}
+	return meta, nil
+}
+
+func sameCandidate(candidate source.TrackCandidate, st os.FileInfo) bool {
+	return st != nil && st.Mode().IsRegular() && st.Size() == candidate.SizeBytes && st.ModTime().UnixNano() == candidate.MtimeNS
+}
+
+func (s *Source) read(path string, candidate source.TrackCandidate) (source.TrackMeta, error) {
+	probe, err := Probe(path)
 	if err != nil {
 		return source.TrackMeta{}, err
 	}
 
 	meta := source.TrackMeta{
-		NativeID:    rel,
+		NativeID:    candidate.NativeID,
 		Title:       strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)),
 		DurationMs:  probe.DurationMs,
 		Container:   probe.Container,
 		Codec:       probe.Codec,
 		BitrateKbps: probe.BitrateKbps,
 		SizeBytes:   probe.SizeBytes,
-		Version:     st.ModTime().Unix(),
+		Version:     sourceRevision(candidate.SizeBytes, candidate.MtimeNS),
 	}
 
 	f, err := os.Open(path)
@@ -151,6 +224,18 @@ func (s *Source) read(path string) (source.TrackMeta, error) {
 	return meta, nil
 }
 
+func sourceRevision(sizeBytes, mtimeNS int64) int64 {
+	var fingerprint [16]byte
+	binary.LittleEndian.PutUint64(fingerprint[:8], uint64(sizeBytes))
+	binary.LittleEndian.PutUint64(fingerprint[8:], uint64(mtimeNS))
+	sum := sha256.Sum256(fingerprint[:])
+	revision := int64(binary.LittleEndian.Uint64(sum[:8]) & uint64(^uint64(0)>>1))
+	if revision == 0 {
+		return 1
+	}
+	return revision
+}
+
 func validUUID(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	if len(value) != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
@@ -175,10 +260,17 @@ func (s *Source) Open(_ context.Context, nativeID string) (io.ReadSeekCloser, er
 	return os.Open(path)
 }
 
-func (s *Source) Art(_ context.Context, nativeID string) ([]byte, string, error) {
-	path, err := s.resolve(nativeID)
+func (s *Source) Art(ctx context.Context, candidate source.TrackCandidate, expectedHash string) ([]byte, string, error) {
+	path, err := s.resolve(candidate.NativeID)
 	if err != nil {
 		return nil, "", err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+	before, err := os.Stat(path)
+	if err != nil || !sameCandidate(candidate, before) {
+		return nil, "", ErrCandidateChanged
 	}
 	f, err := os.Open(path)
 	if err != nil {
@@ -187,11 +279,22 @@ func (s *Source) Art(_ context.Context, nativeID string) ([]byte, string, error)
 	defer f.Close()
 	t, err := tag.ReadFrom(f)
 	if err != nil {
-		return nil, "", err
+		return nil, "", fmt.Errorf("read embedded art: %w", err)
 	}
 	pic := t.Picture()
 	if pic == nil || len(pic.Data) == 0 {
-		return nil, "", fmt.Errorf("no embedded art in %s", nativeID)
+		return nil, "", errors.New("no embedded art")
+	}
+	sum := sha256.Sum256(pic.Data)
+	if hex.EncodeToString(sum[:]) != expectedHash {
+		return nil, "", errors.New("embedded art hash mismatch")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+	after, err := os.Stat(path)
+	if err != nil || !sameCandidate(candidate, after) {
+		return nil, "", ErrCandidateChanged
 	}
 	mime := pic.MIMEType
 	if mime == "" {
