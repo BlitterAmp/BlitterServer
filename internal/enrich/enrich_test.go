@@ -412,7 +412,7 @@ func TestEnrichMarksTriedWhenNothingFound(t *testing.T) {
 	}
 }
 
-func TestEnrichArtistPhotoFromFanart(t *testing.T) {
+func TestEnrichSkipsCreditOnlyArtistPhoto(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, t.TempDir())
 	if err != nil {
@@ -436,17 +436,8 @@ func TestEnrichArtistPhotoFromFanart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var artistID string
-	for _, artist := range artists {
-		if artist.Name == "Photo Artist" {
-			artistID = artist.ArtistID
-		}
-	}
-	if artistID == "" {
-		t.Fatalf("photo artist missing: %+v", artists)
-	}
-	if albums, err := st.ListArtistAlbums(ctx, artistID); err != nil || len(albums) != 0 {
-		t.Fatalf("photo artist unexpectedly owns albums: %+v err=%v", albums, err)
+	if len(artists) != 1 || artists[0].Name != "Compilation Owner" {
+		t.Fatalf("credit-only artist became top-level: %+v", artists)
 	}
 
 	mbCalls := 0
@@ -456,8 +447,10 @@ func TestEnrichArtistPhotoFromFanart(t *testing.T) {
 			mbCalls++
 			if strings.Contains(r.URL.Query().Get("query"), "Photo Artist") {
 				photoArtistMBCalls++
+				_, _ = w.Write([]byte(`{"artists":[{"id":"ar-1","name":" photo artist "}]}`))
+				return
 			}
-			_, _ = w.Write([]byte(`{"artists":[{"id":"ar-1","name":" photo artist "}]}`))
+			_, _ = w.Write([]byte(`{"artists":[]}`))
 		} else {
 			_, _ = w.Write([]byte(`{"release-groups":[]}`))
 		}
@@ -488,11 +481,7 @@ func TestEnrichArtistPhotoFromFanart(t *testing.T) {
 	e.providerPacers = map[string]*providerPacer{}
 	e.Run(ctx)
 
-	artist, found, err := st.GetArtist(ctx, artistID)
-	if err != nil || !found || artist.ArtID == "" {
-		t.Fatalf("artist photo not attached: found=%v artist=%+v err=%v", found, artist, err)
-	}
-	if mbCalls == 0 || photoArtistMBCalls != 1 || fanartCalls != 1 {
+	if mbCalls == 0 || photoArtistMBCalls != 0 || fanartCalls != 0 {
 		t.Fatalf("provider calls: musicbrainz=%d photo_artist=%d fanart=%d", mbCalls, photoArtistMBCalls, fanartCalls)
 	}
 }

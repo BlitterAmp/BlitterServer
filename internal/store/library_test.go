@@ -268,6 +268,9 @@ func TestMusicBrainzIdentityAndStructuredCredits(t *testing.T) {
 	if err := s.UpsertTrack(ctx, "filesystem", homonym, "", seq); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.FinishScan(ctx, "filesystem", seq); err != nil {
+		t.Fatal(err)
+	}
 
 	artists, _, err := s.ListArtists(ctx, "title", "", 20)
 	if err != nil {
@@ -286,14 +289,15 @@ func TestMusicBrainzIdentityAndStructuredCredits(t *testing.T) {
 		t.Fatalf("primary identity: %+v", primary)
 	}
 	search, err := s.SearchLibrary(ctx, "Guest")
-	if err != nil || len(search.Artists) != 1 || search.Artists[0].MusicBrainzID != guestMBID || search.Artists[0].AlbumCount != 0 || search.Artists[0].TrackCount != 1 {
-		t.Fatalf("guest search: %v %+v", err, search.Artists)
+	if err != nil || len(search.Artists) != 0 || len(search.Tracks) != 1 {
+		t.Fatalf("guest search: %v artists=%+v tracks=%+v", err, search.Artists, search.Tracks)
 	}
-	guest, found, err := s.GetArtist(ctx, search.Artists[0].ArtistID)
-	if err != nil || !found || guest.MusicBrainzID != guestMBID {
-		t.Fatalf("guest detail: found=%v err=%v artist=%+v", found, err, guest)
+	guestID := search.Tracks[0].ArtistCredits[1].ArtistID
+	guest, found, err := s.GetArtist(ctx, guestID)
+	if err != nil || found {
+		t.Fatalf("credit-only artist became a resource: found=%v err=%v artist=%+v", found, err, guest)
 	}
-	tracks, err := s.ListArtistTracks(ctx, guest.ArtistID)
+	tracks, err := s.ListArtistTracks(ctx, guestID)
 	if err != nil || len(tracks) != 1 {
 		t.Fatalf("featured membership: %v %+v", err, tracks)
 	}
@@ -449,13 +453,13 @@ func TestRescanUsesExistingCanonicalIdentityOnMBIDConflict(t *testing.T) {
 	}
 }
 
-func TestFinishScanKeepsAlbumAndCreditedArtistsPresent(t *testing.T) {
+func TestFinishScanRemovesCreditOnlyCollaboratorFromArtistCatalog(t *testing.T) {
 	s := open(t)
 	ctx := context.Background()
 	seq, _ := s.NextScanSeq(ctx)
-	track := meta("compilation.flac", "Song", "Various Artists", "Compilation", "", 2000, 1)
-	track.TrackCredits = []source.ArtistCredit{{Name: "Performer"}}
-	track.AlbumCredits = []source.ArtistCredit{{Name: "Various Artists"}}
+	track := meta("eminem/the-monster.flac", "The Monster", "Eminem", "The Marshall Mathers LP2", "", 2013, 1)
+	track.TrackCredits = []source.ArtistCredit{{Name: "Eminem feat. Rihanna"}}
+	track.AlbumCredits = []source.ArtistCredit{{Name: "Eminem"}}
 	if err := s.UpsertTrack(ctx, "filesystem", track, "", seq); err != nil {
 		t.Fatal(err)
 	}
@@ -463,17 +467,33 @@ func TestFinishScanKeepsAlbumAndCreditedArtistsPresent(t *testing.T) {
 		t.Fatal(err)
 	}
 	artists, _, err := s.ListArtists(ctx, "title", "", 10)
-	if err != nil || len(artists) != 2 {
-		t.Fatalf("compilation artists: err=%v artists=%+v", err, artists)
+	if err != nil || len(artists) != 1 || artists[0].Name != "Eminem" {
+		t.Fatalf("catalog artists: err=%v artists=%+v", err, artists)
 	}
 	for _, artist := range artists {
 		if _, found, err := s.GetArtist(ctx, artist.ArtistID); err != nil || !found {
 			t.Fatalf("artist %q is not resolvable: found=%v err=%v", artist.Name, found, err)
 		}
 	}
-	result, err := s.SearchLibrary(ctx, "Performer")
-	if err != nil || len(result.Artists) != 1 || result.Artists[0].TrackCount != 1 {
-		t.Fatalf("credited artist search count: err=%v result=%+v", err, result.Artists)
+	needsArt, err := s.ArtistsNeedingArt(ctx, 10)
+	if err != nil || len(needsArt) != 1 || needsArt[0].Name != "Eminem" {
+		t.Fatalf("only album owners should be enriched: err=%v artists=%+v", err, needsArt)
+	}
+	result, err := s.SearchLibrary(ctx, "Rihanna")
+	if err != nil || len(result.Artists) != 0 || len(result.Tracks) != 1 {
+		t.Fatalf("credited performer should resolve only through tracks: err=%v result=%+v", err, result)
+	}
+	changes, _, err := s.ChangesSince(ctx, 0, "", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	creditID := result.Tracks[0].ArtistCredits[0].ArtistID
+	removed := false
+	for _, change := range changes {
+		removed = removed || change.Kind == "artist" && change.ID == creditID && change.Missing
+	}
+	if !removed {
+		t.Fatalf("credit-only artist did not produce a removal: %+v", changes)
 	}
 }
 
@@ -518,6 +538,9 @@ func TestAlbumOwnershipUsesAlbumCreditsWhileTrackBrowseUsesCredits(t *testing.T)
 	for _, artist := range artists {
 		byName[artist.Name] = artist
 	}
+	if len(artists) != 1 {
+		t.Fatalf("only the album owner should be top-level: %+v", artists)
+	}
 	owner := byName["Album Owner"]
 	if owner.AlbumCount != 1 {
 		t.Fatalf("owner=%+v", owner)
@@ -526,16 +549,20 @@ func TestAlbumOwnershipUsesAlbumCreditsWhileTrackBrowseUsesCredits(t *testing.T)
 	if err != nil || len(owned) != 1 || owned[0].AlbumID != albums[0].AlbumID {
 		t.Fatalf("owned albums=%+v err=%v", owned, err)
 	}
-	guest := byName["Guest One"]
-	guestDetail, found, err := s.GetArtist(ctx, guest.ArtistID)
-	if err != nil || !found || guestDetail.AlbumCount != 0 || guestDetail.TrackCount != 1 {
-		t.Fatalf("guest=%+v found=%v err=%v", guestDetail, found, err)
+	search, err := s.SearchLibrary(ctx, "Guest One")
+	if err != nil || len(search.Artists) != 0 || len(search.Tracks) != 1 {
+		t.Fatalf("credited guest search=%+v err=%v", search, err)
 	}
-	guestAlbums, err := s.ListArtistAlbums(ctx, guest.ArtistID)
+	guestID := search.Tracks[0].ArtistCredits[0].ArtistID
+	guest, found, err := s.GetArtist(ctx, guestID)
+	if err != nil || found {
+		t.Fatalf("credit-only guest became a resource: guest=%+v found=%v err=%v", guest, found, err)
+	}
+	guestAlbums, err := s.ListArtistAlbums(ctx, guestID)
 	if err != nil || len(guestAlbums) != 0 {
 		t.Fatalf("guest albums=%+v err=%v", guestAlbums, err)
 	}
-	guestTracks, err := s.ListArtistTracks(ctx, guest.ArtistID)
+	guestTracks, err := s.ListArtistTracks(ctx, guestID)
 	if err != nil || len(guestTracks) != 1 || guestTracks[0].Title != "One" {
 		t.Fatalf("guest tracks=%+v err=%v", guestTracks, err)
 	}

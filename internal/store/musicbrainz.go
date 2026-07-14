@@ -249,8 +249,8 @@ func (s *Store) applyMusicBrainzRelease(ctx context.Context, album MusicBrainzAl
 			return false, err
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE artists SET
-			change_seq = CASE WHEN missing != (NOT EXISTS (SELECT 1 FROM tracks JOIN track_artist_credits c ON c.track_id=tracks.track_id WHERE c.artist_id=artists.artist_id AND tracks.missing=0) AND NOT EXISTS (SELECT 1 FROM tracks WHERE tracks.artist_id=artists.artist_id AND tracks.missing=0) AND NOT EXISTS (SELECT 1 FROM albums JOIN album_artist_credits c ON c.album_id=albums.album_id WHERE c.artist_id=artists.artist_id AND albums.missing=0) AND NOT EXISTS (SELECT 1 FROM albums WHERE albums.artist_id=artists.artist_id AND albums.missing=0)) THEN ? ELSE change_seq END,
-			missing = NOT EXISTS (SELECT 1 FROM tracks JOIN track_artist_credits c ON c.track_id=tracks.track_id WHERE c.artist_id=artists.artist_id AND tracks.missing=0) AND NOT EXISTS (SELECT 1 FROM tracks WHERE tracks.artist_id=artists.artist_id AND tracks.missing=0) AND NOT EXISTS (SELECT 1 FROM albums JOIN album_artist_credits c ON c.album_id=albums.album_id WHERE c.artist_id=artists.artist_id AND albums.missing=0) AND NOT EXISTS (SELECT 1 FROM albums WHERE albums.artist_id=artists.artist_id AND albums.missing=0)`, seq); err != nil {
+			change_seq = CASE WHEN missing != NOT EXISTS (SELECT 1 FROM albums WHERE albums.artist_id=artists.artist_id AND albums.missing=0) THEN ? ELSE change_seq END,
+			missing = NOT EXISTS (SELECT 1 FROM albums WHERE albums.artist_id=artists.artist_id AND albums.missing=0)`, seq); err != nil {
 			return false, err
 		}
 		afterCounts, err := albumArtistCountsTx(ctx, tx, album.AlbumID)
@@ -312,7 +312,7 @@ func albumArtistCountsTx(ctx context.Context, tx *sql.Tx, albumID string) (map[s
 	for _, artistID := range artistIDs {
 		var count artistCounts
 		if err := tx.QueryRowContext(ctx, `SELECT
-			(SELECT count(DISTINCT al.album_id) FROM albums al JOIN album_artist_credits c ON c.album_id=al.album_id WHERE c.artist_id=? AND al.missing=0),
+			(SELECT count(*) FROM albums al WHERE al.artist_id=? AND al.missing=0),
 			(SELECT count(DISTINCT t.track_id) FROM tracks t JOIN track_artist_credits c ON c.track_id=t.track_id WHERE c.artist_id=? AND t.missing=0)`, artistID, artistID).Scan(&count.albums, &count.tracks); err != nil {
 			return nil, err
 		}

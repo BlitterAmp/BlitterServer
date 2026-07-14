@@ -96,6 +96,25 @@ func TestCacheHitBypassesRequestAndLimiter(t *testing.T) {
 	}
 }
 
+func TestHTTPStatusErrorSurvivesCacheHit(t *testing.T) {
+	requests := 0
+	c, _, closeFn := newTestClient(t, "", func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusNotFound)
+	})
+	defer closeFn()
+	var out any
+	for attempt := 1; attempt <= 2; attempt++ {
+		var statusErr *HTTPStatusError
+		if err := c.GetJSON(context.Background(), "/missing", &out); !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusNotFound {
+			t.Fatalf("attempt %d error=%v status=%+v", attempt, err, statusErr)
+		}
+	}
+	if requests != 1 {
+		t.Fatalf("cached status made %d requests", requests)
+	}
+}
+
 func TestGlobalPacingRetryAfterAndUserAgent(t *testing.T) {
 	requests := 0
 	c, clock, closeFn := newTestClient(t, "", func(w http.ResponseWriter, r *http.Request) {
@@ -200,10 +219,12 @@ func TestPersistedRetryDeadlineSurvivesClientRestart(t *testing.T) {
 	}
 	var out any
 	var backoff *BackoffError
-	if err := newClient().GetJSON(context.Background(), "/x", &out); !errors.As(err, &backoff) {
+	var statusErr *HTTPStatusError
+	if err := newClient().GetJSON(context.Background(), "/x", &out); !errors.As(err, &backoff) || !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("first error=%v", err)
 	}
-	if err := newClient().GetJSON(context.Background(), "/x", &out); !errors.As(err, &backoff) || requests != 1 {
+	statusErr = nil
+	if err := newClient().GetJSON(context.Background(), "/x", &out); !errors.As(err, &backoff) || !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusServiceUnavailable || requests != 1 {
 		t.Fatalf("cached error=%v requests=%d", err, requests)
 	}
 	clock.mu.Lock()
