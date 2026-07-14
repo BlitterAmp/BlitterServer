@@ -179,7 +179,7 @@ func (s *Server) ListChanges(ctx context.Context, req api.ListChangesRequestObje
 		return nil, err
 	}
 	resp := api.ListChanges200JSONResponse{
-		Version:          sum.Version,
+		Version:          stableChangesVersion(since, sum.Version, s.lib != nil && s.lib.Status(ctx).Scanning),
 		Artists:          []api.Artist{},
 		Albums:           []api.Album{},
 		Tracks:           []api.Track{},
@@ -224,6 +224,13 @@ func (s *Server) ListChanges(ctx context.Context, req api.ListChangesRequestObje
 		}
 	}
 	return resp, nil
+}
+
+func stableChangesVersion(since, current int64, scanning bool) int64 {
+	if scanning {
+		return since
+	}
+	return current
 }
 
 func (s *Server) ListArtists(ctx context.Context, req api.ListArtistsRequestObject) (api.ListArtistsResponseObject, error) {

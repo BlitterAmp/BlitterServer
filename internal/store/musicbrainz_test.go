@@ -321,7 +321,7 @@ func TestCanonicalConvergenceMarksDrainedArtistMissingAndRemoved(t *testing.T) {
 	}
 }
 
-func TestCombinedNameDissolvesAndGuestsRemainSearchableOnly(t *testing.T) {
+func TestCombinedNameDissolvesAndGuestsRemainCreditsOnly(t *testing.T) {
 	s, album := musicBrainzAlbumFixture(t)
 	ctx := context.Background()
 	combinedID := album.PrimaryArtist.ArtistID
@@ -341,16 +341,12 @@ func TestCombinedNameDissolvesAndGuestsRemainSearchableOnly(t *testing.T) {
 	if err := s.db.QueryRowContext(ctx, `SELECT artist_id FROM artists WHERE musicbrainz_id='y-mbid'`).Scan(&guestID); err != nil {
 		t.Fatal(err)
 	}
-	if guest, found, err := s.GetArtist(ctx, guestID); err != nil || !found || guest.Name != "Y" {
+	if guest, found, err := s.GetArtist(ctx, guestID); err != nil || found {
 		t.Fatalf("guest detail: found=%v err=%v guest=%+v", found, err, guest)
 	}
 	search, err := s.SearchLibrary(ctx, "Y")
-	foundGuest := false
-	for _, artist := range search.Artists {
-		foundGuest = foundGuest || artist.ArtistID == guestID
-	}
-	if err != nil || !foundGuest {
-		t.Fatalf("guest search=%+v err=%v", search.Artists, err)
+	if err != nil || len(search.Artists) != 0 || len(search.Tracks) != 1 {
+		t.Fatalf("guest search artists=%+v tracks=%+v err=%v", search.Artists, search.Tracks, err)
 	}
 	needs, err := s.ArtistsNeedingArt(ctx, 10)
 	if err != nil || len(needs) != 1 || needs[0].Name != "X" {

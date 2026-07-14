@@ -51,6 +51,15 @@ func TestLibraryIDIsStablePerDatabase(t *testing.T) {
 	}
 }
 
+func TestChangesVersionDoesNotAdvanceDuringScan(t *testing.T) {
+	if got := stableChangesVersion(41, 42, true); got != 41 {
+		t.Fatalf("in-progress scan advanced cursor to %d", got)
+	}
+	if got := stableChangesVersion(41, 42, false); got != 42 {
+		t.Fatalf("completed scan left cursor at %d", got)
+	}
+}
+
 // seedLibrary pushes a tiny library straight through the store (adapter
 // parsing is covered elsewhere).
 func seedLibrary(t *testing.T, st *store.Store) {
