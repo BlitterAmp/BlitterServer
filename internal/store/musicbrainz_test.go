@@ -97,8 +97,11 @@ func TestMusicBrainzEligibilityUsesPersistedDeadline(t *testing.T) {
 	if due, err := s.DueMusicBrainzAlbums(ctx, next.Add(-time.Second), 10); err != nil || len(due) != 0 {
 		t.Fatalf("early due=%d err=%v", len(due), err)
 	}
-	if due, err := s.DueMusicBrainzAlbums(ctx, next.Add(time.Second), 10); err != nil || len(due) != 1 {
-		t.Fatalf("overdue=%d err=%v", len(due), err)
+	if due, err := s.DueMusicBrainzAlbums(ctx, next.Add(time.Second), 10); err != nil || len(due) != 0 {
+		t.Fatalf("matched album became due after deadline: %d err=%v", len(due), err)
+	}
+	if n, err := s.CountDueMusicBrainzAlbums(ctx, next.Add(time.Second)); err != nil || n != 0 {
+		t.Fatalf("matched album counted after deadline: %d err=%v", n, err)
 	}
 }
 

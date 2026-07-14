@@ -23,6 +23,7 @@ const (
 	settingLastfmAPIKey       = "lastfm_api_key"
 	settingLastfmSharedSecret = "lastfm_shared_secret"
 	settingFanartAPIKey       = "fanart_api_key"
+	settingDiscogsToken       = "discogs_personal_token"
 )
 
 func (s *Server) lidarrConfigured(ctx context.Context) (baseURL, apiKey string, err error) {
@@ -157,6 +158,7 @@ func (s *Server) AdminSetLastfm(ctx context.Context, req api.AdminSetLastfmReque
 	if err := s.st.SetLastfmCredentials(ctx, req.Body.ApiKey, req.Body.SharedSecret); err != nil {
 		return nil, err
 	}
+	s.lib.TriggerArtistEnrichment()
 	s.lib.TriggerAlbumEnrichment()
 	return api.AdminSetLastfm204Response{}, nil
 }
@@ -189,6 +191,7 @@ func (s *Server) AdminSetFanart(ctx context.Context, req api.AdminSetFanartReque
 		return nil, err
 	}
 	s.lib.TriggerArtistEnrichment()
+	s.lib.TriggerAlbumEnrichment()
 	return api.AdminSetFanart204Response{}, nil
 }
 
@@ -197,4 +200,35 @@ func (s *Server) AdminDeleteFanart(ctx context.Context, _ api.AdminDeleteFanartR
 		return nil, err
 	}
 	return api.AdminDeleteFanart204Response{}, nil
+}
+
+func (s *Server) AdminGetDiscogs(ctx context.Context, _ api.AdminGetDiscogsRequestObject) (api.AdminGetDiscogsResponseObject, error) {
+	token, _, err := s.st.GetSetting(ctx, settingDiscogsToken)
+	if err != nil {
+		return nil, err
+	}
+	return api.AdminGetDiscogs200JSONResponse{Configured: token != ""}, nil
+}
+
+func (s *Server) AdminSetDiscogs(ctx context.Context, req api.AdminSetDiscogsRequestObject) (api.AdminSetDiscogsResponseObject, error) {
+	if req.Body == nil || req.Body.PersonalToken == nil {
+		return nil, badRequest("personal_token_required")
+	}
+	token := strings.TrimSpace(*req.Body.PersonalToken)
+	if token == "" {
+		return nil, badRequest("personal_token_required")
+	}
+	if err := s.st.SetSetting(ctx, settingDiscogsToken, token); err != nil {
+		return nil, err
+	}
+	s.lib.TriggerArtistEnrichment()
+	s.lib.TriggerAlbumEnrichment()
+	return api.AdminSetDiscogs204Response{}, nil
+}
+
+func (s *Server) AdminDeleteDiscogs(ctx context.Context, _ api.AdminDeleteDiscogsRequestObject) (api.AdminDeleteDiscogsResponseObject, error) {
+	if err := s.st.SetSetting(ctx, settingDiscogsToken, ""); err != nil {
+		return nil, err
+	}
+	return api.AdminDeleteDiscogs204Response{}, nil
 }

@@ -1646,6 +1646,11 @@ type adminSessionContextKey string
 // deviceTokenContextKey is the context key for deviceToken security scheme
 type deviceTokenContextKey string
 
+// AdminSetDiscogsJSONBody defines parameters for AdminSetDiscogs.
+type AdminSetDiscogsJSONBody struct {
+	PersonalToken *string `json:"personalToken,omitempty"`
+}
+
 // AdminSetFanartJSONBody defines parameters for AdminSetFanart.
 type AdminSetFanartJSONBody struct {
 	ApiKey string `json:"apiKey"`
@@ -1987,6 +1992,9 @@ type ListTracksParams struct {
 // ListTracksParamsSort defines parameters for ListTracks.
 type ListTracksParamsSort string
 
+// AdminSetDiscogsJSONRequestBody defines body for AdminSetDiscogs for application/json ContentType.
+type AdminSetDiscogsJSONRequestBody AdminSetDiscogsJSONBody
+
 // AdminSetFanartJSONRequestBody defines body for AdminSetFanart for application/json ContentType.
 type AdminSetFanartJSONRequestBody AdminSetFanartJSONBody
 
@@ -2158,6 +2166,17 @@ type ClientInterface interface {
 
 	// AdminRevokeDevice request
 	AdminRevokeDevice(ctx context.Context, deviceId string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// AdminDeleteDiscogs request
+	AdminDeleteDiscogs(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// AdminGetDiscogs request
+	AdminGetDiscogs(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// AdminSetDiscogsWithBody request with any body
+	AdminSetDiscogsWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	AdminSetDiscogs(ctx context.Context, body AdminSetDiscogsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// AdminDeleteFanart request
 	AdminDeleteFanart(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -2557,6 +2576,54 @@ func (c *Client) AdminListDevices(ctx context.Context, reqEditors ...RequestEdit
 
 func (c *Client) AdminRevokeDevice(ctx context.Context, deviceId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewAdminRevokeDeviceRequest(c.Server, deviceId)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AdminDeleteDiscogs(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminDeleteDiscogsRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AdminGetDiscogs(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminGetDiscogsRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AdminSetDiscogsWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminSetDiscogsRequestWithBody(c.Server, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) AdminSetDiscogs(ctx context.Context, body AdminSetDiscogsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewAdminSetDiscogsRequest(c.Server, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4280,6 +4347,100 @@ func NewAdminRevokeDeviceRequest(server string, deviceId string) (*http.Request,
 	if err != nil {
 		return nil, err
 	}
+
+	return req, nil
+}
+
+// NewAdminDeleteDiscogsRequest generates requests for AdminDeleteDiscogs
+func NewAdminDeleteDiscogsRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/api/integrations/discogs")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodDelete, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewAdminGetDiscogsRequest generates requests for AdminGetDiscogs
+func NewAdminGetDiscogsRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/api/integrations/discogs")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewAdminSetDiscogsRequest calls the generic AdminSetDiscogs builder with application/json body
+func NewAdminSetDiscogsRequest(server string, body AdminSetDiscogsJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewAdminSetDiscogsRequestWithBody(server, "application/json", bodyReader)
+}
+
+// NewAdminSetDiscogsRequestWithBody generates requests for AdminSetDiscogs with any type of body
+func NewAdminSetDiscogsRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/admin/api/integrations/discogs")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPut, queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	return req, nil
 }
@@ -8408,6 +8569,17 @@ type ClientWithResponsesInterface interface {
 	// AdminRevokeDeviceWithResponse request
 	AdminRevokeDeviceWithResponse(ctx context.Context, deviceId string, reqEditors ...RequestEditorFn) (*AdminRevokeDeviceResponse, error)
 
+	// AdminDeleteDiscogsWithResponse request
+	AdminDeleteDiscogsWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AdminDeleteDiscogsResponse, error)
+
+	// AdminGetDiscogsWithResponse request
+	AdminGetDiscogsWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AdminGetDiscogsResponse, error)
+
+	// AdminSetDiscogsWithBodyWithResponse request with any body
+	AdminSetDiscogsWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AdminSetDiscogsResponse, error)
+
+	AdminSetDiscogsWithResponse(ctx context.Context, body AdminSetDiscogsJSONRequestBody, reqEditors ...RequestEditorFn) (*AdminSetDiscogsResponse, error)
+
 	// AdminDeleteFanartWithResponse request
 	AdminDeleteFanartWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AdminDeleteFanartResponse, error)
 
@@ -8848,6 +9020,100 @@ func (r AdminRevokeDeviceResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r AdminRevokeDeviceResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type AdminDeleteDiscogsResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	ApplicationproblemJSON401 *Unauthorized
+}
+
+// Status returns HTTPResponse.Status
+func (r AdminDeleteDiscogsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r AdminDeleteDiscogsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r AdminDeleteDiscogsResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type AdminGetDiscogsResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *struct {
+		Configured bool `json:"configured"`
+	}
+	ApplicationproblemJSON401 *Unauthorized
+}
+
+// Status returns HTTPResponse.Status
+func (r AdminGetDiscogsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r AdminGetDiscogsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r AdminGetDiscogsResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+type AdminSetDiscogsResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	ApplicationproblemJSON400 *Problem
+	ApplicationproblemJSON401 *Unauthorized
+}
+
+// Status returns HTTPResponse.Status
+func (r AdminSetDiscogsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r AdminSetDiscogsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r AdminSetDiscogsResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -12297,6 +12563,41 @@ func (c *ClientWithResponses) AdminRevokeDeviceWithResponse(ctx context.Context,
 	return ParseAdminRevokeDeviceResponse(rsp)
 }
 
+// AdminDeleteDiscogsWithResponse request returning *AdminDeleteDiscogsResponse
+func (c *ClientWithResponses) AdminDeleteDiscogsWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AdminDeleteDiscogsResponse, error) {
+	rsp, err := c.AdminDeleteDiscogs(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAdminDeleteDiscogsResponse(rsp)
+}
+
+// AdminGetDiscogsWithResponse request returning *AdminGetDiscogsResponse
+func (c *ClientWithResponses) AdminGetDiscogsWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AdminGetDiscogsResponse, error) {
+	rsp, err := c.AdminGetDiscogs(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAdminGetDiscogsResponse(rsp)
+}
+
+// AdminSetDiscogsWithBodyWithResponse request with arbitrary body returning *AdminSetDiscogsResponse
+func (c *ClientWithResponses) AdminSetDiscogsWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*AdminSetDiscogsResponse, error) {
+	rsp, err := c.AdminSetDiscogsWithBody(ctx, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAdminSetDiscogsResponse(rsp)
+}
+
+func (c *ClientWithResponses) AdminSetDiscogsWithResponse(ctx context.Context, body AdminSetDiscogsJSONRequestBody, reqEditors ...RequestEditorFn) (*AdminSetDiscogsResponse, error) {
+	rsp, err := c.AdminSetDiscogs(ctx, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseAdminSetDiscogsResponse(rsp)
+}
+
 // AdminDeleteFanartWithResponse request returning *AdminDeleteFanartResponse
 func (c *ClientWithResponses) AdminDeleteFanartWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*AdminDeleteFanartResponse, error) {
 	rsp, err := c.AdminDeleteFanart(ctx, reqEditors...)
@@ -13568,6 +13869,100 @@ func ParseAdminRevokeDeviceResponse(rsp *http.Response) (*AdminRevokeDeviceRespo
 			return nil, err
 		}
 		response.ApplicationproblemJSON404 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseAdminDeleteDiscogsResponse parses an HTTP response from a AdminDeleteDiscogsWithResponse call
+func ParseAdminDeleteDiscogsResponse(rsp *http.Response) (*AdminDeleteDiscogsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AdminDeleteDiscogsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest Unauthorized
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseAdminGetDiscogsResponse parses an HTTP response from a AdminGetDiscogsWithResponse call
+func ParseAdminGetDiscogsResponse(rsp *http.Response) (*AdminGetDiscogsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AdminGetDiscogsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest struct {
+			Configured bool `json:"configured"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest Unauthorized
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseAdminSetDiscogsResponse parses an HTTP response from a AdminSetDiscogsWithResponse call
+func ParseAdminSetDiscogsResponse(rsp *http.Response) (*AdminSetDiscogsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &AdminSetDiscogsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest Problem
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest Unauthorized
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
 
 	}
 
@@ -17356,6 +17751,15 @@ type ServerInterface interface {
 	// Revoke a device (its token stops working immediately)
 	// (DELETE /admin/api/devices/{deviceId})
 	AdminRevokeDevice(w http.ResponseWriter, r *http.Request, deviceId string)
+	// Remove the Discogs personal access token
+	// (DELETE /admin/api/integrations/discogs)
+	AdminDeleteDiscogs(w http.ResponseWriter, r *http.Request)
+	// Discogs config state
+	// (GET /admin/api/integrations/discogs)
+	AdminGetDiscogs(w http.ResponseWriter, r *http.Request)
+	// Set the Discogs personal access token
+	// (PUT /admin/api/integrations/discogs)
+	AdminSetDiscogs(w http.ResponseWriter, r *http.Request)
 	// Remove the fanart.tv API key
 	// (DELETE /admin/api/integrations/fanart)
 	AdminDeleteFanart(w http.ResponseWriter, r *http.Request)
@@ -17731,6 +18135,66 @@ func (siw *ServerInterfaceWrapper) AdminRevokeDevice(w http.ResponseWriter, r *h
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.AdminRevokeDevice(w, r, deviceId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// AdminDeleteDiscogs operation middleware
+func (siw *ServerInterfaceWrapper) AdminDeleteDiscogs(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, AdminSessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AdminDeleteDiscogs(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// AdminGetDiscogs operation middleware
+func (siw *ServerInterfaceWrapper) AdminGetDiscogs(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, AdminSessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AdminGetDiscogs(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// AdminSetDiscogs operation middleware
+func (siw *ServerInterfaceWrapper) AdminSetDiscogs(w http.ResponseWriter, r *http.Request) {
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, AdminSessionScopes, []string{})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.AdminSetDiscogs(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -20901,6 +21365,9 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/api/devices", wrapper.AdminListDevices)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/admin/api/devices/{deviceId}", wrapper.AdminRevokeDevice)
+	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/admin/api/integrations/discogs", wrapper.AdminDeleteDiscogs)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/api/integrations/discogs", wrapper.AdminGetDiscogs)
+	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/admin/api/integrations/discogs", wrapper.AdminSetDiscogs)
 	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/admin/api/integrations/fanart", wrapper.AdminDeleteFanart)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/admin/api/integrations/fanart", wrapper.AdminGetFanart)
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/admin/api/integrations/fanart", wrapper.AdminSetFanart)
@@ -21101,6 +21568,124 @@ func (response AdminRevokeDevice404ApplicationProblemPlusJSONResponse) VisitAdmi
 	}
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminDeleteDiscogsRequestObject struct {
+}
+
+type AdminDeleteDiscogsResponseObject interface {
+	VisitAdminDeleteDiscogsResponse(w http.ResponseWriter) error
+}
+
+type AdminDeleteDiscogs204Response struct {
+}
+
+func (response AdminDeleteDiscogs204Response) VisitAdminDeleteDiscogsResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type AdminDeleteDiscogs401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response AdminDeleteDiscogs401ApplicationProblemPlusJSONResponse) VisitAdminDeleteDiscogsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminGetDiscogsRequestObject struct {
+}
+
+type AdminGetDiscogsResponseObject interface {
+	VisitAdminGetDiscogsResponse(w http.ResponseWriter) error
+}
+
+type AdminGetDiscogs200JSONResponse struct {
+	Configured bool `json:"configured"`
+}
+
+func (response AdminGetDiscogs200JSONResponse) VisitAdminGetDiscogsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminGetDiscogs401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response AdminGetDiscogs401ApplicationProblemPlusJSONResponse) VisitAdminGetDiscogsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminSetDiscogsRequestObject struct {
+	Body *AdminSetDiscogsJSONRequestBody
+}
+
+type AdminSetDiscogsResponseObject interface {
+	VisitAdminSetDiscogsResponse(w http.ResponseWriter) error
+}
+
+type AdminSetDiscogs204Response struct {
+}
+
+func (response AdminSetDiscogs204Response) VisitAdminSetDiscogsResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type AdminSetDiscogs400ApplicationProblemPlusJSONResponse struct {
+	ProblemApplicationProblemPlusJSONResponse
+}
+
+func (response AdminSetDiscogs400ApplicationProblemPlusJSONResponse) VisitAdminSetDiscogsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type AdminSetDiscogs401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response AdminSetDiscogs401ApplicationProblemPlusJSONResponse) VisitAdminSetDiscogsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -26100,6 +26685,15 @@ type StrictServerInterface interface {
 	// Revoke a device (its token stops working immediately)
 	// (DELETE /admin/api/devices/{deviceId})
 	AdminRevokeDevice(ctx context.Context, request AdminRevokeDeviceRequestObject) (AdminRevokeDeviceResponseObject, error)
+	// Remove the Discogs personal access token
+	// (DELETE /admin/api/integrations/discogs)
+	AdminDeleteDiscogs(ctx context.Context, request AdminDeleteDiscogsRequestObject) (AdminDeleteDiscogsResponseObject, error)
+	// Discogs config state
+	// (GET /admin/api/integrations/discogs)
+	AdminGetDiscogs(ctx context.Context, request AdminGetDiscogsRequestObject) (AdminGetDiscogsResponseObject, error)
+	// Set the Discogs personal access token
+	// (PUT /admin/api/integrations/discogs)
+	AdminSetDiscogs(ctx context.Context, request AdminSetDiscogsRequestObject) (AdminSetDiscogsResponseObject, error)
 	// Remove the fanart.tv API key
 	// (DELETE /admin/api/integrations/fanart)
 	AdminDeleteFanart(ctx context.Context, request AdminDeleteFanartRequestObject) (AdminDeleteFanartResponseObject, error)
@@ -26495,6 +27089,85 @@ func (sh *strictHandler) AdminRevokeDevice(w http.ResponseWriter, r *http.Reques
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(AdminRevokeDeviceResponseObject); ok {
 		if err := validResponse.VisitAdminRevokeDeviceResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AdminDeleteDiscogs operation middleware
+func (sh *strictHandler) AdminDeleteDiscogs(w http.ResponseWriter, r *http.Request) {
+	var request AdminDeleteDiscogsRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.AdminDeleteDiscogs(ctx, request.(AdminDeleteDiscogsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AdminDeleteDiscogs")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(AdminDeleteDiscogsResponseObject); ok {
+		if err := validResponse.VisitAdminDeleteDiscogsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AdminGetDiscogs operation middleware
+func (sh *strictHandler) AdminGetDiscogs(w http.ResponseWriter, r *http.Request) {
+	var request AdminGetDiscogsRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.AdminGetDiscogs(ctx, request.(AdminGetDiscogsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AdminGetDiscogs")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(AdminGetDiscogsResponseObject); ok {
+		if err := validResponse.VisitAdminGetDiscogsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// AdminSetDiscogs operation middleware
+func (sh *strictHandler) AdminSetDiscogs(w http.ResponseWriter, r *http.Request) {
+	var request AdminSetDiscogsRequestObject
+
+	var body AdminSetDiscogsJSONRequestBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.AdminSetDiscogs(ctx, request.(AdminSetDiscogsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "AdminSetDiscogs")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(AdminSetDiscogsResponseObject); ok {
+		if err := validResponse.VisitAdminSetDiscogsResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {

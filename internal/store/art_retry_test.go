@@ -169,22 +169,14 @@ func TestArtistMBIDAssignmentResetsArtRetryState(t *testing.T) {
 	}
 }
 
-// Fanart.tv is MBID-keyed: artists without one are not selectable and must
-// not burn 404s or miss windows.
-func TestArtistsNeedingArtSkipsWithoutMBID(t *testing.T) {
+func TestArtistsNeedingArtIncludesPrimaryArtistWithoutMBID(t *testing.T) {
 	s, album := musicBrainzAlbumFixture(t)
 	ctx := context.Background()
-	_ = album
 	need, err := s.ArtistsNeedingArtAt(ctx, time.Now(), 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, n := range need {
-		if n.MusicBrainzID == "" {
-			t.Fatalf("artist without MBID selected for fanart: %+v", n)
-		}
-	}
-	if len(need) != 0 {
-		t.Fatalf("fixture has no identified artists; selection must be empty, got %v", need)
+	if len(need) != 1 || need[0].ArtistID != album.PrimaryArtist.ArtistID || need[0].Name != "Local Artist" || need[0].MusicBrainzID != "" {
+		t.Fatalf("MBID-less primary artist not selected: %+v", need)
 	}
 }

@@ -67,6 +67,9 @@ func TestIntegrationCredentialSidecarRoundTrip(t *testing.T) {
 	if err := s.SetSetting(ctx, "fanart_api_key", "fanart-visible-marker"); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.SetSetting(ctx, "discogs_personal_token", "discogs-visible-marker"); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +78,7 @@ func TestIntegrationCredentialSidecarRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, plaintext := range []string{"lastfm-visible-marker", "secret-visible-marker", "fanart-visible-marker"} {
+	for _, plaintext := range []string{"lastfm-visible-marker", "secret-visible-marker", "fanart-visible-marker", "discogs-visible-marker"} {
 		if strings.Contains(string(raw), plaintext) {
 			t.Fatalf("sidecar contains plaintext credential %q", plaintext)
 		}
@@ -93,9 +96,10 @@ func TestIntegrationCredentialSidecarRoundTrip(t *testing.T) {
 	}
 	defer s.Close()
 	for key, want := range map[string]string{
-		"lastfm_api_key":       "lastfm-visible-marker",
-		"lastfm_shared_secret": "secret-visible-marker",
-		"fanart_api_key":       "fanart-visible-marker",
+		"lastfm_api_key":         "lastfm-visible-marker",
+		"lastfm_shared_secret":   "secret-visible-marker",
+		"fanart_api_key":         "fanart-visible-marker",
+		"discogs_personal_token": "discogs-visible-marker",
 	} {
 		got, ok, err := s.GetSetting(ctx, key)
 		if err != nil || !ok || got != want {
@@ -111,10 +115,10 @@ func TestIntegrationCredentialDeleteUpdatesSidecar(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetSetting(ctx, "fanart_api_key", "fanart-key"); err != nil {
+	if err := s.SetSetting(ctx, "discogs_personal_token", "discogs-token"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetSetting(ctx, "fanart_api_key", ""); err != nil {
+	if err := s.SetSetting(ctx, "discogs_personal_token", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
@@ -128,7 +132,7 @@ func TestIntegrationCredentialDeleteUpdatesSidecar(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if got, ok, err := s.GetSetting(ctx, "fanart_api_key"); err != nil || ok || got != "" {
+	if got, ok, err := s.GetSetting(ctx, "discogs_personal_token"); err != nil || ok || got != "" {
 		t.Fatalf("deleted credential restored: %q, %v, %v", got, ok, err)
 	}
 }

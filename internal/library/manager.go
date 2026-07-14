@@ -95,13 +95,10 @@ func (m *Manager) SetEnricher(e Enricher) {
 		m.mu.Lock()
 		configured := m.src != nil
 		m.mu.Unlock()
-		// Resume durable enrichment (identity matching, artwork queues)
-		// BEFORE the startup rescan: the catalog from the last run is already
-		// in the database, and a multi-minute scan must not starve work that
-		// survived a restart. The scan queues behind the pass.
-		m.TriggerEnrichment()
 		if configured {
 			_ = m.Rescan(m.lifecycleCtx)
+		} else {
+			m.TriggerEnrichment()
 		}
 		go m.scheduleEnrichment()
 	}
@@ -373,6 +370,7 @@ func (m *Manager) scan(src source.MusicSource) {
 	if err != nil {
 		log.Error("scan failed", "err", err, "duration_ms", time.Since(start).Milliseconds())
 		_ = m.st.SetSetting(ctx, settingLastScanError, err.Error())
+		m.TriggerEnrichment()
 		return
 	}
 	_ = m.st.SetSetting(ctx, settingLastScanError, "")

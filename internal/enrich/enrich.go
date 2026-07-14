@@ -1,7 +1,7 @@
 // Package enrich fills gaps in album/artist art from public sources. After a
 // scan, albums with no embedded cover and artists with no photo are looked up:
-// MusicBrainz resolves ids, then Cover Art Archive / last.fm supply album covers
-// and fanart.tv supplies artist images. Results are stored via the art cache and
+// MusicBrainz resolves ids when identity-keyed providers need them. Last.fm,
+// Discogs, fanart.tv, and Cover Art Archive supply artwork. Results are stored via the art cache and
 // bump change_seq so clients delta-sync the new art. Entities are marked "tried"
 // so we don't re-query every scan.
 package enrich
@@ -39,6 +39,10 @@ type Config struct {
 	LastfmKey func(context.Context) string
 	// FanartKey returns the current fanart.tv key ("" disables artist photos).
 	FanartKey func(context.Context) string
+	// DiscogsToken returns the current Discogs personal access token.
+	DiscogsToken func(context.Context) string
+	// DiscogsUserAgent is the versioned, contactable identity sent to Discogs.
+	DiscogsUserAgent string
 	// UserAgent identifies us to MusicBrainz (required by their policy).
 	MusicBrainz *musicbrainz.Client
 	// ProviderCache persists public provider responses outside the library database.
@@ -58,9 +62,10 @@ type Enricher struct {
 	cache          *providercache.Cache
 	providerPacers map[string]*providerPacer
 
-	CAABase    string
-	LastfmBase string
-	FanartBase string
+	CAABase     string
+	LastfmBase  string
+	FanartBase  string
+	DiscogsBase string
 	// ProgressInterval rate-limits intermediate library.changed publishes
 	// during a long pass so clients see progress without event spam.
 	ProgressInterval time.Duration
@@ -78,11 +83,12 @@ func New(st *store.Store, bus *events.Bus, artDir string, cfg Config) *Enricher 
 		cfg:    cfg,
 		cache:  cfg.ProviderCache,
 		providerPacers: map[string]*providerPacer{
-			"caa": newProviderPacer(time.Second), "fanart": newProviderPacer(time.Second), "lastfm": newProviderPacer(time.Second),
+			"caa": newProviderPacer(time.Second), "fanart": newProviderPacer(time.Second), "lastfm": newProviderPacer(time.Second), "discogs": discogsProcessPacer,
 		},
 		CAABase:          "https://coverartarchive.org",
 		LastfmBase:       "https://ws.audioscrobbler.com/2.0",
 		FanartBase:       "https://webservice.fanart.tv/v3.2",
+		DiscogsBase:      defaultDiscogsBase,
 		ProgressInterval: 15 * time.Second,
 		ArtSliceBudget:   90 * time.Second,
 	}
@@ -96,26 +102,34 @@ func New(st *store.Store, bus *events.Bus, artDir string, cfg Config) *Enricher 
 // mbReleaseGroup remains as a cautious art fallback for package tests and
 // future explicit fallback use. It accepts only one exact title result.
 func (e *Enricher) mbReleaseGroup(ctx context.Context, artist, album string) string {
+	match, _ := e.mbReleaseGroupOutcome(ctx, artist, album)
+	return match
+}
+
+func (e *Enricher) mbReleaseGroupOutcome(ctx context.Context, artist, album string) (string, lookupOutcome) {
 	q := fmt.Sprintf(`releasegroup:"%s" AND artist:"%s"`, album, artist)
 	if e.mbClient == nil {
-		return ""
+		return "", lookupMiss
 	}
 	var body struct {
 		Groups []struct{ ID, Title string } `json:"release-groups"`
 	}
 	if e.mbClient.GetJSON(ctx, "/release-group?query="+url.QueryEscape(q)+"&fmt=json&limit=5", &body) != nil {
-		return ""
+		return "", lookupTransient
 	}
 	match := ""
 	for _, g := range body.Groups {
 		if strings.EqualFold(strings.TrimSpace(g.Title), strings.TrimSpace(album)) {
 			if match != "" {
-				return ""
+				return "", lookupMiss
 			}
 			match = g.ID
 		}
 	}
-	return match
+	if match == "" {
+		return "", lookupMiss
+	}
+	return match, lookupSuccess
 }
 
 type lookupOutcome int
@@ -253,7 +267,7 @@ func (e *Enricher) RunAt(ctx context.Context, now time.Time) {
 	}
 
 	artistArtStage := func(deadline time.Time) {
-		if e.fanartKey(ctx) == "" {
+		if e.lastfmKey(ctx) == "" && e.discogsToken(ctx) == "" && e.fanartKey(ctx) == "" {
 			return
 		}
 		pages := 0
@@ -284,7 +298,7 @@ func (e *Enricher) RunAt(ctx context.Context, now time.Time) {
 					return
 				}
 				stats.attempted++
-				data, mime, outcome := e.artistArtOutcome(ctx, ar.MusicBrainzID)
+				data, mime, outcome := e.artistArtOutcome(ctx, ar.Name, ar.MusicBrainzID)
 				if ctx.Err() != nil {
 					return
 				}
@@ -381,32 +395,29 @@ func (e *Enricher) albumArt(ctx context.Context, releaseGroupID, artist, album s
 }
 
 func (e *Enricher) albumArtOutcome(ctx context.Context, releaseGroupID, artist, album string) ([]byte, string, lookupOutcome) {
-	if releaseGroupID != "" {
-		return e.albumArtForReleaseGroupOutcome(ctx, releaseGroupID, artist, album)
-	}
-	if fallback := e.mbReleaseGroup(ctx, artist, album); fallback != "" {
-		return e.albumArtForReleaseGroupOutcome(ctx, fallback, artist, album)
-	}
-	data, mime, outcome := e.lastfmAlbumArtOutcome(ctx, artist, album)
-	if data == nil && outcome == lookupMiss && e.mbClient == nil && e.lastfmKey(ctx) == "" {
-		// No provider made a definitive statement: identity resolution and the
-		// only name-based fallback were unavailable, so preserve the miss tier.
-		outcome = lookupTransient
-	}
-	return data, mime, outcome
-}
-
-func (e *Enricher) albumArtForReleaseGroup(ctx context.Context, releaseGroupID, artist, album string) ([]byte, string) {
-	data, mime, _ := e.albumArtForReleaseGroupOutcome(ctx, releaseGroupID, artist, album)
-	return data, mime
-}
-
-func (e *Enricher) albumArtForReleaseGroupOutcome(ctx context.Context, releaseGroupID, artist, album string) ([]byte, string, lookupOutcome) {
 	transient := false
-	if data, mime, outcome := e.fetchOutcome(ctx, "caa", fmt.Sprintf("%s/release-group/%s/front-500", e.CAABase, releaseGroupID), ""); data != nil {
+	if data, mime, outcome := e.lastfmAlbumArtOutcome(ctx, artist, album); data != nil {
 		return data, mime, lookupSuccess
 	} else if outcome == lookupTransient {
 		transient = true
+	}
+	if data, mime, outcome := e.discogsAlbumArtOutcome(ctx, artist, album); data != nil {
+		return data, mime, lookupSuccess
+	} else if outcome == lookupTransient {
+		transient = true
+	}
+	if releaseGroupID == "" {
+		var outcome lookupOutcome
+		releaseGroupID, outcome = e.mbReleaseGroupOutcome(ctx, artist, album)
+		if outcome == lookupTransient {
+			transient = true
+		}
+	}
+	if releaseGroupID == "" {
+		if transient || e.mbClient == nil && e.lastfmKey(ctx) == "" && e.discogsToken(ctx) == "" {
+			return nil, "", lookupTransient
+		}
+		return nil, "", lookupMiss
 	}
 	if key := e.fanartKey(ctx); key != "" {
 		if data, mime, outcome := e.fanartAlbumArtOutcome(ctx, key, releaseGroupID); data != nil {
@@ -415,11 +426,12 @@ func (e *Enricher) albumArtForReleaseGroupOutcome(ctx context.Context, releaseGr
 			transient = true
 		}
 	}
-	data, mime, outcome := e.lastfmAlbumArtOutcome(ctx, artist, album)
-	if data != nil {
+	if data, mime, outcome := e.fetchOutcome(ctx, "caa", fmt.Sprintf("%s/release-group/%s/front-500", e.CAABase, releaseGroupID), ""); data != nil {
 		return data, mime, lookupSuccess
+	} else if outcome == lookupTransient {
+		transient = true
 	}
-	if transient || outcome == lookupTransient {
+	if transient {
 		return nil, "", lookupTransient
 	}
 	return nil, "", lookupMiss
@@ -497,17 +509,109 @@ func (e *Enricher) lastfmAlbumImageOutcome(ctx context.Context, key, artist, alb
 	return image, lookupSuccess
 }
 
-// ── artist art (fanart.tv) ──
+// ── artist art ──
 
 func (e *Enricher) artistArt(ctx context.Context, mbid string) ([]byte, string) {
-	data, mime, _ := e.artistArtOutcome(ctx, mbid)
+	data, mime, _ := e.artistArtOutcome(ctx, "", mbid)
 	return data, mime
 }
 
-func (e *Enricher) artistArtOutcome(ctx context.Context, mbid string) ([]byte, string, lookupOutcome) {
-	if mbid == "" {
+func (e *Enricher) artistArtOutcome(ctx context.Context, name, mbid string) ([]byte, string, lookupOutcome) {
+	transient := false
+	if data, mime, outcome := e.lastfmArtistArtOutcome(ctx, name); data != nil {
+		return data, mime, lookupSuccess
+	} else if outcome == lookupTransient {
+		transient = true
+	}
+	if data, mime, outcome := e.discogsArtistArtOutcome(ctx, name); data != nil {
+		return data, mime, lookupSuccess
+	} else if outcome == lookupTransient {
+		transient = true
+	}
+	if e.fanartKey(ctx) == "" {
+		if transient {
+			return nil, "", lookupTransient
+		}
 		return nil, "", lookupMiss
 	}
+	if mbid == "" {
+		var outcome lookupOutcome
+		mbid, outcome = e.musicBrainzArtistID(ctx, name)
+		if outcome == lookupTransient {
+			transient = true
+		}
+		if mbid == "" {
+			if transient {
+				return nil, "", lookupTransient
+			}
+			return nil, "", lookupMiss
+		}
+	}
+	data, mime, outcome := e.fanartArtistArtOutcome(ctx, mbid)
+	if data != nil {
+		return data, mime, lookupSuccess
+	}
+	if transient || outcome == lookupTransient {
+		return nil, "", lookupTransient
+	}
+	return nil, "", lookupMiss
+}
+
+func (e *Enricher) lastfmArtistArtOutcome(ctx context.Context, name string) ([]byte, string, lookupOutcome) {
+	key := e.lastfmKey(ctx)
+	if key == "" {
+		return nil, "", lookupMiss
+	}
+	u := fmt.Sprintf("%s/?method=artist.getinfo&api_key=%s&artist=%s&autocorrect=1&format=json", e.LastfmBase, url.QueryEscape(key), url.QueryEscape(name))
+	var body struct {
+		Artist struct {
+			Image []struct {
+				Text string `json:"#text"`
+				Size string `json:"size"`
+			} `json:"image"`
+		} `json:"artist"`
+	}
+	if outcome := e.getJSONOutcome(ctx, u, "", &body); outcome != lookupSuccess {
+		return nil, "", outcome
+	}
+	image := largestImage(body.Artist.Image)
+	if image == "" {
+		e.markMiss(ctx, "lastfm", u)
+		return nil, "", lookupMiss
+	}
+	return e.fetchOutcome(ctx, "lastfm", image, "")
+}
+
+func (e *Enricher) musicBrainzArtistID(ctx context.Context, name string) (string, lookupOutcome) {
+	if e.mbClient == nil {
+		return "", lookupTransient
+	}
+	q := fmt.Sprintf(`artist:"%s"`, name)
+	var body struct {
+		Artists []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"artists"`
+	}
+	if err := e.mbClient.GetJSON(ctx, "/artist?query="+url.QueryEscape(q)+"&fmt=json&limit=5", &body); err != nil {
+		return "", lookupTransient
+	}
+	match := ""
+	for _, artist := range body.Artists {
+		if strings.EqualFold(strings.TrimSpace(artist.Name), strings.TrimSpace(name)) {
+			if match != "" {
+				return "", lookupMiss
+			}
+			match = artist.ID
+		}
+	}
+	if match == "" {
+		return "", lookupMiss
+	}
+	return match, lookupSuccess
+}
+
+func (e *Enricher) fanartArtistArtOutcome(ctx context.Context, mbid string) ([]byte, string, lookupOutcome) {
 	u := fmt.Sprintf("%s/music/%s?api_key=%s", e.FanartBase, mbid, url.QueryEscape(e.fanartKey(ctx)))
 	var body struct {
 		Thumb []struct {
@@ -550,10 +654,25 @@ func (e *Enricher) getJSONOutcome(ctx context.Context, u, userAgent string, out 
 			if cached.Kind == providercache.KindMiss || cached.Status != http.StatusOK {
 				return lookupMiss
 			}
-			if json.Unmarshal(cached.Body, out) != nil {
-				return lookupTransient
+			if provider == "lastfm" {
+				if outcome, semanticError := lastfmSemanticOutcome(cached.Body); semanticError {
+					if outcome == lookupMiss {
+						e.markMiss(ctx, provider, u)
+						return outcome
+					}
+				} else if json.Unmarshal(cached.Body, out) == nil {
+					return lookupSuccess
+				} else {
+					return lookupTransient
+				}
+				// Transient semantic errors from older cache entries are ignored
+				// so this request can retry the provider.
+			} else {
+				if json.Unmarshal(cached.Body, out) != nil {
+					return lookupTransient
+				}
+				return lookupSuccess
 			}
-			return lookupSuccess
 		}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
@@ -578,11 +697,36 @@ func (e *Enricher) getJSONOutcome(ctx context.Context, u, userAgent string, out 
 		return lookupTransient
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil || json.Unmarshal(body, out) != nil {
+	if err != nil {
+		return lookupTransient
+	}
+	if provider == "lastfm" {
+		if outcome, semanticError := lastfmSemanticOutcome(body); semanticError {
+			if outcome == lookupMiss {
+				now := time.Now()
+				e.putCache(ctx, provider, key, providercache.Entry{URL: key, Status: resp.StatusCode, FetchedAt: now, FreshUntil: now.Add(7 * 24 * time.Hour), Kind: providercache.KindMiss})
+			}
+			return outcome
+		}
+	}
+	if json.Unmarshal(body, out) != nil {
 		return lookupTransient
 	}
 	e.putCache(ctx, provider, key, providercache.Entry{URL: key, Status: resp.StatusCode, MIME: resp.Header.Get("Content-Type"), FetchedAt: time.Now(), FreshUntil: time.Now().Add(30 * 24 * time.Hour), Kind: providercache.KindSuccess, Body: body})
 	return lookupSuccess
+}
+
+func lastfmSemanticOutcome(body []byte) (lookupOutcome, bool) {
+	var envelope struct {
+		Error *int `json:"error"`
+	}
+	if json.Unmarshal(body, &envelope) != nil || envelope.Error == nil {
+		return lookupSuccess, false
+	}
+	if *envelope.Error == 6 {
+		return lookupMiss, true
+	}
+	return lookupTransient, true
 }
 
 // fetch downloads binary art; returns the bytes + content type.
@@ -651,6 +795,8 @@ func (e *Enricher) provider(u string) string {
 		return "fanart"
 	case strings.HasPrefix(u, e.LastfmBase):
 		return "lastfm"
+	case strings.HasPrefix(u, e.DiscogsBase):
+		return "discogs"
 	default:
 		return "images"
 	}
@@ -724,6 +870,13 @@ func (e *Enricher) fanartKey(ctx context.Context) string {
 		return ""
 	}
 	return e.cfg.FanartKey(ctx)
+}
+
+func (e *Enricher) discogsToken(ctx context.Context) string {
+	if e.cfg.DiscogsToken == nil {
+		return ""
+	}
+	return e.cfg.DiscogsToken(ctx)
 }
 
 func largestImage(images []struct {
