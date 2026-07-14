@@ -6,70 +6,75 @@ import (
 	"net/http"
 	"net/url"
 
+	"github.com/BlitterAmp/BlitterServer/internal/activity"
 	"github.com/BlitterAmp/BlitterServer/internal/logging"
 	"github.com/BlitterAmp/BlitterServer/internal/musicbrainz"
 	"github.com/BlitterAmp/BlitterServer/internal/progress"
 )
 
 type artistIdentitySummary struct {
-	Due, Processed, Changed, Terminal, Failed, Remaining int
-	Consolidated, Cancelled                              bool
+	activity.Counts
+	Consolidated, Cancelled bool
 }
 
-func (e *Enricher) runArtistIdentityStage(ctx context.Context, markDirty func(), publish func(bool)) (summary artistIdentitySummary) {
+func (e *Enricher) runArtistIdentityStage(ctx context.Context, markDirty func(), publish func(bool)) (summary artistIdentitySummary, token activity.Token) {
+	token = e.activity.Start(activity.StageMusicBrainzArtistMetadata, summary.Counts)
 	if e.mbClient == nil {
-		return summary
+		return summary, token
 	}
 	log := logging.From(ctx).With("component", "enrich")
 	due, err := e.st.CountPendingMusicBrainzArtists(ctx)
 	if err != nil {
 		log.Error("musicbrainz artist metadata failed", "err", err)
 		summary.Failed++
-		return summary
+		e.activity.Fail(token, summary.Counts)
+		return summary, token
 	}
-	summary.Due = due
+	summary.Total, summary.Remaining = due, due
+	e.activity.Update(token, summary.Counts)
 	reporter := progress.New(e.Now, e.LogProgressInterval)
 	log.Info("musicbrainz artist metadata started", "due", due)
-	processed, changedCount, terminal, failed := 0, 0, 0, 0
-	consolidated := false
 	defer func() {
 		remaining, _ := e.st.CountPendingMusicBrainzArtists(context.WithoutCancel(ctx))
-		summary.Processed, summary.Changed, summary.Terminal, summary.Failed = processed, changedCount, terminal, failed
-		summary.Remaining, summary.Consolidated, summary.Cancelled = remaining, consolidated, ctx.Err() != nil
+		summary.Remaining, summary.Cancelled = remaining, ctx.Err() != nil
 		message := "musicbrainz artist metadata completed"
 		if ctx.Err() != nil {
 			message = "musicbrainz artist metadata cancelled"
-		} else if failed > 0 {
+		} else if summary.Failed > 0 {
 			message = "musicbrainz artist metadata failed"
 		}
-		args := []any{"due", due, "processed", processed, "changed", changedCount, "terminal", terminal, "failed", failed, "remaining", remaining, "consolidated", consolidated, "duration_ms", reporter.DurationMS()}
-		if failed > 0 && ctx.Err() == nil {
+		args := []any{"due", due, "processed", summary.Processed, "changed", summary.Changed, "terminal", summary.Terminal, "failed", summary.Failed, "remaining", remaining, "consolidated", summary.Consolidated, "duration_ms", reporter.DurationMS()}
+		if summary.Failed > 0 && ctx.Err() == nil {
+			e.activity.Fail(token, summary.Counts)
 			log.Error(message, args...)
 		} else {
+			e.activity.Update(token, summary.Counts)
 			log.Info(message, args...)
 		}
 	}()
 	report := func() {
-		processed++
-		if reporter.Due(processed) {
+		summary.Processed++
+		if reporter.Due(summary.Processed) {
 			remaining, _ := e.st.CountPendingMusicBrainzArtists(ctx)
-			log.Info("musicbrainz artist metadata progress", "due", due, "processed", processed, "changed", changedCount, "terminal", terminal, "failed", failed, "remaining", remaining, "duration_ms", reporter.DurationMS())
+			summary.Remaining = remaining
+			e.activity.Update(token, summary.Counts)
+			log.Info("musicbrainz artist metadata progress", "due", due, "processed", summary.Processed, "changed", summary.Changed, "terminal", summary.Terminal, "failed", summary.Failed, "remaining", remaining, "duration_ms", reporter.DurationMS())
 		}
 	}
 	cursor := ""
 	for {
 		if ctx.Err() != nil {
-			return summary
+			return summary, token
 		}
 		artists, next, err := e.st.PendingMusicBrainzArtists(ctx, cursor, perRun)
 		if err != nil {
 			log.Error("list artists pending MusicBrainz metadata", "err", err)
-			failed++
-			return summary
+			summary.Failed++
+			return summary, token
 		}
 		for _, artist := range artists {
 			if ctx.Err() != nil {
-				return summary
+				return summary, token
 			}
 			var body struct {
 				ID      string `json:"id"`
@@ -86,15 +91,15 @@ func (e *Enricher) runArtistIdentityStage(ctx context.Context, markDirty func(),
 				if terminalMusicBrainzArtistError(err) {
 					if markErr := e.markArtistMetadataTerminal(ctx, artist.ArtistID, artist.MusicBrainzID); markErr != nil {
 						log.Warn("mark MusicBrainz artist metadata terminal", "artist_id", artist.ArtistID, "err", markErr)
-						failed++
+						summary.Failed++
 					} else {
-						terminal++
+						summary.Terminal++
 					}
 					report()
 					continue
 				}
 				log.Warn("fetch MusicBrainz artist metadata", "artist_id", artist.ArtistID, "err", err)
-				failed++
+				summary.Failed++
 				report()
 				continue
 			}
@@ -102,9 +107,9 @@ func (e *Enricher) runArtistIdentityStage(ctx context.Context, markDirty func(),
 				log.Warn("MusicBrainz artist metadata id mismatch", "artist_id", artist.ArtistID)
 				if err := e.markArtistMetadataTerminal(ctx, artist.ArtistID, artist.MusicBrainzID); err != nil {
 					log.Warn("mark mismatched MusicBrainz artist metadata terminal", "artist_id", artist.ArtistID, "err", err)
-					failed++
+					summary.Failed++
 				} else {
-					terminal++
+					summary.Terminal++
 				}
 				report()
 				continue
@@ -116,12 +121,12 @@ func (e *Enricher) runArtistIdentityStage(ctx context.Context, markDirty func(),
 			changed, err := e.st.PersistMusicBrainzArtistMetadataAtNextSequence(ctx, artist.ArtistID, artist.MusicBrainzID, body.Name, aliases)
 			if err != nil {
 				log.Warn("apply MusicBrainz artist metadata", "artist_id", artist.ArtistID, "err", err)
-				failed++
+				summary.Failed++
 				report()
 				continue
 			}
 			if changed {
-				changedCount++
+				summary.Changed++
 				markDirty()
 				publish(false)
 			}
@@ -135,15 +140,15 @@ func (e *Enricher) runArtistIdentityStage(ctx context.Context, markDirty func(),
 	changed, err := e.consolidateArtists(ctx)
 	if err != nil {
 		log.Warn("consolidate MusicBrainz artists", "err", err)
-		failed++
-		return summary
+		summary.Failed++
+		return summary, token
 	}
 	if changed {
-		consolidated = true
+		summary.Consolidated = true
 		markDirty()
 		publish(false)
 	}
-	return summary
+	return summary, token
 }
 
 func terminalMusicBrainzArtistError(err error) bool {

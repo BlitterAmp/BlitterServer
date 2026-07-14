@@ -8,11 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand/v2"
 	"os"
 	"sync"
 	"time"
 
+	"github.com/BlitterAmp/BlitterServer/internal/activity"
 	"github.com/BlitterAmp/BlitterServer/internal/events"
 	"github.com/BlitterAmp/BlitterServer/internal/logging"
 	"github.com/BlitterAmp/BlitterServer/internal/source"
@@ -52,11 +52,14 @@ type Manager struct {
 	dataDir  string
 	bus      *events.Bus
 	enricher Enricher
+	activity *activity.Tracker
 
 	// Test seams for deterministic lifecycle concurrency coverage.
-	onScanStart      func()
-	onOpenResolved   func()
-	onConfigureReady func()
+	onScanStart       func()
+	onOpenResolved    func()
+	onConfigureReady  func()
+	onEnrichmentReady func()
+	onScanBookkeeping func()
 
 	mu                   sync.Mutex
 	sourceConfig         sync.Mutex
@@ -176,6 +179,15 @@ func (m *Manager) runEnrichment() {
 			return
 		}
 		m.mu.Unlock()
+		if m.onEnrichmentReady != nil {
+			m.onEnrichmentReady()
+		}
+		if !m.acquireOperation() {
+			m.mu.Lock()
+			m.enriching = false
+			m.mu.Unlock()
+			return
+		}
 		resetFailed := false
 		if resetArtists {
 			if err := m.resetArtRetries(m.lifecycleCtx, true); err != nil {
@@ -195,17 +207,19 @@ func (m *Manager) runEnrichment() {
 				m.mu.Unlock()
 			}
 		}
+		moreResets := false
 		if !resetFailed {
 			m.mu.Lock()
-			moreResets := m.resetArtists || m.resetAlbums
+			moreResets = m.resetArtists || m.resetAlbums
 			m.mu.Unlock()
-			if moreResets {
-				continue
-			}
 		}
-		if !resetFailed && m.lifecycleCtx.Err() == nil {
+		if !resetFailed && !moreResets && m.lifecycleCtx.Err() == nil {
 			retryAttempt = 0
 			enricher.Run(m.lifecycleCtx)
+		}
+		m.releaseOperation()
+		if moreResets {
+			continue
 		}
 
 		m.mu.Lock()
@@ -253,6 +267,7 @@ func NewManager(st *store.Store, dataDir string) *Manager {
 	m := &Manager{
 		st: st, dataDir: dataDir, lifecycleCtx: lifecycleCtx,
 		cancelLifecycle: cancelLifecycle, resetArtRetries: st.ResetArtRetries,
+		activity:             activity.New(),
 		waitResetRetry:       waitForResetRetry,
 		waitEnrichment:       waitForEnrichment,
 		operation:            make(chan struct{}, 1),
@@ -276,19 +291,8 @@ func NewManager(st *store.Store, dataDir string) *Manager {
 	return m
 }
 
-func waitForEnrichment(ctx context.Context) bool {
-	// Frequent staggered passes let newly overdue rows flow through while the
-	// store remains the authority on the 24-hour per-entity eligibility window.
-	delay := 4*time.Hour + time.Duration(rand.Int64N(int64(4*time.Hour)))
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		return true
-	case <-ctx.Done():
-		return false
-	}
-}
+// ActivityTracker returns the shared process-local pipeline activity tracker.
+func (m *Manager) ActivityTracker() *activity.Tracker { return m.activity }
 
 // Configure points the filesystem source at path and queues the initial scan.
 func (m *Manager) Configure(ctx context.Context, path string) error {
@@ -400,21 +404,6 @@ func (m *Manager) Rescan(ctx context.Context) error {
 	}
 	m.startScanLocked()
 	return nil
-}
-
-func waitForResetRetry(ctx context.Context, attempt int) bool {
-	if attempt > 8 {
-		attempt = 8
-	}
-	delay := 100 * time.Millisecond * time.Duration(1<<(attempt-1))
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		return true
-	case <-ctx.Done():
-		return false
-	}
 }
 
 // Status reports the admin view.

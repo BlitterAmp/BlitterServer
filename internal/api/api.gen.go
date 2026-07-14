@@ -112,22 +112,22 @@ func (e ArtifactFormat) Valid() bool {
 
 // Defines values for ArtifactStatus.
 const (
-	Failed     ArtifactStatus = "failed"
-	Processing ArtifactStatus = "processing"
-	Queued     ArtifactStatus = "queued"
-	Ready      ArtifactStatus = "ready"
+	ArtifactStatusFailed     ArtifactStatus = "failed"
+	ArtifactStatusProcessing ArtifactStatus = "processing"
+	ArtifactStatusQueued     ArtifactStatus = "queued"
+	ArtifactStatusReady      ArtifactStatus = "ready"
 )
 
 // Valid indicates whether the value is a known member of the ArtifactStatus enum.
 func (e ArtifactStatus) Valid() bool {
 	switch e {
-	case Failed:
+	case ArtifactStatusFailed:
 		return true
-	case Processing:
+	case ArtifactStatusProcessing:
 		return true
-	case Queued:
+	case ArtifactStatusQueued:
 		return true
-	case Ready:
+	case ArtifactStatusReady:
 		return true
 	default:
 		return false
@@ -242,6 +242,66 @@ func (e HomeRailsRailsKind) Valid() bool {
 	case HomeRailsRailsKindRecentlyAdded:
 		return true
 	case HomeRailsRailsKindRecentlyPlayed:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for LibraryActivityReason.
+const (
+	OperationFailed LibraryActivityReason = "operation_failed"
+)
+
+// Valid indicates whether the value is a known member of the LibraryActivityReason enum.
+func (e LibraryActivityReason) Valid() bool {
+	switch e {
+	case OperationFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for LibraryActivityStage.
+const (
+	AlbumArtwork              LibraryActivityStage = "album_artwork"
+	ArtistArtwork             LibraryActivityStage = "artist_artwork"
+	FilesystemScan            LibraryActivityStage = "filesystem_scan"
+	MusicbrainzArtistMetadata LibraryActivityStage = "musicbrainz_artist_metadata"
+	MusicbrainzResolution     LibraryActivityStage = "musicbrainz_resolution"
+)
+
+// Valid indicates whether the value is a known member of the LibraryActivityStage enum.
+func (e LibraryActivityStage) Valid() bool {
+	switch e {
+	case AlbumArtwork:
+		return true
+	case ArtistArtwork:
+		return true
+	case FilesystemScan:
+		return true
+	case MusicbrainzArtistMetadata:
+		return true
+	case MusicbrainzResolution:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for LibraryActivityState.
+const (
+	LibraryActivityStateFailed  LibraryActivityState = "failed"
+	LibraryActivityStateRunning LibraryActivityState = "running"
+)
+
+// Valid indicates whether the value is a known member of the LibraryActivityState enum.
+func (e LibraryActivityState) Valid() bool {
+	switch e {
+	case LibraryActivityStateFailed:
+		return true
+	case LibraryActivityStateRunning:
 		return true
 	default:
 		return false
@@ -1200,6 +1260,45 @@ type Library struct {
 	Version int64 `json:"version"`
 }
 
+// LibraryActivity defines model for LibraryActivity.
+type LibraryActivity struct {
+	Counts    LibraryActivityCounts  `json:"counts"`
+	Reason    *LibraryActivityReason `json:"reason,omitempty"`
+	Stage     LibraryActivityStage   `json:"stage"`
+	StartedAt time.Time              `json:"startedAt"`
+	State     LibraryActivityState   `json:"state"`
+	UpdatedAt time.Time              `json:"updatedAt"`
+}
+
+// LibraryActivityReason defines model for LibraryActivity.Reason.
+type LibraryActivityReason string
+
+// LibraryActivityStage defines model for LibraryActivity.Stage.
+type LibraryActivityStage string
+
+// LibraryActivityState defines model for LibraryActivity.State.
+type LibraryActivityState string
+
+// LibraryActivityCounts defines model for LibraryActivityCounts.
+type LibraryActivityCounts struct {
+	Attempted  *int `json:"attempted,omitempty"`
+	Changed    *int `json:"changed,omitempty"`
+	Discovered *int `json:"discovered,omitempty"`
+	Failed     *int `json:"failed,omitempty"`
+	Indexed    *int `json:"indexed,omitempty"`
+	Missed     *int `json:"missed,omitempty"`
+	Probed     *int `json:"probed,omitempty"`
+	Processed  *int `json:"processed,omitempty"`
+	Remaining  *int `json:"remaining,omitempty"`
+	Removed    *int `json:"removed,omitempty"`
+	Reused     *int `json:"reused,omitempty"`
+	Skipped    *int `json:"skipped,omitempty"`
+	Succeeded  *int `json:"succeeded,omitempty"`
+	Terminal   *int `json:"terminal,omitempty"`
+	Total      *int `json:"total,omitempty"`
+	Transient  *int `json:"transient,omitempty"`
+}
+
 // LibraryChanges defines model for LibraryChanges.
 type LibraryChanges struct {
 	// Albums Albums that changed (upsert into the cache).
@@ -1518,6 +1617,8 @@ type ServerSettings struct {
 
 // ServerStatus defines model for ServerStatus.
 type ServerStatus struct {
+	// Activity Current library pipeline activity. Null or absent means idle; poll this status endpoint for authoritative state.
+	Activity     *LibraryActivity `json:"activity,omitempty"`
 	Integrations *struct {
 		Lastfm *ServerStatusIntegrationsLastfm `json:"lastfm,omitempty"`
 		Lidarr *ServerStatusIntegrationsLidarr `json:"lidarr,omitempty"`

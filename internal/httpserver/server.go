@@ -103,6 +103,7 @@ func handlerWithServer(st *store.Store, mgr *library.Manager, dataDir, version s
 		DiscogsUserAgent: "BlitterServer/" + version + " (https://github.com/BlitterAmp/BlitterServer)",
 		MusicBrainz:      mb,
 		ProviderCache:    providerCache,
+		Activity:         mgr.ActivityTracker(),
 	}))
 	artMgr := artifacts.NewManager(st, mgr, bus, dataDir)
 	artMgr.Start()

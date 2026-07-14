@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/BlitterAmp/BlitterServer/internal/activity"
 	"github.com/BlitterAmp/BlitterServer/internal/events"
 	"github.com/BlitterAmp/BlitterServer/internal/mbresolver"
 	"github.com/BlitterAmp/BlitterServer/internal/musicbrainz"
@@ -42,6 +43,8 @@ type Config struct {
 	MusicBrainz *musicbrainz.Client
 	// ProviderCache persists public provider responses outside the library database.
 	ProviderCache *providercache.Cache
+	// Activity is shared with scans and the status endpoint.
+	Activity *activity.Tracker
 }
 
 // Enricher runs enrichment passes. Base URLs are fields so tests can point them
@@ -55,6 +58,7 @@ type Enricher struct {
 	resolver                   *mbresolver.Resolver
 	mbClient                   *musicbrainz.Client
 	cache                      *providercache.Cache
+	activity                   *activity.Tracker
 	providerPacers             map[string]*providerPacer
 	markArtistMetadataTerminal func(context.Context, string, string) error
 	consolidateArtists         func(context.Context) (bool, error)
@@ -79,12 +83,13 @@ type Enricher struct {
 
 func New(st *store.Store, bus *events.Bus, artDir string, cfg Config) *Enricher {
 	e := &Enricher{
-		st:     st,
-		bus:    bus,
-		artDir: artDir,
-		http:   &http.Client{Timeout: 20 * time.Second},
-		cfg:    cfg,
-		cache:  cfg.ProviderCache,
+		st:       st,
+		bus:      bus,
+		artDir:   artDir,
+		http:     &http.Client{Timeout: 20 * time.Second},
+		cfg:      cfg,
+		cache:    cfg.ProviderCache,
+		activity: cfg.Activity,
 		providerPacers: map[string]*providerPacer{
 			"caa": newProviderPacer(time.Second), "fanart": newProviderPacer(time.Second), "lastfm": newProviderPacer(time.Second), "discogs": discogsProcessPacer,
 		},
@@ -96,6 +101,9 @@ func New(st *store.Store, bus *events.Bus, artDir string, cfg Config) *Enricher 
 		ArtSliceBudget:      90 * time.Second,
 		LogProgressInterval: 15 * time.Second,
 		Now:                 time.Now,
+	}
+	if e.activity == nil {
+		e.activity = activity.New()
 	}
 	e.mbClient = cfg.MusicBrainz
 	e.markArtistMetadataTerminal = st.MarkMusicBrainzArtistMetadataTerminal
