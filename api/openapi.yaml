@@ -1168,7 +1168,7 @@ paths:
       parameters:
         - $ref: "#/components/parameters/cursor"
         - $ref: "#/components/parameters/limit"
-        - { name: kind, in: query, required: false, schema: { type: string, enum: [artist, album, track] } }
+        - { name: kind, in: query, required: false, schema: { type: string, enum: [artist, album, track, genre] } }
         - { name: state, in: query, required: false, schema: { type: string, enum: [loved, not_for_me] } }
       responses:
         "200":
@@ -1192,8 +1192,8 @@ paths:
       tags: [loves]
       summary: Set the tri-state love for an item (idempotent, per profile)
       description: |
-        `ref` is a canonical id (`art_`/`alb_`/`trk_` — the kind derives from
-        the prefix). External artists surfaced by search/similar/discover carry
+        `ref` is a canonical id (`art_`/`alb_`/`trk_`) or canonical MusicBrainz
+        genre key (`genre:<name>`). External artists surfaced by search/similar/discover carry
         canonical ids too, so they are lovable before they are owned.
 
         `loved` on an artist → Lidarr ensure + monitor + back-catalog search;
@@ -2622,7 +2622,7 @@ components:
       required: [mixId, kind, title]
       properties:
         mixId: { type: string, example: "mood:driving" }
-        kind: { type: string, enum: [forYou, topRated, heavyRotation, rediscover, mood, genre] }
+        kind: { type: string, enum: [dailyMix, discoverWeekly, releaseRadar, forYou, topRated, heavyRotation, rediscover, mood, genre] }
         title: { type: string }
         collageArtIds:
           type: array
@@ -2714,7 +2714,7 @@ components:
       properties:
         loveId: { type: string, example: lov_6r5e4w }
         ref: { type: string, example: art_9f3kq2, description: Canonical id of the loved item }
-        kind: { type: string, enum: [artist, album, track] }
+        kind: { type: string, enum: [artist, album, track, genre] }
         state: { $ref: "#/components/schemas/LoveState" }
         name: { type: string }
         artistName: { type: string, nullable: true, description: For album/track loves }

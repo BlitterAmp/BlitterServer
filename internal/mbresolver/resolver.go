@@ -510,7 +510,7 @@ func normalizedDisc(v int) int {
 }
 
 func canonical(in release) store.CanonicalRelease {
-	out := store.CanonicalRelease{ReleaseID: in.ID, ReleaseGroupID: in.ReleaseGroup.ID, Title: in.Title, AlbumCredits: credits(in.Credits)}
+	out := store.CanonicalRelease{ReleaseID: in.ID, ReleaseGroupID: in.ReleaseGroup.ID, Title: in.Title, ReleaseDate: in.Date, AlbumCredits: credits(in.Credits)}
 	for _, m := range in.Media {
 		for _, t := range m.Tracks {
 			out.Tracks = append(out.Tracks, store.CanonicalTrack{Disc: m.Position, Index: t.Position, DurationMs: t.Recording.Length, Title: t.Recording.Title, RecordingID: t.Recording.ID, Credits: credits(t.Recording.Credits)})

@@ -333,6 +333,7 @@ func (e LoveRecordAcquisitionState) Valid() bool {
 const (
 	LoveRecordKindAlbum  LoveRecordKind = "album"
 	LoveRecordKindArtist LoveRecordKind = "artist"
+	LoveRecordKindGenre  LoveRecordKind = "genre"
 	LoveRecordKindTrack  LoveRecordKind = "track"
 )
 
@@ -342,6 +343,8 @@ func (e LoveRecordKind) Valid() bool {
 	case LoveRecordKindAlbum:
 		return true
 	case LoveRecordKindArtist:
+		return true
+	case LoveRecordKindGenre:
 		return true
 	case LoveRecordKindTrack:
 		return true
@@ -373,17 +376,24 @@ func (e LoveState) Valid() bool {
 
 // Defines values for MixKind.
 const (
-	MixKindForYou        MixKind = "forYou"
-	MixKindGenre         MixKind = "genre"
-	MixKindHeavyRotation MixKind = "heavyRotation"
-	MixKindMood          MixKind = "mood"
-	MixKindRediscover    MixKind = "rediscover"
-	MixKindTopRated      MixKind = "topRated"
+	MixKindDailyMix       MixKind = "dailyMix"
+	MixKindDiscoverWeekly MixKind = "discoverWeekly"
+	MixKindForYou         MixKind = "forYou"
+	MixKindGenre          MixKind = "genre"
+	MixKindHeavyRotation  MixKind = "heavyRotation"
+	MixKindMood           MixKind = "mood"
+	MixKindRediscover     MixKind = "rediscover"
+	MixKindReleaseRadar   MixKind = "releaseRadar"
+	MixKindTopRated       MixKind = "topRated"
 )
 
 // Valid indicates whether the value is a known member of the MixKind enum.
 func (e MixKind) Valid() bool {
 	switch e {
+	case MixKindDailyMix:
+		return true
+	case MixKindDiscoverWeekly:
+		return true
 	case MixKindForYou:
 		return true
 	case MixKindGenre:
@@ -393,6 +403,8 @@ func (e MixKind) Valid() bool {
 	case MixKindMood:
 		return true
 	case MixKindRediscover:
+		return true
+	case MixKindReleaseRadar:
 		return true
 	case MixKindTopRated:
 		return true
@@ -762,6 +774,7 @@ func (e ListArtistsParamsSort) Valid() bool {
 const (
 	ListLovesParamsKindAlbum  ListLovesParamsKind = "album"
 	ListLovesParamsKindArtist ListLovesParamsKind = "artist"
+	ListLovesParamsKindGenre  ListLovesParamsKind = "genre"
 	ListLovesParamsKindTrack  ListLovesParamsKind = "track"
 )
 
@@ -771,6 +784,8 @@ func (e ListLovesParamsKind) Valid() bool {
 	case ListLovesParamsKindAlbum:
 		return true
 	case ListLovesParamsKindArtist:
+		return true
+	case ListLovesParamsKindGenre:
 		return true
 	case ListLovesParamsKindTrack:
 		return true

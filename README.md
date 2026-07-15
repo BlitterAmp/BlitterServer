@@ -1,5 +1,8 @@
 # BlitterServer
 
+[![CI](https://github.com/BlitterAmp/BlitterServer/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/BlitterAmp/BlitterServer/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/BlitterAmp/BlitterServer?display_name=tag&sort=semver)](https://github.com/BlitterAmp/BlitterServer/releases/latest)
+
 > Development database reset: the MusicBrainz identity/structured-credit schema rewrites the pre-user library
 > baseline. Existing development data directories created before this schema must have `blitterserver.db` removed
 > explicitly and then be rescanned; startup never deletes a database automatically. This loses all local development
@@ -88,7 +91,17 @@ log:
     compress: true
 ```
 
-Planned deployment options: build from source, prebuilt tarballs, and Docker (with ffmpeg bundled).
+### Releases
+
+[GitHub releases](https://github.com/BlitterAmp/BlitterServer/releases/latest) provide standalone archives for Linux
+and macOS on amd64 and arm64, plus Windows amd64. Each archive includes the server, README, and license; verify downloads
+against the attached `SHA256SUMS`. Release binaries include the admin console and report their exact version through
+`/v1/ping`. `ffmpeg` remains an optional external runtime dependency for transcoding.
+
+The server's distribution version is independent from the OpenAPI contract version. BlitterAmp desktop releases pin and
+build an exact published BlitterServer tag rather than consuming the server's moving `main` branch.
+
+Docker packaging remains planned.
 
 ## API
 
