@@ -1,4 +1,4 @@
-.PHONY: build run check fmt vet lint-api gen-check generate web release-package
+.PHONY: build run check fmt vet lint-api gen-check compat-api generate web release-package
 
 build: web
 	go build -ldflags "-X main.version=$$(git describe --tags --always --dirty)" -o dist/blitterserver ./cmd/blitterserver
@@ -21,6 +21,9 @@ lint-api:
 gen-check:
 	npx --yes openapi-typescript@7.13.0 api/openapi.yaml --output /dev/null
 	go tool oapi-codegen -generate types,client -package apiclient -o /dev/null api/openapi.yaml
+
+compat-api:
+	bash scripts/check-api-compat.sh
 
 generate:
 	go generate ./...

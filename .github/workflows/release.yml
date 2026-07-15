@@ -56,10 +56,19 @@ jobs:
         env:
           TAG: ${{ needs.release-please.outputs.tag_name }}
           SHA: ${{ needs.release-please.outputs.sha }}
+          APPROVED_MAJOR_RELEASE: ${{ vars.APPROVED_MAJOR_RELEASE }}
         run: |
           test "$(git rev-parse HEAD)" = "$SHA"
           test "v$(cat version.txt)" = "$TAG"
           test "$(git rev-list -n 1 "$TAG")" = "$SHA"
+          major="${TAG#v}"
+          major="${major%%.*}"
+          if [ "$major" -gt 1 ]; then
+            test "$APPROVED_MAJOR_RELEASE" = "$TAG" || {
+              echo "Refusing unapproved major release $TAG; set APPROVED_MAJOR_RELEASE only after explicit user approval." >&2
+              exit 1
+            }
+          fi
       - name: Build embedded admin console
         run: make web
       - name: Verify server
