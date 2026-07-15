@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.2](https://github.com/BlitterAmp/BlitterServer/compare/v1.0.1...v1.0.2) (2026-07-15)
+
+
+### Bug Fixes
+
+* dispatch server releases across repositories ([#46](https://github.com/BlitterAmp/BlitterServer/issues/46)) ([be09b92](https://github.com/BlitterAmp/BlitterServer/commit/be09b926a5dd65db3ed423f46090dc96b112fa62))
+
 ## [1.0.1](https://github.com/BlitterAmp/BlitterServer/compare/v1.0.0...v1.0.1) (2026-07-15)
 
 
