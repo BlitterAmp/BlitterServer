@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/BlitterAmp/BlitterServer/compare/v1.0.0...v1.0.1) (2026-07-15)
+
+
+### Bug Fixes
+
+* enforce stable v1 API compatibility ([#44](https://github.com/BlitterAmp/BlitterServer/issues/44)) ([e1a054f](https://github.com/BlitterAmp/BlitterServer/commit/e1a054f18604cee109ba48f4faf722d21e1ee50c))
+
 ## 1.0.0 (2026-07-15)
 
 
