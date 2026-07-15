@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"strings"
+	"time"
 )
 
 // notForMeFilter excludes tracks the profile marked not_for_me at any level
@@ -11,7 +13,11 @@ import (
 // content" rule. Callers append profileID three times.
 const notForMeFilter = ` AND NOT EXISTS (
 	SELECT 1 FROM loves l WHERE l.state = 'not_for_me' AND l.profile_id = ?
-	AND (l.ref IN (t.track_id, t.album_id, t.artist_id) OR EXISTS (SELECT 1 FROM track_artist_credits c WHERE c.track_id=t.track_id AND c.artist_id=l.ref)))`
+	AND (l.ref IN (t.track_id, t.album_id, t.artist_id)
+		OR EXISTS (SELECT 1 FROM track_artist_credits c WHERE c.track_id=t.track_id AND c.artist_id=l.ref)
+		OR (l.ref LIKE 'genre:%' AND EXISTS (
+			SELECT 1 FROM track_artist_credits c JOIN artist_genres g ON g.artist_id=c.artist_id
+			WHERE c.track_id=t.track_id AND l.ref='genre:' || g.name))))`
 
 // RecentlyPlayedTracks returns distinct tracks by most recent completed play.
 func (s *Store) RecentlyPlayedTracks(ctx context.Context, profileID string, limit int) ([]TrackRow, error) {
@@ -61,49 +67,76 @@ type MixInfo struct {
 }
 
 const mixLimit = 50
+const generatedMixLimit = 100
+
+type mixQuery struct {
+	where, order         string
+	whereArgs, orderArgs []any
+	limit                int
+}
+
+func periodOffset(profileID, period string) int {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(profileID + "\x00" + period))
+	return int(h.Sum32()%8) + 5
+}
 
 // mixWhere returns the SQL fragment + args selecting a mix's members.
 // The profile arg for notForMeFilter is appended by the caller.
-func mixWhere(profileID, mixID string) (where, order string, args []any, err error) {
+func mixWhere(profileID, mixID string) (mixQuery, error) {
+	now := time.Now().UTC()
 	switch {
+	case mixID == "dailyMix":
+		offset := periodOffset(profileID, now.Format("2006-01-02"))
+		return mixQuery{where: "1=1", order: fmt.Sprintf(`CASE WHEN EXISTS (
+			SELECT 1 FROM playback_events e WHERE e.profile_id=? AND e.track_id=t.track_id AND e.type='ended')
+			OR EXISTS (SELECT 1 FROM loves l WHERE l.profile_id=? AND l.state='loved' AND
+				(l.ref IN (t.track_id,t.album_id,t.artist_id) OR EXISTS (SELECT 1 FROM track_artist_credits c WHERE c.track_id=t.track_id AND c.artist_id=l.ref)))
+			THEN 0 ELSE 1 END, substr(t.track_id,%d),t.track_id`, offset), orderArgs: []any{profileID, profileID}, limit: generatedMixLimit}, nil
+	case mixID == "discoverWeekly":
+		year, week := now.ISOWeek()
+		offset := periodOffset(profileID, fmt.Sprintf("%04d-W%02d", year, week))
+		return mixQuery{where: "1=1", order: fmt.Sprintf(`CASE WHEN EXISTS (
+			SELECT 1 FROM playback_events e WHERE e.profile_id=? AND e.track_id=t.track_id AND e.type='ended')
+			THEN 1 ELSE 0 END, substr(t.track_id,%d),t.track_id`, offset), orderArgs: []any{profileID}, limit: generatedMixLimit}, nil
+	case mixID == "releaseRadar":
+		return mixQuery{where: `length(al.release_date)=10 AND date(al.release_date) BETWEEN date('now','-1 month') AND date('now')
+			AND t.created_at >= CAST(strftime('%s','now','-1 month') AS INTEGER)`, order: "date(al.release_date) DESC,t.created_at DESC,al.album_id,COALESCE(t.disc,1),COALESCE(t.idx,0)", limit: generatedMixLimit}, nil
 	case mixID == "forYou":
 		// Artists the profile plays or loves, minus explicit rejections.
-		return `(EXISTS (SELECT 1 FROM track_artist_credits tc WHERE tc.track_id=t.track_id AND tc.artist_id IN (
+		return mixQuery{where: `(EXISTS (SELECT 1 FROM track_artist_credits tc WHERE tc.track_id=t.track_id AND tc.artist_id IN (
 			SELECT pc.artist_id FROM playback_events e JOIN track_artist_credits pc ON pc.track_id=e.track_id
 			WHERE e.profile_id = ? AND e.type = 'ended'))
 			OR EXISTS (SELECT 1 FROM loves lv WHERE lv.profile_id = ? AND lv.state = 'loved'
 			           AND (lv.ref IN (t.track_id, t.album_id, t.artist_id) OR EXISTS (SELECT 1 FROM track_artist_credits c WHERE c.track_id=t.track_id AND c.artist_id=lv.ref))))`,
-			"random()", []any{profileID, profileID}, nil
+			order: "random()", whereArgs: []any{profileID, profileID}, limit: mixLimit}, nil
 	case mixID == "topRated":
-		return `EXISTS (SELECT 1 FROM ratings r WHERE r.profile_id = ? AND r.item_id = t.track_id AND r.rating10 >= 8)`,
-			`(SELECT r.rating10 FROM ratings r WHERE r.profile_id = ? AND r.item_id = t.track_id) DESC`,
-			[]any{profileID, profileID}, nil
+		return mixQuery{where: `EXISTS (SELECT 1 FROM ratings r WHERE r.profile_id = ? AND r.item_id = t.track_id AND r.rating10 >= 8)`, order: `(SELECT r.rating10 FROM ratings r WHERE r.profile_id = ? AND r.item_id = t.track_id) DESC`, whereArgs: []any{profileID}, orderArgs: []any{profileID}, limit: mixLimit}, nil
 	case mixID == "heavyRotation":
-		return `(SELECT count(*) FROM playback_events e WHERE e.profile_id = ? AND e.track_id = t.track_id
+		return mixQuery{where: `(SELECT count(*) FROM playback_events e WHERE e.profile_id = ? AND e.track_id = t.track_id
 			AND e.type = 'ended' AND e.at > datetime('now', '-30 days')) > 0`,
-			`(SELECT count(*) FROM playback_events e WHERE e.profile_id = ? AND e.track_id = t.track_id
-			AND e.type = 'ended' AND e.at > datetime('now', '-30 days')) DESC`,
-			[]any{profileID, profileID}, nil
+			order: `(SELECT count(*) FROM playback_events e WHERE e.profile_id = ? AND e.track_id = t.track_id AND e.type = 'ended' AND e.at > datetime('now', '-30 days')) DESC`, whereArgs: []any{profileID}, orderArgs: []any{profileID}, limit: mixLimit}, nil
 	case mixID == "rediscover":
-		return `EXISTS (SELECT 1 FROM playback_events e WHERE e.profile_id = ? AND e.track_id = t.track_id AND e.type = 'ended')
+		return mixQuery{where: `EXISTS (SELECT 1 FROM playback_events e WHERE e.profile_id = ? AND e.track_id = t.track_id AND e.type = 'ended')
 			AND NOT EXISTS (SELECT 1 FROM playback_events e WHERE e.profile_id = ? AND e.track_id = t.track_id
 			                AND e.type = 'ended' AND e.at > datetime('now', '-60 days'))`,
-			"random()", []any{profileID, profileID}, nil
+			order: "random()", whereArgs: []any{profileID, profileID}, limit: mixLimit}, nil
 	case strings.HasPrefix(mixID, "genre:"):
-		return `t.genre = ?`, "random()", []any{strings.TrimPrefix(mixID, "genre:")}, nil
+		return mixQuery{where: `EXISTS (SELECT 1 FROM track_artist_credits c JOIN artist_genres g ON g.artist_id=c.artist_id WHERE c.track_id=t.track_id AND g.name=? COLLATE NOCASE)`, order: "random()", whereArgs: []any{strings.TrimPrefix(mixID, "genre:")}, limit: generatedMixLimit}, nil
 	}
-	return "", "", nil, fmt.Errorf("mix %s: %w", mixID, ErrNotFound)
+	return mixQuery{}, fmt.Errorf("mix %s: %w", mixID, ErrNotFound)
 }
 
 // MixTracks materializes a mix for the profile.
 func (s *Store) MixTracks(ctx context.Context, profileID, mixID string) ([]TrackRow, error) {
-	where, order, args, err := mixWhere(profileID, mixID)
+	query, err := mixWhere(profileID, mixID)
 	if err != nil {
 		return nil, err
 	}
-	args = append(args, profileID) // notForMeFilter
+	args := append(query.whereArgs, profileID)
+	args = append(args, query.orderArgs...)
 	rows, err := s.listTracksWhere(ctx,
-		where+notForMeFilter, order+fmt.Sprintf(" LIMIT %d", mixLimit), args...)
+		query.where+notForMeFilter, query.order+fmt.Sprintf(" LIMIT %d", query.limit), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -117,31 +150,34 @@ func (s *Store) MixTracks(ctx context.Context, profileID, mixID string) ([]Track
 func (s *Store) AvailableMixes(ctx context.Context, profileID string) ([]MixInfo, error) {
 	var out []MixInfo
 	titles := map[string]string{
+		"dailyMix": "Daily Mix", "discoverWeekly": "Discover Weekly", "releaseRadar": "Release Radar",
 		"forYou": "For You", "topRated": "Top Rated",
 		"heavyRotation": "Heavy Rotation", "rediscover": "Rediscover",
 	}
-	for _, kind := range []string{"forYou", "topRated", "heavyRotation", "rediscover"} {
+	for _, kind := range []string{"dailyMix", "discoverWeekly", "releaseRadar", "forYou", "topRated", "heavyRotation", "rediscover"} {
 		tracks, err := s.MixTracks(ctx, profileID, kind)
 		if err != nil {
 			continue // empty mixes simply don't appear
 		}
 		out = append(out, mixInfo(kind, kind, titles[kind], tracks))
 	}
-	genres, err := s.ListGenres(ctx)
+	rows, err := s.db.QueryContext(ctx, `SELECT substr(ref,7) FROM loves WHERE profile_id=? AND kind='genre' AND state='loved' ORDER BY updated_at DESC`, profileID)
 	if err != nil {
 		return nil, err
 	}
-	for i, g := range genres {
-		if i >= 4 {
-			break
+	defer rows.Close()
+	for rows.Next() {
+		var genre string
+		if err := rows.Scan(&genre); err != nil {
+			return nil, err
 		}
-		tracks, err := s.MixTracks(ctx, profileID, "genre:"+g.Name)
+		tracks, err := s.MixTracks(ctx, profileID, "genre:"+genre)
 		if err != nil {
 			continue
 		}
-		out = append(out, mixInfo("genre:"+g.Name, "genre", g.Name, tracks))
+		out = append(out, mixInfo("genre:"+genre, "genre", genre, tracks))
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 func mixInfo(mixID, kind, title string, tracks []TrackRow) MixInfo {

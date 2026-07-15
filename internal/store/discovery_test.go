@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -28,6 +29,15 @@ func discoveryFixture(t *testing.T) (*Store, string, []TrackRow) {
 
 	// tracks[3]: not_for_me — must never surface in generated content.
 	s.SetLove(ctx, p1.ProfileID, tracks[3].TrackID, "not_for_me")
+
+	seenArtists := map[string]bool{}
+	for _, track := range tracks {
+		if !seenArtists[track.ArtistID] {
+			seenArtists[track.ArtistID] = true
+			_, _ = s.db.ExecContext(ctx, `INSERT INTO artist_genres(artist_id,position,name) VALUES(?,0,'Rock')`, track.ArtistID)
+		}
+	}
+	_, _ = s.db.ExecContext(ctx, `UPDATE albums SET release_date=? WHERE album_id=?`, now.Format("2006-01-02"), tracks[0].AlbumID)
 
 	return s, p1.ProfileID, tracks
 }
@@ -66,9 +76,18 @@ func TestMixes(t *testing.T) {
 	for _, m := range mixes {
 		kinds[m.Kind] = m.MixID
 	}
-	for _, want := range []string{"forYou", "topRated", "heavyRotation", "rediscover", "genre"} {
+	for _, want := range []string{"dailyMix", "discoverWeekly", "releaseRadar", "forYou", "topRated", "heavyRotation", "rediscover"} {
 		if _, ok := kinds[want]; !ok {
 			t.Fatalf("missing mix kind %s: %+v", want, mixes)
+		}
+	}
+	for _, mixID := range []string{"dailyMix", "discoverWeekly", "releaseRadar"} {
+		rows, err := s.MixTracks(ctx, p1, mixID)
+		if err != nil || len(rows) == 0 || len(rows) > 100 {
+			t.Fatalf("%s: err=%v tracks=%d", mixID, err, len(rows))
+		}
+		if trackIDs(rows)[tracks[3].TrackID] {
+			t.Fatalf("not_for_me leaked into %s", mixID)
 		}
 	}
 
@@ -98,6 +117,17 @@ func TestMixes(t *testing.T) {
 	if _, err := s.MixTracks(ctx, p1, "genre:Nope"); err == nil {
 		t.Fatal("unknown genre mix must error")
 	}
+	if _, err := s.SetLove(ctx, p1, "genre:Rock", "loved"); err != nil {
+		t.Fatal(err)
+	}
+	mixes, _ = s.AvailableMixes(ctx, p1)
+	foundLovedGenre := false
+	for _, mix := range mixes {
+		foundLovedGenre = foundLovedGenre || mix.MixID == "genre:Rock"
+	}
+	if !foundLovedGenre {
+		t.Fatalf("loved genre missing from Home mixes: %+v", mixes)
+	}
 	if _, err := s.MixTracks(ctx, p1, "bogus"); err == nil {
 		t.Fatal("unknown mix must error")
 	}
@@ -123,5 +153,39 @@ func TestRadioNext(t *testing.T) {
 	one, _ := s.RadioNext(ctx, p1, nil, nil, 1)
 	if len(one) != 1 {
 		t.Fatalf("count cap: %+v", one)
+	}
+}
+
+func TestGeneratedMixesCapAtOneHundredAndExcludeRejectedTracks(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	profileID, err := s.CreateProfile(ctx, "Listener")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seq, _ := s.NextScanSeq(ctx)
+	for i := range 110 {
+		item := meta(fmt.Sprintf("mix/%03d.flac", i), fmt.Sprintf("Track %03d", i), "Mix Artist", "Mix Album", "Electronic", 2026, i+1)
+		if err := s.UpsertTrack(ctx, "filesystem", item, "", seq); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tracks, _, _ := s.ListTracks(ctx, "title", "", 200)
+	rejected := tracks[0].TrackID
+	if _, err := s.SetLove(ctx, profileID, rejected, "not_for_me"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE albums SET release_date=date('now')`); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, mixID := range []string{"dailyMix", "discoverWeekly", "releaseRadar"} {
+		mix, err := s.MixTracks(ctx, profileID, mixID)
+		if err != nil || len(mix) != 100 {
+			t.Fatalf("%s tracks=%d err=%v", mixID, len(mix), err)
+		}
+		if trackIDs(mix)[rejected] {
+			t.Fatalf("rejected track leaked into %s", mixID)
+		}
 	}
 }

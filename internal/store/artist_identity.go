@@ -354,7 +354,8 @@ func musicBrainzArtistEvidenceTx(ctx context.Context, tx *sql.Tx) (map[string]ma
 		aliases   []string
 	}
 	byMBID := map[string]*names{}
-	owners := map[string]map[string]bool{}
+	canonicalOwners := map[string]map[string]bool{}
+	aliasOwners := map[string]map[string]bool{}
 	for rows.Next() {
 		var mbid, canonical string
 		var alias sql.NullString
@@ -366,14 +367,21 @@ func musicBrainzArtistEvidenceTx(ctx context.Context, tx *sql.Tx) (map[string]ma
 			entry = &names{canonical: canonical}
 			byMBID[mbid] = entry
 		}
-		addArtistEvidenceOwner(owners, canonical, mbid)
+		addArtistEvidenceOwner(canonicalOwners, canonical, mbid)
 		if alias.Valid {
 			entry.aliases = append(entry.aliases, alias.String)
-			addArtistEvidenceOwner(owners, alias.String, mbid)
+			addArtistEvidenceOwner(aliasOwners, alias.String, mbid)
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	owners := canonicalOwners
+	for key, aliases := range aliasOwners {
+		if _, hasCanonical := owners[key]; hasCanonical {
+			continue
+		}
+		owners[key] = aliases
 	}
 	for mbid, entry := range byMBID {
 		canonicalOwners := owners[artistEvidenceKey(entry.canonical)]

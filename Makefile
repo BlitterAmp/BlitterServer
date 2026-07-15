@@ -1,4 +1,4 @@
-.PHONY: build run check fmt vet lint-api gen-check generate web
+.PHONY: build run check fmt vet lint-api gen-check generate web release-package
 
 build: web
 	go build -ldflags "-X main.version=$$(git describe --tags --always --dirty)" -o dist/blitterserver ./cmd/blitterserver
@@ -27,3 +27,6 @@ generate:
 
 web:
 	cd web/admin && npm ci && npm run build
+
+release-package: web
+	bash scripts/package-release.sh "$${TAG:?TAG must be a v-prefixed release tag}"

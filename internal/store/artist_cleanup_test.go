@@ -254,6 +254,38 @@ func TestApplyMusicBrainzArtistMetadataRefusesAmbiguousEvidence(t *testing.T) {
 	}
 }
 
+func TestCanonicalArtistNameOutranksAnotherArtistsAlias(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	seq, _ := s.NextScanSeq(ctx)
+	for _, meta := range []source.TrackMeta{
+		{NativeID: "dizzy.flac", Title: "Dizzy Track", Album: "Dizzy Album", PrimaryArtist: source.ArtistReference{Name: "Dizzy Gillespie", MBID: "dizzy-mbid"}, AlbumCredits: []source.ArtistCredit{{Name: "Dizzy Gillespie", MBID: "dizzy-mbid"}}, TrackCredits: []source.ArtistCredit{{Name: "Dizzy Gillespie", MBID: "dizzy-mbid"}}, Container: "flac", Codec: "flac", Version: 1},
+		{NativeID: "charlie.flac", Title: "Charlie Track", Album: "Charlie Album", PrimaryArtist: source.ArtistReference{Name: "Charlie Parker", MBID: "charlie-mbid"}, AlbumCredits: []source.ArtistCredit{{Name: "Charlie Parker", MBID: "charlie-mbid"}}, TrackCredits: []source.ArtistCredit{{Name: "Charlie Parker", MBID: "charlie-mbid"}}, Container: "flac", Codec: "flac", Version: 1},
+		{NativeID: "local.flac", Title: "Local Track", Album: "Local Album", PrimaryArtist: source.ArtistReference{Name: "Dizzy Gillespie"}, AlbumCredits: []source.ArtistCredit{{Name: "Dizzy Gillespie"}}, TrackCredits: []source.ArtistCredit{{Name: "Dizzy Gillespie"}}, Container: "flac", Codec: "flac", Version: 1},
+	} {
+		if err := s.UpsertTrack(ctx, "filesystem", meta, "", seq); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var dizzyID, charlieID string
+	_ = s.db.QueryRowContext(ctx, `SELECT artist_id FROM artists WHERE musicbrainz_id='dizzy-mbid'`).Scan(&dizzyID)
+	_ = s.db.QueryRowContext(ctx, `SELECT artist_id FROM artists WHERE musicbrainz_id='charlie-mbid'`).Scan(&charlieID)
+	metadataSeq, _ := s.NextScanSeq(ctx)
+	if _, err := s.PersistMusicBrainzArtistMetadata(ctx, dizzyID, "dizzy-mbid", "Dizzy Gillespie", nil, nil, metadataSeq); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PersistMusicBrainzArtistMetadata(ctx, charlieID, "charlie-mbid", "Charlie Parker", []string{"Dizzy Gillespie"}, nil, metadataSeq); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := s.ConsolidateMusicBrainzArtistsAtNextSequence(ctx); err != nil || !changed {
+		t.Fatalf("consolidate changed=%v err=%v", changed, err)
+	}
+	var ownerID string
+	if err := s.db.QueryRowContext(ctx, `SELECT artist_id FROM albums WHERE title='Local Album'`).Scan(&ownerID); err != nil || ownerID != dizzyID {
+		t.Fatalf("local owner=%s want canonical=%s err=%v", ownerID, dizzyID, err)
+	}
+}
+
 func TestApplyMusicBrainzArtistMetadataRollsBackUnsafeAlbumCollision(t *testing.T) {
 	s := open(t)
 	ctx := context.Background()

@@ -453,6 +453,41 @@ func TestRescanUsesExistingCanonicalIdentityOnMBIDConflict(t *testing.T) {
 	}
 }
 
+func TestUntaggedRescanPreservesCanonicalArtistIdentity(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	track := meta("song.flac", "Song", "Dizzy Gillespie", "Ambiguous Album", "", 2000, 1)
+	seq, _ := s.NextScanSeq(ctx)
+	if err := s.UpsertTrack(ctx, "filesystem", track, "", seq); err != nil {
+		t.Fatal(err)
+	}
+	var artistID, albumID, trackID string
+	if err := s.db.QueryRowContext(ctx, `SELECT artist_id,album_id,track_id FROM tracks WHERE native_id=?`, track.NativeID).Scan(&artistID, &albumID, &trackID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE artists SET musicbrainz_id='dizzy-mbid' WHERE artist_id=?`, artistID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO album_musicbrainz_matches(album_id,state,attempt_count,next_attempt_at) VALUES(?,'ambiguous',1,0)`, albumID); err != nil {
+		t.Fatal(err)
+	}
+	seq, _ = s.NextScanSeq(ctx)
+	if err := s.UpsertTrack(ctx, "filesystem", track, "", seq); err != nil {
+		t.Fatal(err)
+	}
+	var gotArtist, gotAlbum string
+	if err := s.db.QueryRowContext(ctx, `SELECT artist_id,album_id FROM tracks WHERE track_id=?`, trackID).Scan(&gotArtist, &gotAlbum); err != nil {
+		t.Fatal(err)
+	}
+	if gotArtist != artistID || gotAlbum != albumID {
+		t.Fatalf("identity changed: artist=%s/%s album=%s/%s", gotArtist, artistID, gotAlbum, albumID)
+	}
+	var visible int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM artists WHERE name='Dizzy Gillespie' AND missing=0`).Scan(&visible); err != nil || visible != 1 {
+		t.Fatalf("visible Dizzy artists=%d err=%v", visible, err)
+	}
+}
+
 func TestFinishScanRemovesCreditOnlyCollaboratorFromArtistCatalog(t *testing.T) {
 	s := open(t)
 	ctx := context.Background()

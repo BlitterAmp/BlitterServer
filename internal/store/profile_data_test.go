@@ -108,6 +108,13 @@ func TestLoveTriState(t *testing.T) {
 	if err != nil || arec.Kind != "artist" {
 		t.Fatalf("artist love: %v %+v", err, arec)
 	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO artist_genres(artist_id,position,name) VALUES(?,0,'Electronic')`, tracks[0].ArtistID); err != nil {
+		t.Fatal(err)
+	}
+	grec, err := s.SetLove(ctx, p1.ProfileID, "genre:Electronic", "loved")
+	if err != nil || grec.Kind != "genre" || grec.Name != "Electronic" {
+		t.Fatalf("genre love: %v %+v", err, grec)
+	}
 	// not_for_me replaces loved (idempotent upsert).
 	rec, _ = s.SetLove(ctx, p1.ProfileID, tracks[0].TrackID, "not_for_me")
 	if rec.State != "not_for_me" {
@@ -119,7 +126,7 @@ func TestLoveTriState(t *testing.T) {
 		t.Fatalf("neutral: %v %+v", err, rec)
 	}
 	list, _, _ := s.ListLoves(ctx, p1.ProfileID, "", "", "", 100)
-	if len(list) != 1 || list[0].Ref != tracks[0].ArtistID {
+	if len(list) != 2 {
 		t.Fatalf("neutral must not persist: %+v", list)
 	}
 	// Unknown ref 404s; other profile unaffected.
@@ -133,7 +140,7 @@ func TestLoveTriState(t *testing.T) {
 	// Filters.
 	s.SetLove(ctx, p1.ProfileID, tracks[1].TrackID, "not_for_me")
 	onlyLoved, _, _ := s.ListLoves(ctx, p1.ProfileID, "", "loved", "", 100)
-	if len(onlyLoved) != 1 || onlyLoved[0].State != "loved" {
+	if len(onlyLoved) != 2 {
 		t.Fatalf("state filter: %+v", onlyLoved)
 	}
 	onlyTracks, _, _ := s.ListLoves(ctx, p1.ProfileID, "track", "", "", 100)

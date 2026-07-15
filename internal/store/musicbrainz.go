@@ -135,7 +135,7 @@ type CanonicalTrack struct {
 
 type CanonicalRelease struct {
 	ReleaseID, ReleaseGroupID string
-	Title                     string
+	Title, ReleaseDate        string
 	AlbumCredits              []source.ArtistCredit
 	Tracks                    []CanonicalTrack
 	Authoritative             bool
@@ -223,8 +223,9 @@ func (s *Store) applyMusicBrainzRelease(ctx context.Context, album MusicBrainzAl
 	res, err := tx.ExecContext(ctx, `UPDATE albums SET
 		musicbrainz_release_id=COALESCE(NULLIF(?,''), musicbrainz_release_id),
 		musicbrainz_release_group_id=COALESCE(NULLIF(?,''), musicbrainz_release_group_id),
+		release_date=COALESCE(NULLIF(?,''), release_date),
 		change_seq=CASE WHEN COALESCE(NULLIF(?,''), musicbrainz_release_id) IS NOT musicbrainz_release_id OR COALESCE(NULLIF(?,''), musicbrainz_release_group_id) IS NOT musicbrainz_release_group_id THEN ? ELSE change_seq END
-		WHERE album_id=?`, release.ReleaseID, release.ReleaseGroupID, release.ReleaseID, release.ReleaseGroupID, seq, album.AlbumID)
+		WHERE album_id=?`, release.ReleaseID, release.ReleaseGroupID, release.ReleaseDate, release.ReleaseID, release.ReleaseGroupID, seq, album.AlbumID)
 	if err != nil {
 		return false, err
 	}

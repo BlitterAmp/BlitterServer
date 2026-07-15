@@ -146,7 +146,12 @@ func (s *Store) UpsertTrack(ctx context.Context, kind string, m source.TrackMeta
 	}
 	preserveResolved := false
 	if linkedAlbumID != "" && m.ReleaseMBID == "" && m.ReleaseGroupMBID == "" && m.RecordingMBID == "" && !creditsHaveMBID(m.AlbumCredits) && !creditsHaveMBID(m.TrackCredits) {
-		_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM album_musicbrainz_matches WHERE album_id=? AND state='matched')`, linkedAlbumID).Scan(&preserveResolved)
+		_ = s.db.QueryRowContext(ctx, `SELECT EXISTS(
+			SELECT 1 FROM albums a JOIN artists ar ON ar.artist_id=a.artist_id
+			WHERE a.album_id=? AND (ar.musicbrainz_id IS NOT NULL OR EXISTS (
+				SELECT 1 FROM album_musicbrainz_matches m WHERE m.album_id=a.album_id AND m.state='matched'
+			))
+		)`, linkedAlbumID).Scan(&preserveResolved)
 	}
 
 	grouping := source.ArtistReference{}
@@ -162,9 +167,12 @@ func (s *Store) UpsertTrack(ctx context.Context, kind string, m source.TrackMeta
 	if grouping.Name == "" && grouping.MBID == "" && len(m.TrackCredits) > 0 {
 		grouping = source.ArtistReference{Name: m.TrackCredits[0].Name, MBID: m.TrackCredits[0].MBID}
 	}
-	artistID, err := s.upsertArtist(ctx, grouping.Name, grouping.MBID, linkedArtistID, now, seq)
-	if err != nil {
-		return fmt.Errorf("upsert artist: %w", err)
+	artistID := linkedArtistID
+	if !preserveResolved {
+		artistID, err = s.upsertArtist(ctx, grouping.Name, grouping.MBID, linkedArtistID, now, seq)
+		if err != nil {
+			return fmt.Errorf("upsert artist: %w", err)
+		}
 	}
 
 	var albumID string

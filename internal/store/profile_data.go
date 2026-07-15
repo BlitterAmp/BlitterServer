@@ -269,6 +269,17 @@ func (s *Store) resolveRef(ctx context.Context, ref string) (kind, name, artistN
 			return "", "", "", false, orNotFound(err, ref)
 		}
 		return "track", t.Title, t.ArtistName, true, nil
+	case strings.HasPrefix(ref, "genre:"):
+		requested := strings.TrimSpace(strings.TrimPrefix(ref, "genre:"))
+		var name string
+		err := s.db.QueryRowContext(ctx, `SELECT name FROM artist_genres WHERE name=? COLLATE NOCASE LIMIT 1`, requested).Scan(&name)
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", "", "", false, orNotFound(nil, ref)
+		}
+		if err != nil {
+			return "", "", "", false, err
+		}
+		return "genre", name, "", true, nil
 	}
 	return "", "", "", false, fmt.Errorf("ref %s: %w", ref, ErrNotFound)
 }
