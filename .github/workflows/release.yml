@@ -3,6 +3,8 @@ name: Release
 on:
   push:
     branches: [main]
+  repository_dispatch:
+    types: [blitteramp-released]
   workflow_dispatch:
     inputs:
       requested_by:
@@ -95,4 +97,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_ACTIONS_PR_TOKEN }}
           TAG: ${{ needs.release-please.outputs.tag_name }}
           SHA: ${{ needs.release-please.outputs.sha }}
-        run: gh workflow run sync-engine.yml --repo BlitterAmp/BlitterAmp --ref main -f tag="$TAG" -f sha="$SHA"
+        run: |
+          gh api --method POST repos/BlitterAmp/BlitterAmp/dispatches \
+            -f event_type=blitterserver-released \
+            -f "client_payload[tag]=$TAG" \
+            -f "client_payload[sha]=$SHA"
