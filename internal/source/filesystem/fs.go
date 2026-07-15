@@ -20,7 +20,7 @@ import (
 	"github.com/dhowden/tag/mbz"
 )
 
-const parserVersion = 1
+const parserVersion = 2
 
 // ErrCandidateChanged means a file changed while a scan was considering it.
 var ErrCandidateChanged = errors.New("track candidate changed during parse")
@@ -197,7 +197,7 @@ func (s *Source) read(path string, candidate source.TrackCandidate) (source.Trac
 		meta.AlbumCredits = []source.ArtistCredit{{Name: albumArtist, MBID: validUUID(ids.Get(mbz.AlbumArtist))}}
 		meta.PrimaryArtist.Name = albumArtist
 		meta.PrimaryArtist.MBID = validUUID(ids.Get(mbz.AlbumArtist))
-		meta.Album = strings.TrimSpace(t.Album())
+		meta.Album = normalizeAlbumTitle(strings.TrimSpace(t.Album()), candidate.NativeID)
 		meta.Genre = strings.TrimSpace(t.Genre())
 		meta.Year = t.Year()
 		meta.Index, _ = t.Track()
@@ -222,6 +222,18 @@ func (s *Source) read(path string, candidate source.TrackCandidate) (source.Trac
 		meta.Album = "Unknown Album"
 	}
 	return meta, nil
+}
+
+func normalizeAlbumTitle(album, nativeID string) string {
+	if !strings.HasPrefix(album, ": ") {
+		return album
+	}
+	pathTitle, _, ok := source.FilesystemAlbumPathEvidence(nativeID)
+	withoutPrefix := strings.TrimSpace(strings.TrimPrefix(album, ":"))
+	if ok && strings.EqualFold(pathTitle, withoutPrefix) {
+		return pathTitle
+	}
+	return album
 }
 
 func sourceRevision(sizeBytes, mtimeNS int64) int64 {
