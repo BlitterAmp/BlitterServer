@@ -319,6 +319,31 @@ func TestLastfmArtistGetInfoSelectsLargestImage(t *testing.T) {
 	}
 }
 
+func TestLastfmPlaceholderImagesAreMisses(t *testing.T) {
+	st, ctx := seedAlbum(t)
+	lastfm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			t.Fatalf("placeholder image must not be downloaded: %s", r.URL.Path)
+		}
+		placeholder := "https://lastfm.freetls.fastly.net/i/u/300x300/2a96cbd8b46e442fc41c2b86b821562f.png"
+		if r.URL.Query().Get("method") == "album.getinfo" {
+			_, _ = fmt.Fprintf(w, `{"album":{"image":[{"#text":%q,"size":"extralarge"}]}}`, placeholder)
+			return
+		}
+		_, _ = fmt.Fprintf(w, `{"artist":{"image":[{"#text":%q,"size":"extralarge"}]}}`, placeholder)
+	}))
+	defer lastfm.Close()
+	e := New(st, nil, t.TempDir(), Config{LastfmKey: func(context.Context) string { return "key" }})
+	e.LastfmBase = lastfm.URL
+	e.providerPacers = map[string]*providerPacer{}
+	if image, outcome := e.lastfmAlbumImageOutcome(ctx, "key", "Artist", "Album"); image != "" || outcome != lookupMiss {
+		t.Fatalf("album placeholder image=%q outcome=%v", image, outcome)
+	}
+	if data, _, outcome := e.lastfmArtistArtOutcome(ctx, "Artist"); data != nil || outcome != lookupMiss {
+		t.Fatalf("artist placeholder data=%d outcome=%v", len(data), outcome)
+	}
+}
+
 func TestArtistArtDefersMusicBrainzUntilFanart(t *testing.T) {
 	st, ctx := seedAlbum(t)
 	var calls []string
@@ -928,9 +953,9 @@ func seedArtlessAlbums(t *testing.T, st *store.Store, ctx context.Context, n int
 	}
 }
 
-// A fresh library must not wait behind a full identity drain for artwork:
-// the art stage runs before the resolver in every pass.
-func TestArtFetchedBeforeIdentityResolution(t *testing.T) {
+// Raw scan rows can include split albums and collaborator pseudo-artists.
+// Resolve identity before artwork so provider work targets canonical rows.
+func TestIdentityResolutionRunsBeforeArtwork(t *testing.T) {
 	st, ctx := seedAlbum(t)
 	var mu sync.Mutex
 	var order []string
@@ -999,8 +1024,8 @@ func TestArtFetchedBeforeIdentityResolution(t *testing.T) {
 			firstResolve = i
 		}
 	}
-	if firstArt == -1 || (firstResolve != -1 && firstArt > firstResolve) {
-		t.Fatalf("artwork must be fetched before identity resolution: order=%v", order)
+	if firstArt == -1 || firstResolve == -1 || firstResolve > firstArt {
+		t.Fatalf("identity resolution must run before artwork: order=%v", order)
 	}
 }
 

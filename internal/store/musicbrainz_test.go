@@ -45,6 +45,31 @@ func musicBrainzAlbumFixture(t *testing.T) (*Store, MusicBrainzAlbum) {
 	return s, albums[0]
 }
 
+func TestPathAlbumCandidate(t *testing.T) {
+	for _, test := range []struct {
+		name, sourceKind, nativeID, title string
+		disc                              int
+		ok                                bool
+	}{
+		{"dated album", "filesystem", "MGMT/Congratulations (2010)/01.flac", "Congratulations", 0, true},
+		{"numbered cd", "filesystem", "MGMT/Congratulations (2010)/CD 02/01.flac", "Congratulations", 2, true},
+		{"compact disc", "filesystem", "Artist/Album/CD1/01.flac", "Album", 1, true},
+		{"disc spelling", "filesystem", "Artist/Album/Disc 03/01.flac", "Album", 3, true},
+		{"title containing year", "filesystem", "Artist/1995 - Ima/01.flac", "1995 - Ima", 0, true},
+		{"shallow", "filesystem", "Album/01.flac", "", 0, false},
+		{"disc without album", "filesystem", "Artist/CD 01/01.flac", "", 0, false},
+		{"other source", "remote", "Artist/Album/01.flac", "", 0, false},
+		{"traversal", "filesystem", "../Artist/Album/01.flac", "", 0, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			title, disc, ok := pathAlbumCandidate(test.sourceKind, test.nativeID)
+			if title != test.title || disc != test.disc || ok != test.ok {
+				t.Fatalf("pathAlbumCandidate(%q) = %q,%d,%v; want %q,%d,%v", test.nativeID, title, disc, ok, test.title, test.disc, test.ok)
+			}
+		})
+	}
+}
+
 func TestApplyMusicBrainzReleaseIsTransactionalAndPreservesJoinPhrases(t *testing.T) {
 	s, album := musicBrainzAlbumFixture(t)
 	ctx := context.Background()
@@ -67,6 +92,25 @@ func TestApplyMusicBrainzReleaseIsTransactionalAndPreservesJoinPhrases(t *testin
 	}
 	if tracks[0].MusicBrainzRecordingID != "recording-id" || len(tracks[0].ArtistCredits) != 2 || tracks[0].ArtistCredits[0].JoinPhrase != " feat. " {
 		t.Fatalf("track=%+v", tracks[0])
+	}
+}
+
+func TestApplyMusicBrainzReleaseSetsTitleAfterReleaseIdentity(t *testing.T) {
+	s, album := musicBrainzAlbumFixture(t)
+	ctx := context.Background()
+	seq, _ := s.NextScanSeq(ctx)
+	meta := source.TrackMeta{NativeID: "canonical-title.flac", Title: "Other", Album: "Canonical Album", Year: 2020, Index: 1, Disc: 1, DurationMs: 180000, PrimaryArtist: source.ArtistReference{Name: "Local Artist"}, AlbumCredits: []source.ArtistCredit{{Name: "Local Artist"}}, TrackCredits: []source.ArtistCredit{{Name: "Local Artist"}}, Container: "flac", Codec: "flac", Version: 1}
+	if err := s.UpsertTrack(ctx, "filesystem", meta, "", seq); err != nil {
+		t.Fatal(err)
+	}
+	release := CanonicalRelease{ReleaseID: "canonical-release", ReleaseGroupID: "canonical-group", Title: "Canonical Album"}
+	changed, err := s.ApplyMusicBrainzRelease(ctx, album, release, seq)
+	if err != nil || !changed {
+		t.Fatalf("changed=%v err=%v", changed, err)
+	}
+	got, found, err := s.GetAlbum(ctx, album.AlbumID)
+	if err != nil || !found || got.Title != "Canonical Album" || got.MusicBrainzReleaseID != "canonical-release" {
+		t.Fatalf("album=%+v found=%v err=%v", got, found, err)
 	}
 }
 
@@ -431,7 +475,7 @@ func TestApplyConsensusPreservesExistingReleaseGroup(t *testing.T) {
 	if _, err := s.ApplyMusicBrainzConsensus(ctx, album, CanonicalRelease{ReleaseGroupID: "rg-keep", AlbumCredits: credits}, applySeq, MusicBrainzCandidate{}, nil, next); err != nil {
 		t.Fatal(err)
 	}
-	refreshed, err := s.DueMusicBrainzAlbumsPage(ctx, time.Now().Add(31*24*time.Hour), -1, "", 10)
+	refreshed, err := s.DueMusicBrainzAlbumsPage(ctx, time.Now().Add(31*24*time.Hour), -1, -1, "", 10)
 	if err != nil || len(refreshed) != 1 {
 		t.Fatalf("refreshed=%v err=%v", refreshed, err)
 	}
@@ -445,6 +489,26 @@ func TestApplyConsensusPreservesExistingReleaseGroup(t *testing.T) {
 	}
 	if rg != "rg-keep" {
 		t.Fatalf("release group erased: %q", rg)
+	}
+}
+
+func TestDueMusicBrainzAlbumsPrioritizeCanonicalAnchor(t *testing.T) {
+	s, canonical := musicBrainzAlbumFixture(t)
+	ctx := context.Background()
+	seq, _ := s.NextScanSeq(ctx)
+	meta := source.TrackMeta{NativeID: "raw-fragment.flac", Title: "Second", Album: "Raw Fragment", Year: 2020, Index: 1, Disc: 1, DurationMs: 180000, PrimaryArtist: source.ArtistReference{Name: "Raw Artist"}, AlbumCredits: []source.ArtistCredit{{Name: "Raw Artist"}}, TrackCredits: []source.ArtistCredit{{Name: "Raw Artist"}}, Container: "flac", Codec: "flac", Version: 1}
+	if err := s.UpsertTrack(ctx, "filesystem", meta, "", seq); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE albums SET musicbrainz_release_group_id='canonical-group' WHERE album_id=?`, canonical.AlbumID); err != nil {
+		t.Fatal(err)
+	}
+	due, err := s.DueMusicBrainzAlbumsPage(ctx, time.Now(), -1, -1, "", 10)
+	if err != nil || len(due) != 2 {
+		t.Fatalf("due=%+v err=%v", due, err)
+	}
+	if due[0].AlbumID != canonical.AlbumID || due[0].DueRank >= due[1].DueRank {
+		t.Fatalf("canonical evidence was not prioritized: %+v", due)
 	}
 }
 

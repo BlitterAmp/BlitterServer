@@ -277,10 +277,8 @@ func (e *Enricher) lastfmAlbumImageOutcome(ctx context.Context, key, artist, alb
 		return "", outcome
 	}
 	image := largestImage(body.Album.Image)
-	if image == "" {
+	if image == "" || isLastfmPlaceholderImage(image) {
 		e.markMiss(ctx, "lastfm", u)
-	}
-	if image == "" {
 		return "", lookupMiss
 	}
 	return image, lookupSuccess
@@ -352,11 +350,15 @@ func (e *Enricher) lastfmArtistArtOutcome(ctx context.Context, name string) ([]b
 		return nil, "", outcome
 	}
 	image := largestImage(body.Artist.Image)
-	if image == "" {
+	if image == "" || isLastfmPlaceholderImage(image) {
 		e.markMiss(ctx, "lastfm", u)
 		return nil, "", lookupMiss
 	}
 	return e.fetchOutcome(ctx, "lastfm", image, "")
+}
+
+func isLastfmPlaceholderImage(image string) bool {
+	return strings.Contains(strings.ToLower(image), "2a96cbd8b46e442fc41c2b86b821562f")
 }
 
 func (e *Enricher) musicBrainzArtistID(ctx context.Context, name string) (string, lookupOutcome) {

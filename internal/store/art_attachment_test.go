@@ -161,3 +161,42 @@ func TestSetAlbumArtAtNextSequenceIsAtomicAndNoOpDoesNotAdvance(t *testing.T) {
 		t.Fatalf("no-op advanced version=%d want=%d", afterNoOp.Version, afterSuccess.Version)
 	}
 }
+
+func TestSetAlbumArtAtNextSequenceEmitsEffectiveTrackAndArtistChanges(t *testing.T) {
+	ctx := context.Background()
+	s := indexFixture(t)
+	albums, _, err := s.ListAlbums(ctx, "title", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var target AlbumRow
+	for _, album := range albums {
+		if album.Title == "First Album" {
+			target = album
+		}
+	}
+	before, _ := s.GetLibrarySummary(ctx)
+	if applied, err := s.SetAlbumArtAtNextSequence(ctx, target.AlbumID, "img-album"); err != nil || !applied {
+		t.Fatalf("applied=%v err=%v", applied, err)
+	}
+	changes, _, err := s.ChangesSince(ctx, before.Version, "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kinds := map[string]int{}
+	for _, change := range changes {
+		kinds[change.Kind]++
+	}
+	if kinds["album"] != 1 || kinds["track"] != 2 || kinds["artist"] != 1 {
+		t.Fatalf("dependent changes=%+v", changes)
+	}
+	tracks, err := s.ListAlbumTracks(ctx, target.AlbumID)
+	if err != nil || len(tracks) != 2 {
+		t.Fatalf("tracks=%+v err=%v", tracks, err)
+	}
+	for _, track := range tracks {
+		if track.ArtID != "img-album" {
+			t.Fatalf("track did not expose album fallback: %+v", track)
+		}
+	}
+}

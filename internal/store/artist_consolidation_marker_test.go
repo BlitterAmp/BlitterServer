@@ -21,7 +21,7 @@ func TestConsolidationNoOpMarkerSkipsPlanningUntilLibraryAdvances(t *testing.T) 
 	var canonicalID string
 	_ = s.db.QueryRowContext(ctx, `SELECT artist_id FROM artists WHERE musicbrainz_id='canonical-mbid'`).Scan(&canonicalID)
 	metadataSeq, _ := s.NextScanSeq(ctx)
-	if _, err := s.PersistMusicBrainzArtistMetadata(ctx, canonicalID, "canonical-mbid", "Canonical", []string{"Local Alias"}, metadataSeq); err != nil {
+	if _, err := s.PersistMusicBrainzArtistMetadata(ctx, canonicalID, "canonical-mbid", "Canonical", []string{"Local Alias"}, nil, metadataSeq); err != nil {
 		t.Fatal(err)
 	}
 	if changed, err := s.ConsolidateMusicBrainzArtistsAtNextSequence(ctx); err != nil || changed {

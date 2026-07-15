@@ -2424,6 +2424,7 @@ components:
         artId: { type: string, nullable: true, example: img_4c5d6e }
         genres:
           type: array
+          description: MusicBrainz genres for the canonical artist; empty when no MusicBrainz genre metadata is available. Never inferred from track tags.
           items: { type: string }
         albumCount: { type: integer, nullable: true }
         userRating10: { type: integer, nullable: true }

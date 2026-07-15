@@ -5,11 +5,16 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"path"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
 
 	"github.com/BlitterAmp/BlitterServer/internal/source"
+	"golang.org/x/text/unicode/norm"
 )
 
 type MusicBrainzAlbum struct {
@@ -20,7 +25,15 @@ type MusicBrainzAlbum struct {
 	ArtistCredits                             []ArtistCreditRow
 	Tracks                                    []TrackRow
 	DueAt                                     int64
+	PathTitle                                 string         `json:"-"`
+	PathDiscs                                 map[string]int `json:"-"`
+	DueRank                                   int            `json:"-"`
 }
+
+var (
+	discDirectoryPattern = regexp.MustCompile(`(?i)^(?:cd|disc|disk)\s*0*([1-9]\d*)$`)
+	directoryYearPattern = regexp.MustCompile(`\s*[\(\[]\d{4}[\)\]]\s*$`)
+)
 
 type MusicBrainzCandidate struct {
 	ReleaseID, ReleaseGroupID, Title, ArtistCredit string
@@ -29,14 +42,21 @@ type MusicBrainzCandidate struct {
 }
 
 func (s *Store) DueMusicBrainzAlbums(ctx context.Context, now time.Time, limit int) ([]MusicBrainzAlbum, error) {
-	return s.DueMusicBrainzAlbumsPage(ctx, now, -1, "", limit)
+	return s.DueMusicBrainzAlbumsPage(ctx, now, -1, -1, "", limit)
 }
 
-// DueMusicBrainzAlbumsPage returns one keyset page in retry-time and album-id order.
-func (s *Store) DueMusicBrainzAlbumsPage(ctx context.Context, now time.Time, afterDueAt int64, afterID string, limit int) ([]MusicBrainzAlbum, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT al.album_id,COALESCE(m.next_attempt_at,0) FROM albums al LEFT JOIN album_musicbrainz_matches m ON m.album_id=al.album_id
-		WHERE al.missing=0 AND COALESCE(m.state,'')!='matched' AND COALESCE(m.next_attempt_at,0)<=? AND (COALESCE(m.next_attempt_at,0)>? OR (COALESCE(m.next_attempt_at,0)=? AND al.album_id>?))
-		ORDER BY COALESCE(m.next_attempt_at,0),al.album_id LIMIT ?`, now.Unix(), afterDueAt, afterDueAt, afterID, limit)
+// DueMusicBrainzAlbumsPage prioritizes existing canonical evidence so it
+// becomes the reconciliation anchor instead of a random raw fragment id.
+func (s *Store) DueMusicBrainzAlbumsPage(ctx context.Context, now time.Time, afterDueAt int64, afterRank int, afterID string, limit int) ([]MusicBrainzAlbum, error) {
+	rank := `CASE WHEN al.musicbrainz_release_id IS NOT NULL THEN 0 WHEN al.musicbrainz_release_group_id IS NOT NULL THEN 1 WHEN ar.musicbrainz_id IS NOT NULL THEN 2 ELSE 3 END`
+	rows, err := s.db.QueryContext(ctx, `SELECT al.album_id,COALESCE(m.next_attempt_at,0),`+rank+` FROM albums al
+		JOIN artists ar ON ar.artist_id=al.artist_id LEFT JOIN album_musicbrainz_matches m ON m.album_id=al.album_id
+		WHERE al.missing=0 AND COALESCE(m.state,'')!='matched' AND COALESCE(m.next_attempt_at,0)<=? AND (
+			COALESCE(m.next_attempt_at,0)>? OR
+			(COALESCE(m.next_attempt_at,0)=? AND `+rank+`>?) OR
+			(COALESCE(m.next_attempt_at,0)=? AND `+rank+`=? AND al.album_id>?))
+		ORDER BY COALESCE(m.next_attempt_at,0),`+rank+`,al.album_id LIMIT ?`,
+		now.Unix(), afterDueAt, afterDueAt, afterRank, afterDueAt, afterRank, afterID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -44,11 +64,12 @@ func (s *Store) DueMusicBrainzAlbumsPage(ctx context.Context, now time.Time, aft
 	type dueAlbum struct {
 		id    string
 		dueAt int64
+		rank  int
 	}
 	var ids []dueAlbum
 	for rows.Next() {
 		var due dueAlbum
-		if err := rows.Scan(&due.id, &due.dueAt); err != nil {
+		if err := rows.Scan(&due.id, &due.dueAt, &due.rank); err != nil {
 			return nil, err
 		}
 		ids = append(ids, due)
@@ -73,7 +94,12 @@ func (s *Store) DueMusicBrainzAlbumsPage(ctx context.Context, now time.Time, aft
 		if err := s.db.QueryRowContext(ctx, `SELECT change_seq FROM albums WHERE album_id=?`, due.id).Scan(&version); err != nil {
 			return nil, err
 		}
-		out = append(out, MusicBrainzAlbum{AlbumID: a.AlbumID, Title: a.Title, ReleaseID: a.MusicBrainzReleaseID, ReleaseGroupID: a.MusicBrainzReleaseGroupID, Year: a.Year, TrackCount: a.TrackCount, Version: version, PrimaryArtist: a.PrimaryArtist, ArtistCredits: a.ArtistCredits, Tracks: tracks, DueAt: due.dueAt})
+		album := MusicBrainzAlbum{AlbumID: a.AlbumID, Title: a.Title, ReleaseID: a.MusicBrainzReleaseID, ReleaseGroupID: a.MusicBrainzReleaseGroupID, Year: a.Year, TrackCount: a.TrackCount, Version: version, PrimaryArtist: a.PrimaryArtist, ArtistCredits: a.ArtistCredits, Tracks: tracks, DueAt: due.dueAt, DueRank: due.rank}
+		album.PathTitle, album.PathDiscs, err = musicBrainzPathEvidence(ctx, s.db, due.id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, album)
 	}
 	return out, nil
 }
@@ -117,9 +143,11 @@ type CanonicalTrack struct {
 
 type CanonicalRelease struct {
 	ReleaseID, ReleaseGroupID string
+	Title                     string
 	AlbumCredits              []source.ArtistCredit
 	Tracks                    []CanonicalTrack
 	Authoritative             bool
+	ReconcileOnly             bool
 }
 
 func (s *Store) ApplyMusicBrainzRelease(ctx context.Context, album MusicBrainzAlbum, release CanonicalRelease, seq int64) (bool, error) {
@@ -148,14 +176,16 @@ func (s *Store) ApplyMusicBrainzConsensus(ctx context.Context, album MusicBrainz
 	s.libraryIdentity.Lock()
 	defer s.libraryIdentity.Unlock()
 	release.ReleaseID = ""
-	release.Tracks = nil
+	if !release.ReconcileOnly {
+		release.Tracks = nil
+	}
 	return s.applyMusicBrainzRelease(ctx, album, release, seq, &musicBrainzResult{state: "ambiguous", selected: selected, candidates: candidates, next: next})
 }
 
 func (s *Store) applyMusicBrainzRelease(ctx context.Context, album MusicBrainzAlbum, release CanonicalRelease, seq int64, result *musicBrainzResult) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("update canonical album identity: %w", err)
 	}
 	defer tx.Rollback()
 	current, err := musicBrainzSnapshotTx(ctx, tx, album.AlbumID)
@@ -165,11 +195,36 @@ func (s *Store) applyMusicBrainzRelease(ctx context.Context, album MusicBrainzAl
 	if !sameMusicBrainzSnapshot(album, current) {
 		return false, nil
 	}
+	var splitPlan *splitAlbumPlan
+	if result != nil && len(release.Tracks) > 0 && (result.state == "matched" && release.ReleaseID != "" || result.state == "ambiguous" && release.ReconcileOnly && release.ReleaseGroupID != "") {
+		var safe bool
+		splitPlan, safe, err = planSplitAlbumReconciliation(ctx, tx, current, release, result.selected)
+		if err != nil {
+			return false, fmt.Errorf("update canonical album title: %w", err)
+		}
+		if !safe {
+			return false, nil
+		}
+	}
+	if splitPlan != nil {
+		album.Tracks = splitPlan.tracks
+		for i := range release.Tracks {
+			// Split source rows encode their displayed collaborator credit. Keep
+			// that display while applying canonical recording identity.
+			release.Tracks[i].Credits = nil
+		}
+	}
 	beforeCounts, err := albumArtistCountsTx(ctx, tx, album.AlbumID)
 	if err != nil {
 		return false, err
 	}
 	changed := false
+	if splitPlan != nil {
+		if err := applySplitAlbumPlanTx(ctx, tx, album.AlbumID, splitPlan, seq); err != nil {
+			return false, err
+		}
+		changed = true
+	}
 	// Empty incoming ids store as NULL (the release-id column is UNIQUE, so
 	// empty strings would collide across albums) and never erase previously
 	// applied identity.
@@ -189,10 +244,23 @@ func (s *Store) applyMusicBrainzRelease(ctx context.Context, album MusicBrainzAl
 			return false, err
 		}
 	}
+	// Set the canonical title only after the release id is present. Untagged
+	// albums have a partial unique (artist,title) index; this ordering removes
+	// the matched survivor from that index before it can collide with a raw
+	// fragment carrying the canonical title.
+	if release.ReleaseID != "" && release.Title != "" {
+		res, err := tx.ExecContext(ctx, `UPDATE albums SET title=?,change_seq=? WHERE album_id=? AND title IS NOT ?`, release.Title, seq, album.AlbumID, release.Title)
+		if err != nil {
+			return false, err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			changed = true
+		}
+	}
 	if len(release.AlbumCredits) > 0 {
 		c, err := replaceCreditsTx(ctx, tx, "album_artist_credits", "album_id", album.AlbumID, album.PrimaryArtist.ArtistID, release.AlbumCredits, seq)
 		if err != nil {
-			return false, err
+			return false, fmt.Errorf("replace canonical album credits: %w", err)
 		}
 		changed = changed || c
 		var primaryID string
@@ -203,28 +271,43 @@ func (s *Store) applyMusicBrainzRelease(ctx context.Context, album MusicBrainzAl
 			changed = true
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE albums SET artist_id=?,change_seq=CASE WHEN artist_id IS NOT ? THEN ? ELSE change_seq END WHERE album_id=?`, primaryID, primaryID, seq, album.AlbumID); err != nil {
-			return false, err
+			return false, fmt.Errorf("update canonical album owner: %w", err)
 		}
 	}
 	for _, local := range album.Tracks {
+		if release.ReconcileOnly {
+			continue
+		}
 		var match *CanonicalTrack
 		matches := 0
-		for i := range release.Tracks {
-			r := &release.Tracks[i]
-			position := discNumber(r.Disc) == discNumber(local.Disc) && r.Index == local.Index
-			if position && (release.Authoritative || normalized(r.Title) == normalized(local.Title) && durationClose(r.DurationMs, local.DurationMs)) {
-				match = r
-				matches++
+		if splitPlan != nil {
+			if canonical, ok := splitPlan.canonical[local.TrackID]; ok {
+				match = &canonical
+				matches = 1
+			}
+		} else {
+			for i := range release.Tracks {
+				r := &release.Tracks[i]
+				position := discNumber(r.Disc) == discNumber(local.Disc) && r.Index == local.Index
+				if position && (release.Authoritative || normalized(r.Title) == normalized(local.Title) && durationClose(r.DurationMs, local.DurationMs)) {
+					match = r
+					matches++
+				}
 			}
 		}
 		if match == nil || matches != 1 {
 			continue
 		}
-		if local.MusicBrainzRecordingID != match.RecordingID {
-			changed = true
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE tracks SET musicbrainz_recording_id=?,change_seq=CASE WHEN musicbrainz_recording_id IS NOT ? THEN ? ELSE change_seq END WHERE track_id=?`, match.RecordingID, match.RecordingID, seq, local.TrackID); err != nil {
+		res, err := tx.ExecContext(ctx, `UPDATE tracks SET musicbrainz_recording_id=?,
+			idx=CASE WHEN ?>0 THEN ? ELSE idx END,disc=CASE WHEN ?>0 THEN ? ELSE disc END,change_seq=?
+			WHERE track_id=? AND (musicbrainz_recording_id IS NOT ? OR (?>0 AND idx IS NOT ?) OR (?>0 AND disc IS NOT ?))`,
+			match.RecordingID, match.Index, match.Index, match.Disc, match.Disc, seq, local.TrackID,
+			match.RecordingID, match.Index, match.Index, match.Disc, match.Disc)
+		if err != nil {
 			return false, err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			changed = true
 		}
 		if len(match.Credits) > 0 {
 			c, err := replaceCreditsTx(ctx, tx, "track_artist_credits", "track_id", local.TrackID, local.ArtistID, match.Credits, seq)
@@ -273,7 +356,24 @@ func (s *Store) applyMusicBrainzRelease(ctx context.Context, album MusicBrainzAl
 		}
 	}
 	if result != nil {
+		if !changed {
+			var alreadyMatched bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM album_musicbrainz_matches
+				WHERE album_id=? AND state=? AND COALESCE(release_id,'')=? AND COALESCE(release_group_id,'')=?)`,
+				album.AlbumID, result.state, result.selected.ReleaseID, result.selected.ReleaseGroupID).Scan(&alreadyMatched); err != nil {
+				return false, err
+			}
+			if alreadyMatched {
+				return false, nil
+			}
+		}
 		if err := recordMusicBrainzResultTx(ctx, tx, album.AlbumID, result.state, result.selected, result.candidates, result.next, ""); err != nil {
+			return false, err
+		}
+	}
+	if changed {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO settings(key,value) VALUES('library_updated_at',?)
+			ON CONFLICT(key) DO UPDATE SET value=excluded.value`, time.Now().Unix()); err != nil {
 			return false, err
 		}
 	}
@@ -331,7 +431,6 @@ func musicBrainzSnapshotTx(ctx context.Context, tx *sql.Tx, albumID string) (Mus
 	if err != nil {
 		return album, err
 	}
-	defer rows.Close()
 	for rows.Next() {
 		var track TrackRow
 		if err := rows.Scan(&track.TrackID, &track.Index, &track.Disc, &track.Title, &track.DurationMs); err != nil {
@@ -339,8 +438,101 @@ func musicBrainzSnapshotTx(ctx context.Context, tx *sql.Tx, albumID string) (Mus
 		}
 		album.Tracks = append(album.Tracks, track)
 	}
+	if err := rows.Close(); err != nil {
+		return album, err
+	}
 	album.TrackCount = len(album.Tracks)
-	return album, rows.Err()
+	if err := rows.Err(); err != nil {
+		return album, err
+	}
+	album.PathTitle, album.PathDiscs, err = musicBrainzPathEvidence(ctx, tx, albumID)
+	return album, err
+}
+
+type contextQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+// musicBrainzPathEvidence extracts only conservative resolver hints from the
+// root-relative filesystem path. All active tracks must agree on one album
+// directory; disc directories contribute a number only when explicitly named.
+func musicBrainzPathEvidence(ctx context.Context, q contextQueryer, albumID string) (string, map[string]int, error) {
+	rows, err := q.QueryContext(ctx, `SELECT track_id,source_kind,native_id FROM tracks WHERE album_id=? AND missing=0 ORDER BY track_id`, albumID)
+	if err != nil {
+		return "", nil, err
+	}
+	defer rows.Close()
+	var title string
+	discs := map[string]int{}
+	count := 0
+	for rows.Next() {
+		var trackID, sourceKind, nativeID string
+		if err := rows.Scan(&trackID, &sourceKind, &nativeID); err != nil {
+			return "", nil, err
+		}
+		candidate, disc, ok := pathAlbumCandidate(sourceKind, nativeID)
+		if !ok || title != "" && normalized(candidate) != normalized(title) {
+			return "", nil, nil
+		}
+		if title == "" {
+			title = candidate
+		}
+		if disc > 0 {
+			discs[trackID] = disc
+		}
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		return "", nil, err
+	}
+	if count == 0 {
+		return "", nil, nil
+	}
+	return title, discs, nil
+}
+
+func pathAlbumCandidate(sourceKind, nativeID string) (string, int, bool) {
+	if sourceKind != "filesystem" || nativeID == "" || path.IsAbs(nativeID) {
+		return "", 0, false
+	}
+	clean := path.Clean(nativeID)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", 0, false
+	}
+	parts := strings.Split(clean, "/")
+	if len(parts) < 3 {
+		return "", 0, false
+	}
+	parts = parts[:len(parts)-1]
+	disc := 0
+	if match := discDirectoryPattern.FindStringSubmatch(strings.TrimSpace(parts[len(parts)-1])); match != nil {
+		if len(parts) < 3 {
+			return "", 0, false
+		}
+		disc, _ = strconv.Atoi(match[1])
+		parts = parts[:len(parts)-1]
+	}
+	if len(parts) < 2 {
+		return "", 0, false
+	}
+	title := strings.TrimSpace(directoryYearPattern.ReplaceAllString(parts[len(parts)-1], ""))
+	if title == "" {
+		return "", 0, false
+	}
+	return title, disc, true
+}
+
+func albumWithPathDiscs(album MusicBrainzAlbum) MusicBrainzAlbum {
+	if len(album.PathDiscs) == 0 {
+		return album
+	}
+	album.Tracks = append([]TrackRow(nil), album.Tracks...)
+	for i := range album.Tracks {
+		if album.Tracks[i].Disc <= 0 && album.PathDiscs[album.Tracks[i].TrackID] > 0 {
+			album.Tracks[i].Disc = album.PathDiscs[album.Tracks[i].TrackID]
+		}
+	}
+	return album
 }
 
 func sameMusicBrainzSnapshot(expected, current MusicBrainzAlbum) bool {
@@ -433,7 +625,11 @@ func replaceCreditsTx(ctx context.Context, tx *sql.Tx, table, ownerColumn, owner
 }
 
 func normalized(v string) string {
+	v = norm.NFD.String(v)
 	v = strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Mn, r) {
+			return -1
+		}
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
 			return unicode.ToLower(r)
 		}

@@ -61,6 +61,62 @@ func TestSearchRejectsLoneWeakCandidateAndIndistinguishableReissue(t *testing.T)
 	}
 }
 
+func TestStrongStructuralMatchOverridesBadEmbeddedYear(t *testing.T) {
+	local := store.MusicBrainzAlbum{Title: "Same", Year: 2023, TrackCount: 2, PrimaryArtist: store.ArtistCreditRow{Name: "Artist"}, Tracks: []store.TrackRow{{Disc: 1, Index: 1, Title: "One (Original Mix)", DurationMs: 1000}, {Disc: 1, Index: 2, Title: "Two (Original Mix)", DurationMs: 2000}}}
+	var candidate release
+	candidate.Title, candidate.Date, candidate.Credits = "Same", "2008", []artistCredit{{Name: "Artist"}}
+	candidate.Media = []medium{{Position: 1, Tracks: []track{{Position: 1, Recording: recording{Title: "One", Length: 1000}}, {Position: 2, Recording: recording{Title: "Two", Length: 2000}}}}}
+	score, evidence := scoreRelease(local, candidate)
+	if !strongSearchMatch(local, scoredRelease{release: candidate, score: score, evidence: evidence}) {
+		t.Fatalf("complete structural match rejected because of embedded year: score=%v evidence=%v", score, evidence)
+	}
+}
+
+func TestStrongCandidateCanonicalizesUnsearchableAlbumArtist(t *testing.T) {
+	local := store.MusicBrainzAlbum{Title: "Album CD", Year: 2009, TrackCount: 2, PrimaryArtist: store.ArtistCreditRow{Name: "Combined Display String"}, Tracks: []store.TrackRow{{Disc: 1, Index: 1, Title: "One", DurationMs: 1000}, {Disc: 1, Index: 2, Title: "Two", DurationMs: 2000}}}
+	var candidate release
+	candidate.Title, candidate.Date, candidate.Credits = "Album", "2009", []artistCredit{{Name: "Canonical Owner"}}
+	candidate.Media = []medium{{Position: 1, Tracks: []track{{Position: 1, Recording: recording{Title: "One", Length: 1000}}, {Position: 2, Recording: recording{Title: "Two", Length: 2000}}}}}
+	score, evidence := scoreRelease(local, candidate)
+	scored := scoredRelease{release: candidate, score: score, evidence: evidence}
+	if strongSearchMatch(local, scored) || !strongCandidate(local, scored) {
+		t.Fatalf("track structure did not safely override unusable album artist: score=%v evidence=%v", score, evidence)
+	}
+}
+
+func TestStrongCandidateAcceptsCompleteDurationStructureWithBadTrackTitles(t *testing.T) {
+	local := store.MusicBrainzAlbum{Title: "Album", Year: 2020, TrackCount: 3, PrimaryArtist: store.ArtistCreditRow{Name: "Unsearchable Display"}, Tracks: []store.TrackRow{{Disc: 1, Index: 1, Title: "Local A", DurationMs: 100000}, {Disc: 1, Index: 2, Title: "Local B", DurationMs: 110000}, {Disc: 1, Index: 3, Title: "Local C", DurationMs: 120000}}}
+	var candidate release
+	candidate.Title, candidate.Date, candidate.Credits = "Album", "2020", []artistCredit{{Name: "Canonical Owner"}}
+	candidate.Media = []medium{{Position: 1, Tracks: []track{{Position: 1, Recording: recording{Title: "Canonical One", Length: 100000}}, {Position: 2, Recording: recording{Title: "Canonical Two", Length: 110000}}, {Position: 3, Recording: recording{Title: "Canonical Three", Length: 120000}}}}}
+	score, evidence := scoreRelease(local, candidate)
+	if !completeDurationStructure(local, scoredRelease{release: candidate, score: score, evidence: evidence}) {
+		t.Fatalf("complete position/duration evidence rejected: score=%v evidence=%v", score, evidence)
+	}
+}
+
+func TestEditionTiebreakIgnoresNonfittingOtherReleaseGroup(t *testing.T) {
+	local := store.MusicBrainzAlbum{Title: "Same", Year: 2000, TrackCount: 2, PrimaryArtist: store.ArtistCreditRow{Name: "Artist"}, Tracks: []store.TrackRow{{Disc: 1, Index: 1, Title: "One", DurationMs: 1000}, {Disc: 1, Index: 2, Title: "Two", DurationMs: 2000}}}
+	makeRelease := func(id, group, first, second, recordingPrefix string) scoredRelease {
+		var candidate release
+		candidate.ID, candidate.Title, candidate.Date, candidate.Credits = id, "Same", "2000", []artistCredit{{Name: "Artist"}}
+		candidate.ReleaseGroup.ID = group
+		candidate.Media = []medium{{Position: 1, Tracks: []track{{Position: 1, Recording: recording{ID: recordingPrefix + "-1", Title: first, Length: 1000}}, {Position: 2, Recording: recording{ID: recordingPrefix + "-2", Title: second, Length: 2000}}}}}
+		score, evidence := scoreRelease(local, candidate)
+		return scoredRelease{release: candidate, score: score, evidence: evidence}
+	}
+	fitA := makeRelease("fit-a", "right-group", "One", "Two", "same")
+	fitB := makeRelease("fit-b", "right-group", "One", "Two", "same")
+	nonfit := makeRelease("nonfit", "other-group", "Wrong", "Songs", "other")
+	nonfit.release.Media[0].Tracks[0].Recording.Length = 10000
+	nonfit.release.Media[0].Tracks[1].Recording.Length = 20000
+	nonfit.score, nonfit.evidence = scoreRelease(local, nonfit.release)
+	selected, ok := editionTiebreak(local, []scoredRelease{fitA, fitB, nonfit})
+	if !ok || selected.release.ReleaseGroup.ID != "right-group" {
+		t.Fatalf("fitting editions blocked by unrelated nonfit: selected=%+v ok=%v", selected, ok)
+	}
+}
+
 func TestEmbeddedReleaseIDUsesDirectLookup(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, t.TempDir())
@@ -422,6 +478,114 @@ func TestSearchTitleNormalization(t *testing.T) {
 		if got := searchTitle(input); got != want {
 			t.Errorf("searchTitle(%q) = %q, want %q", input, got, want)
 		}
+	}
+}
+
+func TestNormalizeIgnoresUnnecessaryASCIIFolding(t *testing.T) {
+	if normalize("Beyoncé’s Café") != normalize("Beyonce's Cafe") {
+		t.Fatalf("normalized forms differ: %q %q", normalize("Beyoncé’s Café"), normalize("Beyonce's Cafe"))
+	}
+}
+
+func TestResolverFallsBackToAlbumDirectoryAndDiscFolders(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	seq, _ := st.NextScanSeq(ctx)
+	var raw []source.TrackMeta
+	for disc, albumTitle := range []string{"Bad Label CD1", "Bad Label CD2"} {
+		for index, title := range []string{"Opening", "Closing"} {
+			meta := source.TrackMeta{
+				NativeID: fmt.Sprintf("The Band/Canonical Album (2010)/CD %02d/%02d.flac", disc+1, index+1),
+				Title:    title, Album: albumTitle, Year: 2010, Index: index + 1, DurationMs: 200000,
+				PrimaryArtist: source.ArtistReference{Name: "The Band"}, AlbumCredits: []source.ArtistCredit{{Name: "The Band"}}, TrackCredits: []source.ArtistCredit{{Name: "The Band"}}, Container: "flac", Codec: "flac", Version: 1,
+			}
+			raw = append(raw, meta)
+			if err := st.UpsertTrack(ctx, "filesystem", meta, "", seq); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := st.FinishScan(ctx, "filesystem", seq); err != nil {
+		t.Fatal(err)
+	}
+	if albums, _, err := st.ListAlbums(ctx, "title", "", 10); err != nil || len(albums) != 2 {
+		t.Fatalf("fresh malformed tags must produce two albums: albums=%+v err=%v", albums, err)
+	}
+	due, err := st.DueMusicBrainzAlbums(ctx, time.Now(), 10)
+	if err != nil || len(due) != 2 {
+		t.Fatalf("due=%+v err=%v", due, err)
+	}
+	identified := due[0]
+	if identified.Title != "Bad Label CD1" {
+		identified = due[1]
+	}
+	identitySeq, _ := st.NextScanSeq(ctx)
+	if _, err := st.ApplyMusicBrainzRelease(ctx, identified, store.CanonicalRelease{ReleaseGroupID: "canonical-group"}, identitySeq); err != nil {
+		t.Fatal(err)
+	}
+	parked := store.MusicBrainzCandidate{ReleaseID: "parked-edition", ReleaseGroupID: "canonical-group", Title: "Canonical Album", Score: 75}
+	if err := st.RecordMusicBrainzResult(ctx, identified.AlbumID, "ambiguous", parked, []store.MusicBrainzCandidate{parked}, time.Now().Add(30*24*time.Hour), ""); err != nil {
+		t.Fatal(err)
+	}
+	releaseJSON := `{"id":"canonical-release","title":"Canonical Album","date":"2010","release-group":{"id":"canonical-group"},"artist-credit":[{"name":"The Band","artist":{"id":"canonical-artist","name":"The Band"}}],"media":[{"position":1,"tracks":[{"position":1,"recording":{"id":"d1-r1","title":"Opening","length":200000}},{"position":2,"recording":{"id":"d1-r2","title":"Closing","length":200000}}]},{"position":2,"tracks":[{"position":1,"recording":{"id":"d2-r1","title":"Opening","length":200000}},{"position":2,"recording":{"id":"d2-r2","title":"Closing","length":200000}}]}]}`
+	var queries []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/release/canonical-release" {
+			_, _ = w.Write([]byte(releaseJSON))
+			return
+		}
+		query := req.URL.Query().Get("query")
+		queries = append(queries, query)
+		if strings.Contains(query, `release:"Canonical Album"`) {
+			_, _ = w.Write([]byte(`{"releases":[` + releaseJSON + `]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"releases":[]}`))
+	}))
+	defer srv.Close()
+	client, _ := musicbrainz.NewClient(musicbrainz.Options{BaseURL: srv.URL, UserAgent: "BlitterServer/test (mailto:test@example.com)", Cache: musicbrainz.NewFilesystemCache(providercache.New(t.TempDir())), Interval: time.Nanosecond})
+	changed, err := New(st, client).Run(ctx)
+	if err != nil || !changed {
+		t.Fatalf("changed=%v err=%v queries=%v", changed, err, queries)
+	}
+	assertCanonical := func() string {
+		t.Helper()
+		albums, _, err := st.ListAlbums(ctx, "title", "", 10)
+		if err != nil || len(albums) != 1 || albums[0].Title != "Canonical Album" || albums[0].MusicBrainzReleaseID != "canonical-release" {
+			t.Fatalf("albums=%+v err=%v queries=%v", albums, err, queries)
+		}
+		tracks, err := st.ListAlbumTracks(ctx, albums[0].AlbumID)
+		if err != nil || len(tracks) != 4 {
+			t.Fatalf("tracks=%+v err=%v", tracks, err)
+		}
+		for i, track := range tracks {
+			wantDisc, wantIndex := i/2+1, i%2+1
+			if track.Disc != wantDisc || track.Index != wantIndex {
+				t.Fatalf("track %d position=(%d,%d), want=(%d,%d): %+v", i, track.Disc, track.Index, wantDisc, wantIndex, tracks)
+			}
+		}
+		return albums[0].AlbumID
+	}
+	survivorID := assertCanonical()
+	if len(queries) < 3 || !strings.Contains(queries[0], `release:"Bad Label"`) || !strings.Contains(queries[2], `release:"Canonical Album"`) {
+		t.Fatalf("ordinary title was not exhausted before path fallback: %v", queries)
+	}
+	seq, _ = st.NextScanSeq(ctx)
+	for _, meta := range raw {
+		meta.Version++
+		if err := st.UpsertTrack(ctx, "filesystem", meta, "", seq); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.FinishScan(ctx, "filesystem", seq); err != nil {
+		t.Fatal(err)
+	}
+	if got := assertCanonical(); got != survivorID {
+		t.Fatalf("rescan changed survivor album: got=%q want=%q", got, survivorID)
 	}
 }
 

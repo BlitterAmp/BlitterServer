@@ -660,8 +660,8 @@ func TestBrowseQueries(t *testing.T) {
 	if err != nil || !found || got.Name != "The Alphas" || got.TrackCount != 3 {
 		t.Fatalf("get artist: %v %v %+v", err, found, got)
 	}
-	if len(got.Genres) == 0 {
-		t.Fatalf("artist genres must aggregate from tracks: %+v", got)
+	if len(got.Genres) != 0 {
+		t.Fatalf("artist genres must not aggregate from track tags: %+v", got)
 	}
 	if _, found, _ := s.GetArtist(ctx, "art_nope"); found {
 		t.Fatal("unknown artist")
@@ -692,6 +692,61 @@ func TestBrowseQueries(t *testing.T) {
 	gt, err := s.ListGenreTracks(ctx, "rock")
 	if err != nil || len(gt) != 2 {
 		t.Fatalf("genre tracks (case-insensitive): %v %d", err, len(gt))
+	}
+}
+
+func TestArtistGenresComeOnlyFromPersistedMusicBrainzMetadata(t *testing.T) {
+	s := indexFixture(t)
+	ctx := context.Background()
+	artists, _, err := s.ListArtists(ctx, "title", "", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var artist ArtistRow
+	for _, candidate := range artists {
+		if candidate.Name == "The Alphas" {
+			artist = candidate
+		}
+	}
+	if artist.ArtistID == "" {
+		t.Fatal("fixture artist not found")
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE artists SET musicbrainz_id='alpha-mbid' WHERE artist_id=?`, artist.ArtistID); err != nil {
+		t.Fatal(err)
+	}
+	seq, _ := s.NextScanSeq(ctx)
+	changed, err := s.PersistMusicBrainzArtistMetadata(ctx, artist.ArtistID, "alpha-mbid", artist.Name, nil, []string{"alternative rock", "rock", "Rock", " "}, seq)
+	if err != nil || !changed {
+		t.Fatalf("persist genres changed=%v err=%v", changed, err)
+	}
+
+	listed, _, _ := s.ListArtists(ctx, "title", "", 100)
+	for _, candidate := range listed {
+		if candidate.ArtistID == artist.ArtistID && !equalStrings(candidate.Genres, []string{"alternative rock", "rock"}) {
+			t.Fatalf("list genres=%v", candidate.Genres)
+		}
+	}
+	detail, found, err := s.GetArtist(ctx, artist.ArtistID)
+	if err != nil || !found || !equalStrings(detail.Genres, []string{"alternative rock", "rock"}) {
+		t.Fatalf("detail=%+v found=%v err=%v", detail, found, err)
+	}
+	search, err := s.SearchLibrary(ctx, "Alphas")
+	if err != nil || len(search.Artists) != 1 || !equalStrings(search.Artists[0].Genres, []string{"alternative rock", "rock"}) {
+		t.Fatalf("search=%+v err=%v", search.Artists, err)
+	}
+
+	seq, _ = s.NextScanSeq(ctx)
+	changed, err = s.PersistMusicBrainzArtistMetadata(ctx, artist.ArtistID, "alpha-mbid", artist.Name, nil, nil, seq)
+	if err != nil || !changed {
+		t.Fatalf("clear genres changed=%v err=%v", changed, err)
+	}
+	detail, _, _ = s.GetArtist(ctx, artist.ArtistID)
+	if detail.Genres == nil || len(detail.Genres) != 0 {
+		t.Fatalf("authoritative empty genres=%#v", detail.Genres)
+	}
+	pending, _, err := s.PendingMusicBrainzArtists(ctx, "", 100)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("authoritative empty remained pending: %+v err=%v", pending, err)
 	}
 }
 

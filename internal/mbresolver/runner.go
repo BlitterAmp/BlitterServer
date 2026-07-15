@@ -2,6 +2,7 @@ package mbresolver
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/BlitterAmp/BlitterServer/internal/musicbrainz"
@@ -9,14 +10,13 @@ import (
 )
 
 type Resolver struct {
-	st        *store.Store
-	client    *musicbrainz.Client
-	now       func() time.Time
-	batchSize int
+	st     *store.Store
+	client *musicbrainz.Client
+	now    func() time.Time
 }
 
 func New(st *store.Store, client *musicbrainz.Client) *Resolver {
-	return &Resolver{st: st, client: client, now: time.Now, batchSize: 5}
+	return &Resolver{st: st, client: client, now: time.Now}
 }
 
 type ResolutionProgress struct {
@@ -34,18 +34,22 @@ func (r *Resolver) RunWithProgress(ctx context.Context, progress func(Resolution
 	changed := false
 	stats := ResolutionProgress{}
 	var batchErr error
-	var afterDueAt int64 = -1
-	var afterID string
 	for {
-		albums, err := r.st.DueMusicBrainzAlbumsPage(ctx, r.now(), afterDueAt, afterID, r.batchSize)
+		due, err := r.st.CountDueMusicBrainzAlbums(ctx, r.now())
 		if err != nil {
 			return changed, err
 		}
-		if len(albums) == 0 {
+		if due == 0 {
 			return changed, batchErr
 		}
+		albums, err := r.st.DueMusicBrainzAlbums(ctx, r.now(), int(due))
+		if err != nil {
+			return changed, err
+		}
+		// Identity rank changes as this pass applies matches. Snapshot the ordered
+		// due set first so those mutations cannot make keyset pagination skip rows.
+		passApplied := 0
 		for _, album := range albums {
-			afterDueAt, afterID = album.DueAt, album.AlbumID
 			if err := ctx.Err(); err != nil {
 				return changed, err
 			}
@@ -59,16 +63,27 @@ func (r *Resolver) RunWithProgress(ctx context.Context, progress func(Resolution
 				if progress != nil {
 					progress(stats)
 				}
-				batchErr = err
+				batchErr = fmt.Errorf("resolve album %s: %w", album.AlbumID, err)
 				continue
 			}
 			changed = changed || applied
 			if applied {
 				stats.Applied++
+				passApplied++
 			}
 			if progress != nil {
 				progress(stats)
 			}
+		}
+		remaining, err := r.st.CountDueMusicBrainzAlbums(ctx, r.now())
+		if err != nil {
+			return changed, err
+		}
+		if remaining == 0 {
+			return changed, batchErr
+		}
+		if remaining >= due && passApplied == 0 {
+			return changed, batchErr
 		}
 	}
 }

@@ -73,15 +73,6 @@ func (e *Enricher) RunAt(ctx context.Context, now time.Time) {
 		}
 	}()
 
-	// Artwork first — but only a bounded slice: covers appear quickly on a
-	// fresh library without starving identity matching, which restarts would
-	// otherwise re-park behind a full artwork drain forever.
-	artDeadline := time.Now().Add(e.ArtSliceBudget)
-	lastToken = e.runAlbumArtStage(ctx, now, artDeadline, log, &total, markDirty, publish)
-	captureFailure()
-	lastToken = e.runArtistArtStage(ctx, now, artDeadline, log, &total, markDirty, publish)
-	captureFailure()
-
 	if e.resolver != nil {
 		lastToken = e.activity.Start(activity.StageMusicBrainzResolution, activity.Counts{})
 		due, _ := e.st.CountDueMusicBrainzAlbums(ctx, now)
@@ -140,9 +131,9 @@ func (e *Enricher) RunAt(ctx context.Context, now time.Time) {
 	total.Failed += artistIdentity.Failed
 	publish(false)
 
-	// Identity landed above: newly matched albums and newly identified
-	// artists had their art schedules reset, so give them their first
-	// identity-aware fetch in the same pass — unbounded this time.
+	// Resolve and consolidate identity before artwork. Fresh scans contain raw
+	// tag-derived split albums and collaborator artists which must not consume
+	// provider work or receive art before their canonical rows are known.
 	lastToken = e.runAlbumArtStage(ctx, now, time.Time{}, log, &total, markDirty, publish)
 	captureFailure()
 	lastToken = e.runArtistArtStage(ctx, now, time.Time{}, log, &total, markDirty, publish)

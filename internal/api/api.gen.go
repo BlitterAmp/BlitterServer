@@ -1070,7 +1070,9 @@ type Artist struct {
 	Aliases    *[]string `json:"aliases,omitempty"`
 	ArtId      *string   `json:"artId,omitempty"`
 	ArtistId   string    `json:"artistId"`
-	Genres     *[]string `json:"genres,omitempty"`
+
+	// Genres MusicBrainz genres for the canonical artist; empty when no MusicBrainz genre metadata is available. Never inferred from track tags.
+	Genres *[]string `json:"genres,omitempty"`
 
 	// LoveState The calling profile's tri-state; absent = neutral
 	LoveState     *LoveState `json:"loveState,omitempty"`
@@ -1096,7 +1098,9 @@ type ArtistDetail struct {
 	ArtistId   string    `json:"artistId"`
 
 	// Bio HTML-stripped, from last.fm when available
-	Bio    *string   `json:"bio,omitempty"`
+	Bio *string `json:"bio,omitempty"`
+
+	// Genres MusicBrainz genres for the canonical artist; empty when no MusicBrainz genre metadata is available. Never inferred from track tags.
 	Genres *[]string `json:"genres,omitempty"`
 
 	// LoveState The calling profile's tri-state; absent = neutral

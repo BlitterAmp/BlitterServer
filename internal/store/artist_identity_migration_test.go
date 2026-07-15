@@ -93,3 +93,65 @@ func TestMigration0014ReemitsAlreadyMissingArtistRemovals(t *testing.T) {
 		t.Fatalf("migration re-up aliases fetched marker=%d err=%v", fetchedAt, err)
 	}
 }
+
+func TestMigration0021QueuesMusicBrainzGenresAndReemitsArtists(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "migration.db")+"?_pragma=foreign_keys(ON)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	goose.SetLogger(goose.NopLogger())
+	goose.SetBaseFS(migrations)
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := goose.UpToContext(ctx, db, "migrations", 20); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO settings(key,value) VALUES('library_scan_seq','7')`); err != nil {
+		t.Fatal(err)
+	}
+	rows := []struct {
+		id      string
+		mbid    any
+		aliases int
+	}{{"complete", "mbid-complete", 123}, {"terminal", "mbid-terminal", -1}, {"local", nil, 0}}
+	for _, row := range rows {
+		if _, err := db.ExecContext(ctx, `INSERT INTO artists(artist_id,name,musicbrainz_id,created_at,change_seq,musicbrainz_aliases_fetched_at) VALUES(?,?,?,?,2,?)`, row.id, row.id, row.mbid, time.Now().Unix(), row.aliases); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := goose.UpToContext(ctx, db, "migrations", 21); err != nil {
+		t.Fatal(err)
+	}
+	var seq int64
+	if err := db.QueryRowContext(ctx, `SELECT CAST(value AS INTEGER) FROM settings WHERE key='library_scan_seq'`).Scan(&seq); err != nil || seq != 8 {
+		t.Fatalf("migration seq=%d err=%v", seq, err)
+	}
+	for _, row := range rows {
+		var changeSeq, genreMarker int64
+		if err := db.QueryRowContext(ctx, `SELECT change_seq,musicbrainz_genres_fetched_at FROM artists WHERE artist_id=?`, row.id).Scan(&changeSeq, &genreMarker); err != nil {
+			t.Fatal(err)
+		}
+		wantMarker := int64(0)
+		if row.aliases == -1 {
+			wantMarker = -1
+		}
+		if changeSeq != seq || genreMarker != wantMarker {
+			t.Fatalf("artist %s change_seq=%d marker=%d", row.id, changeSeq, genreMarker)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO artist_genres(artist_id,position,name) VALUES('complete',0,'rock')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := goose.DownToContext(ctx, db, "migrations", 20); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `SELECT musicbrainz_genres_fetched_at FROM artists LIMIT 1`); err == nil || !strings.Contains(err.Error(), "no such column") {
+		t.Fatalf("migration down retained genre marker: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `SELECT * FROM artist_genres`); err == nil || !strings.Contains(err.Error(), "no such table") {
+		t.Fatalf("migration down retained genres table: %v", err)
+	}
+}

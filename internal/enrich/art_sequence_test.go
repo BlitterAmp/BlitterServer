@@ -38,7 +38,7 @@ func TestArtworkAttachmentsUseFreshSequencesAcrossIdentity(t *testing.T) {
 	}
 	beforeSummary, _ := st.GetLibrarySummary(ctx)
 	artists, _, _ := st.ListArtists(ctx, "title", "", 10)
-	if changed, err := st.PersistMusicBrainzArtistMetadataAtNextSequence(ctx, artists[0].ArtistID, "artist-mbid", "Canonical Name", nil); err != nil || !changed {
+	if changed, err := st.PersistMusicBrainzArtistMetadataAtNextSequence(ctx, artists[0].ArtistID, "artist-mbid", "Canonical Name", nil, nil); err != nil || !changed {
 		t.Fatalf("identity changed=%v err=%v", changed, err)
 	}
 	identitySummary, _ := st.GetLibrarySummary(ctx)

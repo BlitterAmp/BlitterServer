@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"sort"
 
 	"github.com/BlitterAmp/BlitterServer/internal/activity"
 	"github.com/BlitterAmp/BlitterServer/internal/logging"
@@ -82,8 +83,13 @@ func (e *Enricher) runArtistIdentityStage(ctx context.Context, markDirty func(),
 				Aliases []struct {
 					Name string `json:"name"`
 				} `json:"aliases"`
+				Genres []struct {
+					Name  string `json:"name"`
+					Count int    `json:"count"`
+				} `json:"genres"`
 			}
-			path := "/artist/" + url.PathEscape(artist.MusicBrainzID) + "?inc=aliases&fmt=json"
+			query := url.Values{"inc": {"aliases+genres"}, "fmt": {"json"}}
+			path := "/artist/" + url.PathEscape(artist.MusicBrainzID) + "?" + query.Encode()
 			if err := e.mbClient.GetJSON(ctx, path, &body); err != nil {
 				if ctx.Err() != nil {
 					return
@@ -118,7 +124,17 @@ func (e *Enricher) runArtistIdentityStage(ctx context.Context, markDirty func(),
 			for _, alias := range body.Aliases {
 				aliases = append(aliases, alias.Name)
 			}
-			changed, err := e.st.PersistMusicBrainzArtistMetadataAtNextSequence(ctx, artist.ArtistID, artist.MusicBrainzID, body.Name, aliases)
+			sort.Slice(body.Genres, func(i, j int) bool {
+				if body.Genres[i].Count != body.Genres[j].Count {
+					return body.Genres[i].Count > body.Genres[j].Count
+				}
+				return body.Genres[i].Name < body.Genres[j].Name
+			})
+			genres := make([]string, 0, len(body.Genres))
+			for _, genre := range body.Genres {
+				genres = append(genres, genre.Name)
+			}
+			changed, err := e.st.PersistMusicBrainzArtistMetadataAtNextSequence(ctx, artist.ArtistID, artist.MusicBrainzID, body.Name, aliases, genres)
 			if err != nil {
 				log.Warn("apply MusicBrainz artist metadata", "artist_id", artist.ArtistID, "err", err)
 				summary.Failed++
