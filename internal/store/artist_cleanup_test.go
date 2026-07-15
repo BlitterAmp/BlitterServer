@@ -113,6 +113,13 @@ func TestApplyMusicBrainzArtistMetadataMergesDuplicateAlbumOwners(t *testing.T) 
 		{name: "Fat Boy Slim", local: "Fat Boy Slim", canonical: "Fatboy Slim", mbid: "34c63966-445c-4613-afe1-4f0e1e53ae9a", aliases: []string{"Fat Boy Slim"}},
 		{name: "FM-84", local: "FM-84", canonical: "FM-84", mbid: "1bc76772-45fe-4f14-92b5-c4f9ff567fcf"},
 		{name: "Frank Zappa", local: "Frank Zappa", canonical: "Frank Zappa", mbid: "e20747e7-55a4-452e-8766-7b985585082d"},
+		{name: "Kimbra", local: "Kimbra", canonical: "Kimbra", mbid: "fad2875e-ba81-4637-b859-4684622dcb1c"},
+		{name: "Lane 8", local: "Lane 8", canonical: "Lane 8", mbid: "bd052b81-353a-4bce-8cd8-72ba9d4ce414"},
+		{name: "PJ Harvey", local: "PJ Harvey", canonical: "PJ Harvey", mbid: "e795e03d-b5d5-4a5f-834d-162cfb308a2c"},
+		{name: "Royksopp alias", local: "Royksopp", canonical: "Röyksopp", mbid: "1c70a3fc-fa3c-4be1-8b55-c3192db8a884", aliases: []string{"Royksopp"}},
+		{name: "Röyksopp", local: "Röyksopp", canonical: "Röyksopp", mbid: "1c70a3fc-fa3c-4be1-8b55-c3192db8a884", aliases: []string{"Royksopp"}},
+		{name: "The Avener", local: "The Avener", canonical: "The Avener", mbid: "529c40b4-c57f-49e2-ad5a-201eb2fb4a5b"},
+		{name: "Tycho", local: "Tycho", canonical: "Tycho", mbid: "cbef45a9-7acb-4325-94c9-70081ac8d1b8"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -151,7 +158,7 @@ func TestApplyMusicBrainzArtistMetadataMergesDuplicateAlbumOwners(t *testing.T) 
 			}
 
 			applySeq, _ := s.NextScanSeq(ctx)
-			changed, err := s.ApplyMusicBrainzArtistMetadata(ctx, canonicalID, tc.mbid, tc.canonical, tc.aliases, applySeq)
+			changed, err := s.ApplyMusicBrainzArtistMetadata(ctx, canonicalID, tc.mbid, tc.canonical, tc.aliases, nil, applySeq)
 			if err != nil || !changed {
 				t.Fatalf("changed=%v err=%v", changed, err)
 			}
@@ -222,7 +229,7 @@ func TestApplyMusicBrainzArtistMetadataRefusesAmbiguousEvidence(t *testing.T) {
 	_ = s.db.QueryRowContext(ctx, `SELECT artist_id FROM artists WHERE musicbrainz_id='canonical-one'`).Scan(&firstID)
 	_ = s.db.QueryRowContext(ctx, `SELECT artist_id FROM artists WHERE musicbrainz_id='canonical-two'`).Scan(&secondID)
 	applySeq, _ := s.NextScanSeq(ctx)
-	if _, err := s.ApplyMusicBrainzArtistMetadata(ctx, firstID, "canonical-one", "Canonical 1", []string{"Shared Evidence"}, applySeq); err != nil {
+	if _, err := s.ApplyMusicBrainzArtistMetadata(ctx, firstID, "canonical-one", "Canonical 1", []string{"Shared Evidence"}, nil, applySeq); err != nil {
 		t.Fatal(err)
 	}
 	local := source.TrackMeta{NativeID: "local.flac", Title: "Local Track", Album: "Local Album", PrimaryArtist: source.ArtistReference{Name: " shared evidence "}, AlbumCredits: []source.ArtistCredit{{Name: " shared evidence "}}, TrackCredits: []source.ArtistCredit{{Name: "Shared Evidence"}}, Container: "flac", Codec: "flac", Version: 1}
@@ -235,7 +242,7 @@ func TestApplyMusicBrainzArtistMetadataRefusesAmbiguousEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	applySeq, _ = s.NextScanSeq(ctx)
-	if _, err := s.ApplyMusicBrainzArtistMetadata(ctx, secondID, "canonical-two", "Canonical 2", []string{"Shared Evidence"}, applySeq); err != nil {
+	if _, err := s.ApplyMusicBrainzArtistMetadata(ctx, secondID, "canonical-two", "Canonical 2", []string{"Shared Evidence"}, nil, applySeq); err != nil {
 		t.Fatal(err)
 	}
 	var ownerID string
@@ -262,7 +269,7 @@ func TestApplyMusicBrainzArtistMetadataRollsBackUnsafeAlbumCollision(t *testing.
 	_ = s.db.QueryRowContext(ctx, `SELECT artist_id FROM artists WHERE musicbrainz_id='canonical-mbid'`).Scan(&canonicalID)
 	_ = s.db.QueryRowContext(ctx, `SELECT artist_id FROM artists WHERE musicbrainz_id IS NULL`).Scan(&localID)
 	applySeq, _ := s.NextScanSeq(ctx)
-	if changed, err := s.ApplyMusicBrainzArtistMetadata(ctx, canonicalID, "canonical-mbid", "Canonical", []string{"Local Alias"}, applySeq); err == nil || changed {
+	if changed, err := s.ApplyMusicBrainzArtistMetadata(ctx, canonicalID, "canonical-mbid", "Canonical", []string{"Local Alias"}, nil, applySeq); err == nil || changed {
 		t.Fatalf("unsafe merge changed=%v err=%v", changed, err)
 	}
 	var owners int
@@ -286,7 +293,7 @@ func TestPersistMusicBrainzArtistMetadataDoesNotConsolidate(t *testing.T) {
 	_ = s.db.QueryRowContext(ctx, `SELECT artist_id FROM artists WHERE musicbrainz_id='canonical-mbid'`).Scan(&canonicalID)
 	_ = s.db.QueryRowContext(ctx, `SELECT artist_id FROM artists WHERE musicbrainz_id IS NULL`).Scan(&localID)
 	metadataSeq, _ := s.NextScanSeq(ctx)
-	changed, err := s.PersistMusicBrainzArtistMetadata(ctx, canonicalID, "canonical-mbid", "Canonical", []string{"Local Alias"}, metadataSeq)
+	changed, err := s.PersistMusicBrainzArtistMetadata(ctx, canonicalID, "canonical-mbid", "Canonical", []string{"Local Alias"}, nil, metadataSeq)
 	if err != nil || !changed {
 		t.Fatalf("persist changed=%v err=%v", changed, err)
 	}
@@ -313,7 +320,7 @@ func TestPersistMusicBrainzArtistMetadataStampsRenameDependents(t *testing.T) {
 	var artistID string
 	_ = s.db.QueryRowContext(ctx, `SELECT artist_id FROM artists WHERE musicbrainz_id='canonical-mbid'`).Scan(&artistID)
 	renameSeq, _ := s.NextScanSeq(ctx)
-	changed, err := s.PersistMusicBrainzArtistMetadata(ctx, artistID, "canonical-mbid", "New Name", nil, renameSeq)
+	changed, err := s.PersistMusicBrainzArtistMetadata(ctx, artistID, "canonical-mbid", "New Name", nil, nil, renameSeq)
 	if err != nil || !changed {
 		t.Fatalf("rename changed=%v err=%v", changed, err)
 	}
@@ -361,7 +368,7 @@ func TestConsolidateMusicBrainzArtistsStampsCreditParents(t *testing.T) {
 	var canonicalID string
 	_ = s.db.QueryRowContext(ctx, `SELECT artist_id FROM artists WHERE musicbrainz_id='canonical-mbid'`).Scan(&canonicalID)
 	metadataSeq, _ := s.NextScanSeq(ctx)
-	if _, err := s.PersistMusicBrainzArtistMetadata(ctx, canonicalID, "canonical-mbid", "Canonical", []string{"Local Alias"}, metadataSeq); err != nil {
+	if _, err := s.PersistMusicBrainzArtistMetadata(ctx, canonicalID, "canonical-mbid", "Canonical", []string{"Local Alias"}, nil, metadataSeq); err != nil {
 		t.Fatal(err)
 	}
 	consolidationSeq, _ := s.NextScanSeq(ctx)
@@ -426,7 +433,7 @@ func TestConsolidateMusicBrainzArtistsSkipsCollidingGroupAndMergesSafeGroup(t *t
 		var artistID string
 		_ = s.db.QueryRowContext(ctx, `SELECT artist_id FROM artists WHERE musicbrainz_id=?`, identity.mbid).Scan(&artistID)
 		metadataSeq, _ := s.NextScanSeq(ctx)
-		if _, err := s.PersistMusicBrainzArtistMetadata(ctx, artistID, identity.mbid, identity.name, []string{identity.alias}, metadataSeq); err != nil {
+		if _, err := s.PersistMusicBrainzArtistMetadata(ctx, artistID, identity.mbid, identity.name, []string{identity.alias}, nil, metadataSeq); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -462,7 +469,7 @@ func TestConsolidateMusicBrainzArtistsPublishesOneCompleteSequence(t *testing.T)
 		var artistID string
 		_ = s.db.QueryRowContext(ctx, `SELECT artist_id FROM artists WHERE musicbrainz_id=?`, fmt.Sprintf("mbid-%d", i)).Scan(&artistID)
 		metadataSeq, _ := s.NextScanSeq(ctx)
-		if _, err := s.PersistMusicBrainzArtistMetadata(ctx, artistID, fmt.Sprintf("mbid-%d", i), fmt.Sprintf("Canonical %d", i), []string{fmt.Sprintf("Alias %d", i)}, metadataSeq); err != nil {
+		if _, err := s.PersistMusicBrainzArtistMetadata(ctx, artistID, fmt.Sprintf("mbid-%d", i), fmt.Sprintf("Canonical %d", i), []string{fmt.Sprintf("Alias %d", i)}, nil, metadataSeq); err != nil {
 			t.Fatal(err)
 		}
 	}

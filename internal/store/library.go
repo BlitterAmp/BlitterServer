@@ -218,7 +218,8 @@ func (s *Store) UpsertTrack(ctx context.Context, kind string, m source.TrackMeta
 		    album_id = excluded.album_id, artist_id = CASE WHEN ? THEN tracks.artist_id ELSE excluded.artist_id END,
 		    artist_name = CASE WHEN ? THEN tracks.artist_name ELSE excluded.artist_name END,
 		    musicbrainz_recording_id = CASE WHEN ? THEN tracks.musicbrainz_recording_id ELSE excluded.musicbrainz_recording_id END, title = excluded.title,
-		    idx = excluded.idx, disc = excluded.disc, genre = excluded.genre,
+		    idx = CASE WHEN ? THEN tracks.idx ELSE excluded.idx END,
+		    disc = CASE WHEN ? THEN tracks.disc ELSE excluded.disc END, genre = excluded.genre,
 		    duration_ms = excluded.duration_ms, container = excluded.container,
 		    codec = excluded.codec, bitrate_kbps = excluded.bitrate_kbps,
 		    size_bytes = excluded.size_bytes, version = excluded.version,
@@ -230,8 +231,8 @@ func (s *Store) UpsertTrack(ctx context.Context, kind string, m source.TrackMeta
 			OR (NOT ? AND tracks.artist_name IS NOT excluded.artist_name)
 			OR (NOT ? AND tracks.musicbrainz_recording_id IS NOT excluded.musicbrainz_recording_id)
 		        OR tracks.title IS NOT excluded.title
-		        OR tracks.idx IS NOT excluded.idx
-		        OR tracks.disc IS NOT excluded.disc
+		        OR (NOT ? AND tracks.idx IS NOT excluded.idx)
+		        OR (NOT ? AND tracks.disc IS NOT excluded.disc)
 		        OR tracks.genre IS NOT excluded.genre
 		        OR tracks.duration_ms IS NOT excluded.duration_ms
 		        OR tracks.container IS NOT excluded.container
@@ -243,7 +244,9 @@ func (s *Store) UpsertTrack(ctx context.Context, kind string, m source.TrackMeta
 		        THEN ? ELSE tracks.change_seq END`,
 		NewID("trk"), albumID, artistID, creditDisplay(m.TrackCredits), nullStr(m.RecordingMBID), m.Title, nullInt(m.Index), nullInt(m.Disc), m.Genre,
 		m.DurationMs, m.Container, m.Codec, nullInt(m.BitrateKbps), m.SizeBytes,
-		kind, m.NativeID, m.Version, nullStr(artID), seq, now, seq, preserveResolved, preserveResolved, preserveResolved, preserveResolved, preserveResolved, preserveResolved, seq)
+		kind, m.NativeID, m.Version, nullStr(artID), seq, now, seq,
+		preserveResolved, preserveResolved, preserveResolved, preserveResolved, preserveResolved,
+		preserveResolved, preserveResolved, preserveResolved, preserveResolved, preserveResolved, seq)
 	if err != nil {
 		return fmt.Errorf("upsert track: %w", err)
 	}
@@ -607,13 +610,16 @@ func (s *Store) CountArtistsNeedingArtAt(ctx context.Context, now time.Time) (in
 // SetAlbumArt/SetArtistArt attach fetched art using a caller-supplied change
 // sequence. Enrichment uses the atomic AtNextSequence variants instead.
 func (s *Store) SetAlbumArt(ctx context.Context, albumID, artID string, seq int64) (bool, error) {
-	result, err := s.db.ExecContext(ctx,
-		`UPDATE albums SET art_id = ?, art_tried = 1, art_tried_at = ?, change_seq = ? WHERE album_id = ? AND art_id IS NULL`, artID, time.Now().Unix(), seq, albumID)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
 	}
-	n, err := result.RowsAffected()
-	return n == 1, err
+	defer tx.Rollback()
+	changed, err := setAlbumArtTx(ctx, tx, albumID, artID, seq)
+	if err != nil || !changed {
+		return changed, err
+	}
+	return true, tx.Commit()
 }
 
 func (s *Store) SetArtistArt(ctx context.Context, artistID, expectedArtID, artID string, seq int64) (bool, error) {
@@ -890,14 +896,12 @@ func (s *Store) ListArtists(ctx context.Context, sort, cur string, limit int) ([
 }
 
 func (s *Store) artistGenres(ctx context.Context, artistID string) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT t.genre FROM tracks t JOIN track_artist_credits c ON c.track_id=t.track_id WHERE c.artist_id = ? AND t.missing = 0 AND t.genre != ''
-		GROUP BY genre ORDER BY count(*) DESC LIMIT 5`, artistID)
+	rows, err := s.db.QueryContext(ctx, `SELECT name FROM artist_genres WHERE artist_id=? ORDER BY position`, artistID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []string
+	out := []string{}
 	for rows.Next() {
 		var g string
 		if err := rows.Scan(&g); err != nil {
@@ -1187,6 +1191,9 @@ func (s *Store) hydrateAlbumCredits(ctx context.Context, album *AlbumRow) error 
 	}
 	album.ArtistCredits = credits
 	album.PrimaryArtist = ArtistCreditRow{ArtistID: album.ArtistID, Name: album.ArtistName}
+	if len(credits) > 0 && credits[0].ArtistID == album.ArtistID {
+		album.PrimaryArtist = credits[0]
+	}
 	return nil
 }
 
@@ -1285,6 +1292,13 @@ func (s *Store) SearchLibrary(ctx context.Context, q string) (LibrarySearch, err
 	}
 	if err := arows.Err(); err != nil {
 		return res, err
+	}
+	for i := range res.Artists {
+		genres, err := s.artistGenres(ctx, res.Artists[i].ArtistID)
+		if err != nil {
+			return res, err
+		}
+		res.Artists[i].Genres = genres
 	}
 
 	brows, err := s.db.QueryContext(ctx,

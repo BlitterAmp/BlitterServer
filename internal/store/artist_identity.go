@@ -9,7 +9,7 @@ import (
 )
 
 // PendingMusicBrainzArtist identifies an MBID-backed artist whose canonical
-// name and aliases have not yet been fetched.
+// metadata has not yet been fetched.
 type PendingMusicBrainzArtist struct {
 	ArtistID      string
 	Name          string
@@ -23,7 +23,8 @@ func (s *Store) PendingMusicBrainzArtists(ctx context.Context, cursor string, li
 		return nil, "", fmt.Errorf("list pending MusicBrainz artists: limit must be positive")
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT artist_id,name,musicbrainz_id FROM artists
-		WHERE artist_id>? AND musicbrainz_id IS NOT NULL AND musicbrainz_aliases_fetched_at=0
+		WHERE artist_id>? AND musicbrainz_id IS NOT NULL
+		  AND (musicbrainz_aliases_fetched_at=0 OR musicbrainz_genres_fetched_at=0)
 		ORDER BY artist_id LIMIT ?`, cursor, limit+1)
 	if err != nil {
 		return nil, "", fmt.Errorf("list pending MusicBrainz artists: %w", err)
@@ -48,7 +49,8 @@ func (s *Store) PendingMusicBrainzArtists(ctx context.Context, cursor string, li
 
 func (s *Store) CountPendingMusicBrainzArtists(ctx context.Context) (int, error) {
 	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM artists WHERE musicbrainz_id IS NOT NULL AND musicbrainz_aliases_fetched_at=0`).Scan(&count)
+	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM artists WHERE musicbrainz_id IS NOT NULL
+		AND (musicbrainz_aliases_fetched_at=0 OR musicbrainz_genres_fetched_at=0)`).Scan(&count)
 	return count, err
 }
 
@@ -57,8 +59,11 @@ func (s *Store) CountPendingMusicBrainzArtists(ctx context.Context) (int, error)
 func (s *Store) MarkMusicBrainzArtistMetadataTerminal(ctx context.Context, artistID, mbid string) error {
 	s.libraryIdentity.Lock()
 	defer s.libraryIdentity.Unlock()
-	result, err := s.db.ExecContext(ctx, `UPDATE artists SET musicbrainz_aliases_fetched_at=-1
-		WHERE artist_id=? AND musicbrainz_id=? AND musicbrainz_aliases_fetched_at=0`, artistID, mbid)
+	result, err := s.db.ExecContext(ctx, `UPDATE artists SET
+		musicbrainz_aliases_fetched_at=CASE WHEN musicbrainz_aliases_fetched_at=0 THEN -1 ELSE musicbrainz_aliases_fetched_at END,
+		musicbrainz_genres_fetched_at=CASE WHEN musicbrainz_genres_fetched_at=0 THEN -1 ELSE musicbrainz_genres_fetched_at END
+		WHERE artist_id=? AND musicbrainz_id=?
+		  AND (musicbrainz_aliases_fetched_at=0 OR musicbrainz_genres_fetched_at=0)`, artistID, mbid)
 	if err != nil {
 		return fmt.Errorf("mark MusicBrainz artist metadata terminal: %w", err)
 	}
@@ -75,7 +80,7 @@ func (s *Store) MarkMusicBrainzArtistMetadataTerminal(ctx context.Context, artis
 // PersistMusicBrainzArtistMetadata commits one successful provider response.
 // Consolidation is deliberately separate so uniqueness is evaluated only
 // after every canonical MBID has complete persisted evidence.
-func (s *Store) PersistMusicBrainzArtistMetadata(ctx context.Context, artistID, mbid, canonicalName string, aliases []string, seq int64) (bool, error) {
+func (s *Store) PersistMusicBrainzArtistMetadata(ctx context.Context, artistID, mbid, canonicalName string, aliases, genres []string, seq int64) (bool, error) {
 	s.libraryIdentity.Lock()
 	defer s.libraryIdentity.Unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -83,7 +88,7 @@ func (s *Store) PersistMusicBrainzArtistMetadata(ctx context.Context, artistID, 
 		return false, fmt.Errorf("persist MusicBrainz artist metadata: begin transaction: %w", err)
 	}
 	defer tx.Rollback()
-	changed, err := persistMusicBrainzArtistMetadataTx(ctx, tx, artistID, mbid, canonicalName, aliases, seq)
+	changed, err := persistMusicBrainzArtistMetadataTx(ctx, tx, artistID, mbid, canonicalName, aliases, genres, seq)
 	if err != nil {
 		return false, err
 	}
@@ -96,7 +101,7 @@ func (s *Store) PersistMusicBrainzArtistMetadata(ctx context.Context, artistID, 
 // PersistMusicBrainzArtistMetadataAtNextSequence allocates and applies the
 // metadata sequence under the library identity lock, preventing a later
 // operation from publishing a higher cursor before these writes commit.
-func (s *Store) PersistMusicBrainzArtistMetadataAtNextSequence(ctx context.Context, artistID, mbid, canonicalName string, aliases []string) (bool, error) {
+func (s *Store) PersistMusicBrainzArtistMetadataAtNextSequence(ctx context.Context, artistID, mbid, canonicalName string, aliases, genres []string) (bool, error) {
 	s.libraryIdentity.Lock()
 	defer s.libraryIdentity.Unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -108,7 +113,7 @@ func (s *Store) PersistMusicBrainzArtistMetadataAtNextSequence(ctx context.Conte
 	if err != nil {
 		return false, fmt.Errorf("persist MusicBrainz artist metadata: allocate change sequence: %w", err)
 	}
-	changed, err := persistMusicBrainzArtistMetadataTx(ctx, tx, artistID, mbid, canonicalName, aliases, seq)
+	changed, err := persistMusicBrainzArtistMetadataTx(ctx, tx, artistID, mbid, canonicalName, aliases, genres, seq)
 	if err != nil {
 		return false, err
 	}
@@ -120,7 +125,7 @@ func (s *Store) PersistMusicBrainzArtistMetadataAtNextSequence(ctx context.Conte
 
 // ApplyMusicBrainzArtistMetadata preserves the strict direct-call contract:
 // metadata and consolidation either both commit or both roll back.
-func (s *Store) ApplyMusicBrainzArtistMetadata(ctx context.Context, artistID, mbid, canonicalName string, aliases []string, seq int64) (bool, error) {
+func (s *Store) ApplyMusicBrainzArtistMetadata(ctx context.Context, artistID, mbid, canonicalName string, aliases, genres []string, seq int64) (bool, error) {
 	s.libraryIdentity.Lock()
 	defer s.libraryIdentity.Unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -128,7 +133,7 @@ func (s *Store) ApplyMusicBrainzArtistMetadata(ctx context.Context, artistID, mb
 		return false, fmt.Errorf("apply MusicBrainz artist metadata: begin transaction: %w", err)
 	}
 	defer tx.Rollback()
-	metadataChanged, err := persistMusicBrainzArtistMetadataTx(ctx, tx, artistID, mbid, canonicalName, aliases, seq)
+	metadataChanged, err := persistMusicBrainzArtistMetadataTx(ctx, tx, artistID, mbid, canonicalName, aliases, genres, seq)
 	if err != nil {
 		return false, err
 	}
@@ -224,7 +229,7 @@ func (s *Store) ConsolidateMusicBrainzArtistsAtNextSequence(ctx context.Context)
 	return changed, nil
 }
 
-func persistMusicBrainzArtistMetadataTx(ctx context.Context, tx *sql.Tx, artistID, mbid, canonicalName string, aliases []string, seq int64) (bool, error) {
+func persistMusicBrainzArtistMetadataTx(ctx context.Context, tx *sql.Tx, artistID, mbid, canonicalName string, aliases, genres []string, seq int64) (bool, error) {
 	canonicalName = strings.TrimSpace(canonicalName)
 	mbid = strings.TrimSpace(mbid)
 	if artistID == "" || mbid == "" || canonicalName == "" {
@@ -249,6 +254,39 @@ func persistMusicBrainzArtistMetadataTx(ctx context.Context, tx *sql.Tx, artistI
 		}
 		changed = changed || inserted
 	}
+	genres = uniqueArtistGenres(genres)
+	rows, err := tx.QueryContext(ctx, `SELECT name FROM artist_genres WHERE artist_id=? ORDER BY position`, artistID)
+	if err != nil {
+		return false, fmt.Errorf("persist MusicBrainz artist metadata: read genres: %w", err)
+	}
+	var oldGenres []string
+	for rows.Next() {
+		var genre string
+		if err := rows.Scan(&genre); err != nil {
+			rows.Close()
+			return false, fmt.Errorf("persist MusicBrainz artist metadata: scan genre: %w", err)
+		}
+		oldGenres = append(oldGenres, genre)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return false, fmt.Errorf("persist MusicBrainz artist metadata: iterate genres: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return false, fmt.Errorf("persist MusicBrainz artist metadata: close genres: %w", err)
+	}
+	genresChanged := !equalStrings(oldGenres, genres)
+	if genresChanged {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM artist_genres WHERE artist_id=?`, artistID); err != nil {
+			return false, fmt.Errorf("persist MusicBrainz artist metadata: replace genres: %w", err)
+		}
+		for position, genre := range genres {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO artist_genres(artist_id,position,name) VALUES(?,?,?)`, artistID, position, genre); err != nil {
+				return false, fmt.Errorf("persist MusicBrainz artist metadata: store genre %q: %w", genre, err)
+			}
+		}
+		changed = true
+	}
 	if renamed {
 		if _, err := tx.ExecContext(ctx, `UPDATE albums SET change_seq=? WHERE artist_id=? AND missing=0`, seq, artistID); err != nil {
 			return false, fmt.Errorf("persist MusicBrainz artist metadata: stamp renamed artist albums: %w", err)
@@ -257,10 +295,42 @@ func persistMusicBrainzArtistMetadataTx(ctx context.Context, tx *sql.Tx, artistI
 			return false, fmt.Errorf("persist MusicBrainz artist metadata: rename primary tracks: %w", err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE artists SET name=?,change_seq=CASE WHEN ? THEN ? ELSE change_seq END,musicbrainz_aliases_fetched_at=? WHERE artist_id=?`, canonicalName, changed, seq, time.Now().Unix(), artistID); err != nil {
+	fetchedAt := time.Now().Unix()
+	if _, err := tx.ExecContext(ctx, `UPDATE artists SET name=?,change_seq=CASE WHEN ? THEN ? ELSE change_seq END,
+		musicbrainz_aliases_fetched_at=?,musicbrainz_genres_fetched_at=? WHERE artist_id=?`, canonicalName, changed, seq, fetchedAt, fetchedAt, artistID); err != nil {
 		return false, fmt.Errorf("persist MusicBrainz artist metadata: update canonical artist: %w", err)
 	}
 	return changed, nil
+}
+
+func uniqueArtistGenres(genres []string) []string {
+	out := make([]string, 0, len(genres))
+	seen := make(map[string]struct{}, len(genres))
+	for _, genre := range genres {
+		genre = strings.TrimSpace(genre)
+		key := strings.ToLower(genre)
+		if genre == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, genre)
+	}
+	return out
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func nextScanSeqTx(ctx context.Context, tx *sql.Tx) (int64, error) {

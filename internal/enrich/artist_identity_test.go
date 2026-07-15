@@ -86,7 +86,7 @@ func TestArtistIdentityStageUsesMusicBrainzCacheAndPacing(t *testing.T) {
 		mu.Lock()
 		requests = append(requests, r.URL.RequestURI())
 		mu.Unlock()
-		if r.URL.Query().Get("inc") != "aliases" || r.URL.Query().Get("fmt") != "json" {
+		if r.URL.Query().Get("inc") != "aliases+genres" || r.URL.Query().Get("fmt") != "json" {
 			t.Errorf("artist identity query=%q", r.URL.RawQuery)
 		}
 		var index int
@@ -96,10 +96,12 @@ func TestArtistIdentityStageUsesMusicBrainzCacheAndPacing(t *testing.T) {
 			return
 		}
 		aliases := ""
+		genres := `,"genres":[]`
 		if index == 1 {
 			aliases = `,"aliases":[{"name":"Local Artist 1"}]`
+			genres = `,"genres":[{"name":"rock","count":2},{"name":"alternative rock","count":8}]`
 		}
-		_, _ = fmt.Fprintf(w, `{"id":"artist-mbid-%d","name":"Canonical Artist %d"%s}`, index, index, aliases)
+		_, _ = fmt.Fprintf(w, `{"id":"artist-mbid-%d","name":"Canonical Artist %d"%s%s}`, index, index, aliases, genres)
 	}))
 	defer srv.Close()
 	clock := &artistIdentityClock{now: now}
@@ -128,12 +130,19 @@ func TestArtistIdentityStageUsesMusicBrainzCacheAndPacing(t *testing.T) {
 		if err != nil || len(search.Artists) != 1 || search.Artists[0].MusicBrainzID != fmt.Sprintf("artist-mbid-%d", i) {
 			t.Fatalf("canonical artist %d search=%+v err=%v", i, search.Artists, err)
 		}
+		wantGenres := []string{}
+		if i == 1 {
+			wantGenres = []string{"alternative rock", "rock"}
+		}
+		if !equalTestStrings(search.Artists[0].Genres, wantGenres) {
+			t.Fatalf("canonical artist %d genres=%v", i, search.Artists[0].Genres)
+		}
 	}
 
 	var cached struct {
 		ID string `json:"id"`
 	}
-	if err := client.GetJSON(ctx, "/artist/artist-mbid-1?inc=aliases&fmt=json", &cached); err != nil || cached.ID != "artist-mbid-1" {
+	if err := client.GetJSON(ctx, "/artist/artist-mbid-1?fmt=json&inc=aliases%2Bgenres", &cached); err != nil || cached.ID != "artist-mbid-1" {
 		t.Fatalf("cached identity=%+v err=%v", cached, err)
 	}
 	e.RunAt(ctx, now)
@@ -146,6 +155,18 @@ func TestArtistIdentityStageUsesMusicBrainzCacheAndPacing(t *testing.T) {
 	if requestCount != 2 || len(sleeps) != 1 {
 		t.Fatalf("terminal aliases refetched: requests=%v sleeps=%v", requests, sleeps)
 	}
+}
+
+func equalTestStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestArtistIdentityStageLeavesTransientFailuresPending(t *testing.T) {

@@ -74,6 +74,10 @@ func TestAlbumArtworkLogsStageLocalProgressAndSuccess(t *testing.T) {
 			t.Fatalf("missing %q: %s", text, out)
 		}
 	}
+	identityAt, artworkAt := strings.Index(out, "musicbrainz resolution started"), strings.Index(out, "album artwork started")
+	if identityAt < 0 || artworkAt < 0 || identityAt > artworkAt {
+		t.Fatalf("identity must run before artwork on a fresh pass: %s", out)
+	}
 	for _, private := range []string{"Great Album", "The Band", mb.URL, caa.URL} {
 		if strings.Contains(out, private) {
 			t.Fatalf("log leaked %q: %s", private, out)

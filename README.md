@@ -20,6 +20,18 @@ canonical identity. Ambiguous and unmatched evidence remains in SQLite without c
 eligible after 7 days, transient failures after 24 hours, and unmatched albums after 30 days. A serialized batch emits
 at most one `library.changed`, and only if identity, credits, recordings, or artwork actually changed.
 
+Tags remain the primary metadata source, but a consistent filesystem layout gives the resolver additional evidence when
+album titles or disc numbers are malformed or missing:
+
+```text
+Artist/Album Title (YEAR)/track.flac
+Artist/Album Title (YEAR)/CD 01/track.flac
+Artist/Album Title (YEAR)/CD 02/track.flac
+```
+
+The year suffix is optional. Numbered `CD`, `Disc`, and `Disk` directories are recognized. BlitterServer uses this only
+when all tracks agree on the album directory and normal tag-based lookup fails; it does not rewrite the file tags.
+
 The self-hosted backend for [BlitterAmp](https://github.com/BlitterAmp/BlitterAmp). BlitterServer is the engine of your music world: it indexes your library, streams and transcodes your files, keeps taste and playback state consistent across your devices, and gives the BlitterAmp apps exactly one API to talk to — this one.
 
 It is **filesystem-first**: a directory of music files is a complete source, with metadata enriched from public sources and last.fm. Media servers (Plex, and later Jellyfin/Navidrome) are optional integrations, not dependencies. It runs standalone on a NAS or server, and is designed to also ship embedded inside the BlitterAmp desktop app as a managed engine.
