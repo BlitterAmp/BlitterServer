@@ -170,6 +170,18 @@ func (s *Store) UpsertTrack(ctx context.Context, kind string, m source.TrackMeta
 	var albumID string
 	if linkedAlbumID != "" && m.ReleaseMBID == "" {
 		albumID, err = linkedAlbumID, nil
+		if !preserveResolved {
+			var existingID string
+			lookupErr := s.db.QueryRowContext(ctx, `SELECT album_id FROM albums
+				WHERE artist_id=? AND title=? AND musicbrainz_release_id IS NULL AND album_id<>?`, artistID, m.Album, linkedAlbumID).Scan(&existingID)
+			switch {
+			case lookupErr == nil:
+				albumID = existingID
+			case errors.Is(lookupErr, sql.ErrNoRows):
+			case lookupErr != nil:
+				return fmt.Errorf("find corrected source-linked album: %w", lookupErr)
+			}
+		}
 	} else if m.ReleaseMBID != "" {
 		err = s.db.QueryRowContext(ctx, `SELECT album_id FROM albums WHERE musicbrainz_release_id = ?`, m.ReleaseMBID).Scan(&albumID)
 		if errors.Is(err, sql.ErrNoRows) && linkedAlbumID != "" {
@@ -207,6 +219,19 @@ func (s *Store) UpsertTrack(ctx context.Context, kind string, m source.TrackMeta
 	_, err = s.db.ExecContext(ctx, `UPDATE albums SET artist_id=CASE WHEN ? THEN artist_id WHEN ?='' AND musicbrainz_release_id IS NOT NULL THEN artist_id ELSE ? END, musicbrainz_release_id=COALESCE(?,musicbrainz_release_id), musicbrainz_release_group_id=COALESCE(?,musicbrainz_release_group_id), change_seq=CASE WHEN (NOT ? AND artist_id IS NOT ?) OR musicbrainz_release_id IS NOT COALESCE(?,musicbrainz_release_id) OR musicbrainz_release_group_id IS NOT COALESCE(?,musicbrainz_release_group_id) THEN ? ELSE change_seq END WHERE album_id=?`, preserveResolved, m.ReleaseMBID, artistID, nullStr(m.ReleaseMBID), nullStr(m.ReleaseGroupMBID), preserveResolved, artistID, nullStr(m.ReleaseMBID), nullStr(m.ReleaseGroupMBID), seq, albumID)
 	if err != nil {
 		return fmt.Errorf("update album identity: %w", err)
+	}
+	if !preserveResolved {
+		_, err = s.db.ExecContext(ctx, `UPDATE albums SET
+			title=?,year=COALESCE(?,year),
+			art_tried=CASE WHEN title IS NOT ? AND art_id IS NULL THEN 0 ELSE art_tried END,
+			art_tried_at=CASE WHEN title IS NOT ? AND art_id IS NULL THEN 0 ELSE art_tried_at END,
+			art_next_attempt_at=CASE WHEN title IS NOT ? AND art_id IS NULL THEN 0 ELSE art_next_attempt_at END,
+			art_miss_count=CASE WHEN title IS NOT ? AND art_id IS NULL THEN 0 ELSE art_miss_count END,
+			change_seq=CASE WHEN title IS NOT ? OR (? IS NOT NULL AND year IS NOT ?) THEN ? ELSE change_seq END
+			WHERE album_id=?`, m.Album, nullInt(m.Year), m.Album, m.Album, m.Album, m.Album, m.Album, nullInt(m.Year), nullInt(m.Year), seq, albumID)
+		if err != nil {
+			return fmt.Errorf("update source album metadata: %w", err)
+		}
 	}
 
 	_, err = s.db.ExecContext(ctx, `

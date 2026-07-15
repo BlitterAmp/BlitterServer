@@ -6,9 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -29,11 +26,6 @@ type MusicBrainzAlbum struct {
 	PathDiscs                                 map[string]int `json:"-"`
 	DueRank                                   int            `json:"-"`
 }
-
-var (
-	discDirectoryPattern = regexp.MustCompile(`(?i)^(?:cd|disc|disk)\s*0*([1-9]\d*)$`)
-	directoryYearPattern = regexp.MustCompile(`\s*[\(\[]\d{4}[\)\]]\s*$`)
-)
 
 type MusicBrainzCandidate struct {
 	ReleaseID, ReleaseGroupID, Title, ArtistCredit string
@@ -492,34 +484,10 @@ func musicBrainzPathEvidence(ctx context.Context, q contextQueryer, albumID stri
 }
 
 func pathAlbumCandidate(sourceKind, nativeID string) (string, int, bool) {
-	if sourceKind != "filesystem" || nativeID == "" || path.IsAbs(nativeID) {
+	if sourceKind != "filesystem" {
 		return "", 0, false
 	}
-	clean := path.Clean(nativeID)
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
-		return "", 0, false
-	}
-	parts := strings.Split(clean, "/")
-	if len(parts) < 3 {
-		return "", 0, false
-	}
-	parts = parts[:len(parts)-1]
-	disc := 0
-	if match := discDirectoryPattern.FindStringSubmatch(strings.TrimSpace(parts[len(parts)-1])); match != nil {
-		if len(parts) < 3 {
-			return "", 0, false
-		}
-		disc, _ = strconv.Atoi(match[1])
-		parts = parts[:len(parts)-1]
-	}
-	if len(parts) < 2 {
-		return "", 0, false
-	}
-	title := strings.TrimSpace(directoryYearPattern.ReplaceAllString(parts[len(parts)-1], ""))
-	if title == "" {
-		return "", 0, false
-	}
-	return title, disc, true
+	return source.FilesystemAlbumPathEvidence(nativeID)
 }
 
 func albumWithPathDiscs(album MusicBrainzAlbum) MusicBrainzAlbum {

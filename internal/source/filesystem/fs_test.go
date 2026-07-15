@@ -197,6 +197,24 @@ func TestScanFindsTaggedTracks(t *testing.T) {
 	}
 }
 
+func TestNormalizeAlbumTitleUsesMatchingStructuredPathForMalformedPrefix(t *testing.T) {
+	for _, test := range []struct {
+		name, album, nativeID, want string
+	}{
+		{"matching dated directory", ": Hit the Highway", "The Proclaimers/Hit the Highway (1994)/01.flac", "Hit the Highway"},
+		{"matching disc directory", ": Album", "Artist/Album/CD 01/01.flac", "Album"},
+		{"mismatched directory", ": Local Title", "Artist/Other Album/01.flac", ": Local Title"},
+		{"intentional leading colon", ": Album", "Artist/: Album/01.flac", ": Album"},
+		{"ordinary title", "Album", "Artist/Album/01.flac", "Album"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := normalizeAlbumTitle(test.album, test.nativeID); got != test.want {
+				t.Fatalf("normalizeAlbumTitle(%q, %q)=%q want %q", test.album, test.nativeID, got, test.want)
+			}
+		})
+	}
+}
+
 func TestOpenAndArt(t *testing.T) {
 	root := fixtureLibrary(t)
 	src, _ := New(root)

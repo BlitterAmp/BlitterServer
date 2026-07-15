@@ -750,6 +750,38 @@ func TestArtistGenresComeOnlyFromPersistedMusicBrainzMetadata(t *testing.T) {
 	}
 }
 
+func TestSourceLinkedUnmatchedAlbumAcceptsCorrectedTitleAndRetriesArtwork(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	meta := meta("Artist/Album/01.flac", "Track", "Artist", ": Album", "Rock", 2000, 1)
+	seq, _ := s.NextScanSeq(ctx)
+	if err := s.UpsertTrack(ctx, "filesystem", meta, "", seq); err != nil {
+		t.Fatal(err)
+	}
+	albums, _, _ := s.ListAlbums(ctx, "title", "", 10)
+	if len(albums) != 1 {
+		t.Fatalf("initial albums=%+v", albums)
+	}
+	if err := s.MarkAlbumArtAttempt(ctx, albums[0].AlbumID, ArtAttemptMiss, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	meta.Album = "Album"
+	meta.Version++
+	seq, _ = s.NextScanSeq(ctx)
+	if err := s.UpsertTrack(ctx, "filesystem", meta, "", seq); err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := s.GetAlbum(ctx, albums[0].AlbumID)
+	if err != nil || !found || got.Title != "Album" {
+		t.Fatalf("corrected album=%+v found=%v err=%v", got, found, err)
+	}
+	misses, next, err := s.ArtRetryState(ctx, false, albums[0].AlbumID)
+	if err != nil || misses != 0 || next.Unix() != 0 {
+		t.Fatalf("art retry misses=%d next=%v err=%v", misses, next, err)
+	}
+}
+
 func TestCursorPaginationWalksEverything(t *testing.T) {
 	s := indexFixture(t)
 	ctx := context.Background()
