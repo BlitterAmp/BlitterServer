@@ -26,6 +26,10 @@ The self-hosted backend service for **BlitterAmp** (the player app at `BlitterAm
 ## Non-negotiables
 
 - **Contract-first.** `api/openapi.yaml` is the source of truth. Iterate the spec BEFORE writing handlers; server stubs and the apps' TS client are generated from it. A behavior change that isn't in the spec is a bug.
+- **Backward-compatible 1.x API.** BlitterAmp desktop relies on the server `1.x` contract. Preserve compatibility for
+  all `1.x` releases and run `make compat-api` for contract changes. Do not implement, merge, version, or publish a
+  breaking API or major release without the user's explicit approval; report the incompatibility and affected clients
+  instead.
 - **TDD, no exceptions (user directive 2026-07-10).** Tests first for every endpoint and feature, then implementation: contract tests (generated client → running server), Go table tests against fake ports (`MusicSource`/Lidarr/last.fm) written before handlers, real-ffmpeg fixture tests (generated sine fixtures), env-gated live-source smoke tests.
 - **Go**, single static binary, embedded web admin assets (Svelte + DaisyUI SPA, node-built, `go:embed`). Single-tenant self-host (hosted/multi-tenant mode is explicitly shelved — don't build for it, don't preclude it: keep auth a real layer).
 - **Hexagonal.** Music sources (filesystem, Plex, …) are adapters behind the `MusicSource` port. Same for acquisition (Lidarr), scrobbling/discovery (last.fm), transcoding (ffmpeg). Domain logic never imports an adapter.

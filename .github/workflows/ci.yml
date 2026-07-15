@@ -8,12 +8,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - uses: actions/setup-go@v5
         with: { go-version-file: go.mod }
       - run: make lint-api
       - run: make gen-check
+      - run: make compat-api
       - run: make generate && git diff --exit-code
   web:
     runs-on: ubuntu-latest
