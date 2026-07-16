@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/BlitterAmp/BlitterServer/compare/v1.0.2...v1.1.0) (2026-07-16)
+
+
+### Features
+
+* publish Docker images with server releases ([#48](https://github.com/BlitterAmp/BlitterServer/issues/48)) ([b1fbdce](https://github.com/BlitterAmp/BlitterServer/commit/b1fbdce003531217a1e3bddf7503e16f76cb13d6))
+
 ## [1.0.2](https://github.com/BlitterAmp/BlitterServer/compare/v1.0.1...v1.0.2) (2026-07-15)
 
 
