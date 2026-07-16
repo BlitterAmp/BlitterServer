@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.1](https://github.com/BlitterAmp/BlitterServer/compare/v1.1.0...v1.1.1) (2026-07-16)
+
+
+### Bug Fixes
+
+* normalize Docker Hub overview verification ([#52](https://github.com/BlitterAmp/BlitterServer/issues/52)) ([197de8f](https://github.com/BlitterAmp/BlitterServer/commit/197de8fd506704709ee93bf85f03defc7601daf8))
+* sync Docker Hub overview from README ([#50](https://github.com/BlitterAmp/BlitterServer/issues/50)) ([a62d0d7](https://github.com/BlitterAmp/BlitterServer/commit/a62d0d7e49d8fa23f364eac0623d74970a594cf3))
+
 ## [1.1.0](https://github.com/BlitterAmp/BlitterServer/compare/v1.0.2...v1.1.0) (2026-07-16)
 
 
