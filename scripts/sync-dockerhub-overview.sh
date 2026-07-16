@@ -33,7 +33,8 @@ response="$(curl --fail --silent --show-error \
   "https://hub.docker.com/v2/repositories/$username/$repository")"
 
 remote_overview="$(jq -er '.full_description' <<<"$response")"
-if ! cmp -s "$readme" <(printf '%s' "$remote_overview"); then
+local_overview="$(<"$readme")"
+if [ "$remote_overview" != "$local_overview" ]; then
   echo "Docker Hub returned an overview that differs from $readme" >&2
   exit 1
 fi
