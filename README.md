@@ -161,7 +161,8 @@ The server's distribution version is independent from the OpenAPI contract versi
 build an exact published BlitterServer tag rather than consuming the server's moving `main` branch.
 
 The release workflow also publishes the version without the `v` prefix and `latest` to Docker Hub, for example
-`matjam/blitterserver:1.0.3` and `matjam/blitterserver:latest`.
+`matjam/blitterserver:1.0.3` and `matjam/blitterserver:latest`. It also synchronizes this README to the Docker Hub
+overview after the image is published.
 
 ## API
 
