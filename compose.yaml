@@ -1,0 +1,25 @@
+services:
+  blitterserver:
+    image: matjam/blitterserver:${BLITTERSERVER_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      - "8484:8484"
+    environment:
+      BLITTER_ADMIN_PASSWORD: ${BLITTER_ADMIN_PASSWORD:?Set BLITTER_ADMIN_PASSWORD to at least 10 characters}
+      BLITTER_MUSIC_DIR: /music
+    volumes:
+      - blitterserver-data:/data
+      - ${MUSIC_DIR:?Set MUSIC_DIR to the host music directory}:/music:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8484/v1/ping"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  blitterserver-data:

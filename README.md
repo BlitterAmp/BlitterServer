@@ -63,6 +63,62 @@ make build
 
 Then open `http://127.0.0.1:8484/admin/` for the admin console (first run walks you through creating the admin password) and `http://127.0.0.1:8484/docs/` for the interactive API reference. Logs go to stdout and to a rotating file under the data directory.
 
+### Docker Compose
+
+The production image is published as [`matjam/blitterserver`](https://hub.docker.com/r/matjam/blitterserver) for
+`linux/amd64` and `linux/arm64`. It includes ffmpeg and the embedded admin console, and runs as non-root UID/GID
+`10001`.
+
+Save the repository's [`compose.yaml`](compose.yaml), then set the required values and start it:
+
+```sh
+export BLITTER_ADMIN_PASSWORD='choose-a-password-of-at-least-10-characters'
+export MUSIC_DIR='/absolute/path/to/your/music'
+docker compose up -d
+```
+
+The compose file is ready to copy as-is:
+
+```yaml
+services:
+  blitterserver:
+    image: matjam/blitterserver:${BLITTERSERVER_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      - "8484:8484"
+    environment:
+      BLITTER_ADMIN_PASSWORD: ${BLITTER_ADMIN_PASSWORD:?Set BLITTER_ADMIN_PASSWORD to at least 10 characters}
+      BLITTER_MUSIC_DIR: /music
+    volumes:
+      - blitterserver-data:/data
+      - ${MUSIC_DIR:?Set MUSIC_DIR to the host music directory}:/music:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8484/v1/ping"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  blitterserver-data:
+```
+
+`BLITTER_ADMIN_PASSWORD` must be at least 10 characters. It initializes the administrator only when the data volume
+has no existing admin; later container starts never replace the stored password. Likewise, `BLITTER_MUSIC_DIR`
+configures `/music` only when no source exists and never replaces an existing source. Invalid values fail a fresh
+startup with a clear error, and the password is never printed.
+
+The named volume contains the SQLite database, logs, artwork, and caches. Docker creates it with the image's
+UID/GID `10001`; if you replace it with a host bind mount, make that directory writable by `10001:10001`. The music
+mount is read-only.
+
+BlitterServer serves plain HTTP by default. Do not expose port 8484 directly to the public internet; put it behind a
+TLS-terminating reverse proxy or access it through a private network/tailnet.
+
 ### Configuration
 
 Precedence, highest to lowest: **flags > environment > config file > defaults**.
@@ -74,6 +130,8 @@ Precedence, highest to lowest: **flags > environment > config file > defaults**.
 | `--data-dir` | `BLITTER_DATA_DIR` | `$XDG_DATA_HOME/blitterserver`, else `~/.local/share/blitterserver` | State directory (SQLite database, logs, caches) |
 | `--log-level` | `BLITTER_LOG_LEVEL` | `info` | `debug`\|`info`\|`warn`\|`error` |
 | (file only) | `BLITTER_LOG_FORMAT` | `text` | `text`\|`json` |
+| (none) | `BLITTER_ADMIN_PASSWORD` | (none) | First-start-only admin password (minimum 10 characters) |
+| (none) | `BLITTER_MUSIC_DIR` | (none) | First-start-only filesystem source path |
 
 Example config file:
 
@@ -96,12 +154,14 @@ log:
 [GitHub releases](https://github.com/BlitterAmp/BlitterServer/releases/latest) provide standalone archives for Linux
 and macOS on amd64 and arm64, plus Windows amd64. Each archive includes the server, README, and license; verify downloads
 against the attached `SHA256SUMS`. Release binaries include the admin console and report their exact version through
-`/v1/ping`. `ffmpeg` remains an optional external runtime dependency for transcoding.
+`/v1/ping`. `ffmpeg` remains an optional external runtime dependency for archive/source installs and is bundled in
+the Docker image.
 
 The server's distribution version is independent from the OpenAPI contract version. BlitterAmp desktop releases pin and
 build an exact published BlitterServer tag rather than consuming the server's moving `main` branch.
 
-Docker packaging remains planned.
+The release workflow also publishes the version without the `v` prefix and `latest` to Docker Hub, for example
+`matjam/blitterserver:1.0.3` and `matjam/blitterserver:latest`.
 
 ## API
 

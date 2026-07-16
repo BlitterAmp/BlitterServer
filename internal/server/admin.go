@@ -13,11 +13,10 @@ import (
 
 // Settings keys owned by the admin surface.
 const (
-	settingAdminPasswordHash = "admin_password_hash"
-	settingCanonicalURL      = "canonical_url"
-	settingTranscodeFormat   = "transcode_default_format"
-	settingTranscodeBitrate  = "transcode_default_bitrate_kbps"
-	settingArtifactCacheMax  = "artifact_cache_max_bytes"
+	settingCanonicalURL     = "canonical_url"
+	settingTranscodeFormat  = "transcode_default_format"
+	settingTranscodeBitrate = "transcode_default_bitrate_kbps"
+	settingArtifactCacheMax = "artifact_cache_max_bytes"
 )
 
 const defaultArtifactCacheMaxBytes = int64(10) << 30 // 10 GiB
@@ -27,23 +26,16 @@ func badRequest(code string) error {
 }
 
 func (s *Server) AdminSetup(ctx context.Context, req api.AdminSetupRequestObject) (api.AdminSetupResponseObject, error) {
-	if len(req.Body.Password) < 10 {
+	if err := auth.ValidateAdminPassword(req.Body.Password); err != nil {
 		return nil, badRequest("password_too_short")
 	}
-	done, err := s.st.SetupComplete(ctx)
+	initialized, err := s.st.InitializeAdminPassword(ctx, req.Body.Password)
 	if err != nil {
 		return nil, err
 	}
-	if done {
+	if !initialized {
 		return api.AdminSetup409ApplicationProblemPlusJSONResponse(
 			problem(409, "Conflict", "setup_already_complete")), nil
-	}
-	hash, err := auth.HashPassword(req.Body.Password)
-	if err != nil {
-		return nil, err
-	}
-	if err := s.st.SetSetting(ctx, settingAdminPasswordHash, hash); err != nil {
-		return nil, err
 	}
 	return api.AdminSetup204Response{}, nil
 }

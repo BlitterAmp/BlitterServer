@@ -1,0 +1,7 @@
+.git
+.github
+.DS_Store
+blitterserver
+dist
+web/admin/dist
+web/admin/node_modules
