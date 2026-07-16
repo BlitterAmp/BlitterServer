@@ -105,6 +105,10 @@ jobs:
             VERSION=${{ steps.image.outputs.version }}
             REVISION=${{ needs.release-please.outputs.sha }}
             CREATED=${{ steps.image.outputs.created }}
+      - name: Update Docker Hub overview
+        env:
+          DOCKER_TOKEN: ${{ secrets.DOCKER_TOKEN }}
+        run: bash scripts/sync-dockerhub-overview.sh README.md
       - name: Upload and publish release
         env:
           GH_TOKEN: ${{ github.token }}
