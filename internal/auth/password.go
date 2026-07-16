@@ -6,11 +6,26 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"strings"
 
 	"golang.org/x/crypto/argon2"
 )
+
+// MinAdminPasswordLength is the minimum accepted by first-run setup.
+const MinAdminPasswordLength = 10
+
+// ErrAdminPasswordTooShort identifies an invalid first-run admin password.
+var ErrAdminPasswordTooShort = errors.New("admin password must be at least 10 characters")
+
+// ValidateAdminPassword applies the first-run admin credential policy.
+func ValidateAdminPassword(password string) error {
+	if len(password) < MinAdminPasswordLength {
+		return ErrAdminPasswordTooShort
+	}
+	return nil
+}
 
 // Interactive-login parameters per the argon2id RFC 9106 low-memory profile.
 const (

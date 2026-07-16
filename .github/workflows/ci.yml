@@ -38,3 +38,14 @@ jobs:
       # CI must not skip them).
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
       - run: make check
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Compose configuration
+        env:
+          BLITTER_ADMIN_PASSWORD: ci-password-at-least-10-characters
+          MUSIC_DIR: /tmp/music
+        run: docker compose config --quiet
+      - name: Build container image
+        run: docker build --build-arg VERSION=ci --tag blitterserver:ci .

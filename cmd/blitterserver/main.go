@@ -67,6 +67,10 @@ func run() error {
 	defer st.Close()
 
 	mgr := library.NewManager(st, cfg.DataDir)
+	if err := bootstrapFromEnvironment(context.Background(), st, mgr, os.Getenv); err != nil {
+		mgr.Close()
+		return err
+	}
 	srv := httpserver.New(cfg.Listen, st, mgr, cfg.DataDir, version)
 	// Registered after the store defer, so workers always stop/join first even
 	// when ListenAndServe fails before the signal-driven Shutdown path.
